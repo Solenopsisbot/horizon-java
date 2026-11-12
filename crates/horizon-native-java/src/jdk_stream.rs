@@ -150,7 +150,7 @@ fn floating(value: &Value) -> Option<f64> {
 
 /// `Comparable.compareTo` for the values whose natural order the JDK defines
 /// and the runtime can read.
-fn natural_compare(a: &Value, b: &Value) -> Result<i32, NativeError> {
+pub(crate) fn natural_compare(a: &Value, b: &Value) -> Result<i32, NativeError> {
     if matches!(a, Value::Ref(None)) || matches!(b, Value::Ref(None)) {
         return Err(NativeError::UncaughtException {
             class: "java/lang/NullPointerException".into(),
@@ -221,7 +221,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     ) -> Result<i32, NativeError> {
         // `sorted(null)` and `List.sort(null)` mean natural order.
         let Some(marker) = expect_ref(comparator).cloned() else {
-            return natural_compare(a, b);
+            return self.natural_order(a, b);
         };
         let Some(body) = marker.strip_prefix(COMPARATOR_PREFIX) else {
             let result = self.apply_callback(comparator, &[a.clone(), b.clone()])?;
@@ -234,7 +234,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         };
         let (kind, rest) = body.split_once(':').unwrap_or((body, ""));
         match kind {
-            "natural" => natural_compare(a, b),
+            "natural" => self.natural_order(a, b),
             "reverse" => {
                 let inner = operands(rest)?
                     .into_iter()
@@ -249,7 +249,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                     .unwrap_or(Value::Ref(None));
                 let left = self.apply_callback(&key, std::slice::from_ref(a))?;
                 let right = self.apply_callback(&key, std::slice::from_ref(b))?;
-                natural_compare(&left, &right)
+                self.natural_order(&left, &right)
             }
             "keycmp" => {
                 let parts = operands(rest)?;
@@ -274,9 +274,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 let (ka, va) = super::map_entry_parts(a)?;
                 let (kb, vb) = super::map_entry_parts(b)?;
                 if kind == "entry-key" {
-                    natural_compare(&ka, &kb)
+                    self.natural_order(&ka, &kb)
                 } else {
-                    natural_compare(&va, &vb)
+                    self.natural_order(&va, &vb)
                 }
             }
             _ => Err(NativeError::Metadata(format!(

@@ -51,6 +51,7 @@ mod guava_model;
 mod hash_map_order;
 mod heap;
 mod hook_shapes;
+mod jar_equality;
 mod jar_operands;
 mod jar_text;
 mod java_format;
@@ -19323,6 +19324,12 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Ok(Some(value));
             }
+            // `Mode::name`/`Mode::ordinal`: the enum model the direct call uses.
+            if let Some(value) =
+                self.invoke_enum_member(&callback.target, Some(&receiver), &rest)?
+            {
+                return Ok(Some(value));
+            }
             if callback.target.name == "stream"
                 && callback.target.descriptor == "()Ljava/util/stream/Stream;"
                 && is_collection_owner(&callback.target.owner)
@@ -23957,6 +23964,14 @@ impl<H: Host> Runtime<'_, H> {
                             AnchorOutcome::Suppress => Some(Value::default_for(&r.descriptor)),
                             AnchorOutcome::Normal => None,
                         };
+                    // A record key a host collection looks up by its own
+                    // `equals` (`jar_equality.rs`).
+                    if anchor_replacement.is_none() && receiver != Some(Value::Ref(None)) {
+                        invoke_or_catch!(
+                            at,
+                            self.canonicalize_equal_key(&r, op, receiver.as_ref(), &mut args)
+                        );
+                    }
                     // Whether the answer is a jar method body's own `areturn`
                     // (which may legitimately be `null`) rather than a host or
                     // model answer.
