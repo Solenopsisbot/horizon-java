@@ -286,11 +286,15 @@ pub(crate) fn player_member(
 
 /// The id a registry key argument names: `registry/<id>` (a `Registries`
 /// static) or a `ResourceKey` in `minecraft:root`.
-fn registry_key(value: &Value) -> Option<&str> {
-    if let Some(("minecraft:root", id)) = crate::host_ids::resource_key_parts(value) {
+fn registry_key(value: &Value) -> Option<String> {
+    if let Some((registry, id)) = crate::host_ids::resource_key_parts(value)
+        && registry == "minecraft:root"
+    {
         return Some(id);
     }
-    expect_ref(value)?.strip_prefix("registry/")
+    expect_ref(value)?
+        .strip_prefix("registry/")
+        .map(str::to_owned)
 }
 
 /// The `namespace:path` an `Identifier` argument names.
@@ -377,7 +381,7 @@ pub(crate) fn answer(
                 "lookupOrThrow",
                 "(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/HolderLookup$RegistryLookup;",
             ) => match args.first().and_then(registry_key) {
-                Some(id) if facts.registries.contains_key(id) => {
+                Some(id) if facts.registries.contains_key(&id) => {
                     Ok(marker(format!("{REGISTRY}{id}")))
                 }
                 _ => refuse(r),

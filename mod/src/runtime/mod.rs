@@ -2780,6 +2780,13 @@ pub struct StdHost {
     /// constructors were public before 1.21), by the object's `class#n`
     /// marker. A constructor answers `void`, so this is where the id lives.
     identifier_objects: BTreeMap<String, String>,
+    /// What each `DeferredRegister.create` was made from (registry key,
+    /// namespace), by the register's marker; `None` when two registers share
+    /// the marker or the namespace was not text (`host_ids.rs`).
+    deferred_registers: BTreeMap<String, Option<(Value, String)>>,
+    /// The registry key and validated id each `DeferredRegister.register`
+    /// holder names, by the holder's text; `None` when two share the text.
+    holder_ids: BTreeMap<String, Option<(Value, String)>>,
     /// The id each `new LevelResource(id)` a jar built carries
     /// (`facade_server.rs`), by the object's marker.
     level_resources: BTreeMap<String, String>,
@@ -2957,6 +2964,8 @@ impl StdHost {
             fabric_entrypoint_containers: Vec::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
+            deferred_registers: BTreeMap::new(),
+            holder_ids: BTreeMap::new(),
             level_resources: BTreeMap::new(),
             saved_data: facade_saved_data::SavedDataState::default(),
             neoforge_attachments: neoforge_attachments::AttachmentState::default(),
@@ -4961,9 +4970,7 @@ impl Host for StdHost {
                 let named = args.first().and_then(|registry| {
                     host_ids::identifier_key(registry)
                         .map(str::to_owned)
-                        .or_else(|| {
-                            host_ids::resource_key_parts(registry).map(|(_, id)| id.to_owned())
-                        })
+                        .or_else(|| host_ids::resource_key_parts(registry).map(|(_, id)| id))
                 });
                 let named = named.map(|id| format!("registry/{id}"));
                 let registry = named.as_deref().unwrap_or_else(|| {
@@ -4975,9 +4982,25 @@ impl Host for StdHost {
                     .get(1)
                     .and_then(expect_ref)
                     .map_or("default", String::as_str);
-                Ok(Value::Ref(Some(format!(
-                    "deferred-register/{registry}/{namespace}"
-                ))))
+                let marker = format!("deferred-register/{registry}/{namespace}");
+                // `create(Identifier, ns)` is `createRegistryKey(id)`, the
+                // key `Registries.X` is.
+                let registry_key = match args.first() {
+                    Some(id) if host_ids::identifier_key(id).is_some() => {
+                        Value::Ref(Some(format!(
+                            "registry/{}",
+                            host_ids::identifier_key(id).unwrap_or_default()
+                        )))
+                    }
+                    Some(key) => key.clone(),
+                    None => Value::Ref(None),
+                };
+                self.record_deferred_register(
+                    &marker,
+                    &registry_key,
+                    args.get(1).and_then(expect_ref),
+                );
+                Ok(Value::Ref(Some(marker)))
             }
             ("net/fabricmc/fabric/api/event/EventFactory", "createArrayBacked", descriptor)
                 if descriptor.ends_with("Lnet/fabricmc/fabric/api/event/Event;") =>
@@ -8841,7 +8864,7 @@ impl Host for StdHost {
                         "()Lnet/minecraft/resources/Identifier;"
                         | "()Lnet/minecraft/resources/ResourceLocation;",
                     ) if !tag => host_ids::resource_key_parts(receiver)
-                        .map(|(registry, _)| host_ids::identifier_of_text(registry)),
+                        .map(|(registry, _)| host_ids::identifier_of_text(&registry)),
                     // `TagKey.registry()`/`ResourceKey.registryKey()`: the
                     // registry key (`Registries.X`).
                     ("registry", "()Lnet/minecraft/resources/ResourceKey;") if tag => {
@@ -9192,12 +9215,16 @@ impl Host for StdHost {
                     .first()
                     .and_then(expect_ref)
                     .map_or("entry", String::as_str);
-                let key = format!(
-                    "{}/{}",
-                    expect_ref(receiver)
-                        .map_or("deferred-register/registry/default", String::as_str,),
-                    id
-                );
+                let register = expect_ref(receiver)
+                    .map_or("deferred-register/registry/default", String::as_str);
+                // `Identifier.fromNamespaceAndPath(namespace, name)` (Forge:
+                // `new ResourceLocation(modid, name)`): bad text throws here.
+                let forge = r.owner.starts_with("net/minecraftforge/");
+                let made = self.deferred_register_id(forge, register, id)?;
+                let key = format!("{register}/{id}");
+                if let Some((registry_key, entry_id)) = made {
+                    self.record_holder_id(&key, registry_key, &entry_id);
+                }
                 let value = Value::Ref(Some(format!("registered/{key}")));
                 self.registrations.push(RegistryEntry {
                     registry: expect_ref(receiver)
@@ -9360,7 +9387,7 @@ impl Host for StdHost {
                 // handle naming the registry.
                 let registry_key = Self::argument(r, args, 0)?;
                 let registry = match host_ids::resource_key_parts(registry_key) {
-                    Some((_, location)) => location.to_owned(),
+                    Some((_, location)) => location,
                     None => expect_ref(registry_key)
                         .map_or("minecraft:unknown", String::as_str)
                         .to_owned(),
@@ -10406,6 +10433,12 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         | "java/util/NoSuchElementException"
         | "java/util/ConcurrentModificationException"
         | "java/io/UncheckedIOException" => "java/lang/RuntimeException",
+        // The game's own: what `Identifier`'s factories throw (26.3
+        // `IdentifierException`, and `ResourceLocationException` before the
+        // 1.21 rename) extends `RuntimeException`.
+        "net/minecraft/IdentifierException" | "net/minecraft/ResourceLocationException" => {
+            "java/lang/RuntimeException"
+        }
         "java/lang/NumberFormatException"
         | "java/nio/charset/UnsupportedCharsetException"
         | "java/nio/charset/IllegalCharsetNameException" => "java/lang/IllegalArgumentException",

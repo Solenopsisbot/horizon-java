@@ -36,9 +36,32 @@ fn raise(owner: &str, message: String) -> NativeError {
     };
     NativeError::UncaughtException {
         class: class.into(),
-        message: Some(message),
+        message: Some(escape_java(&message)),
         frame: None,
     }
+}
+
+/// commons-lang3 `StringEscapeUtils.escapeJava`, which the exception's
+/// constructor applies to its message (26.3 `IdentifierException`): `"` and
+/// `\` escaped, `\b \t \n \f \r` by name, and every other UTF-16 unit
+/// below `0x20` or above `0x7f` as `\uXXXX` (upper-case hex, a surrogate pair
+/// as two).
+fn escape_java(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for unit in text.encode_utf16() {
+        match unit {
+            0x22 => out.push_str("\\\""),
+            0x5c => out.push_str("\\\\"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            0x20..=0x7f => out.push(char::from(unit as u8)),
+            _ => out.push_str(&format!("\\u{unit:04X}")),
+        }
+    }
+    out
 }
 
 fn valid_namespace_char(c: char) -> bool {
@@ -58,7 +81,7 @@ fn is_valid_path(path: &str) -> bool {
 }
 
 /// `assertValidNamespace` then `assertValidPath`, with their messages.
-fn checked(owner: &str, namespace: &str, path: &str) -> Result<Value, NativeError> {
+pub(crate) fn checked(owner: &str, namespace: &str, path: &str) -> Result<Value, NativeError> {
     if !is_valid_namespace(namespace) {
         let word = if owner.ends_with("ResourceLocation") {
             "location"
@@ -134,6 +157,33 @@ pub(crate) fn invoke_static(
 ) -> Option<Result<Value, NativeError>> {
     if !owns(&r.owner) {
         return None;
+    }
+    // A `null` the factory dereferences: Java 25's helpful message names
+    // the 26.3 method's own parameter (`bySeparator(identifier, ..)`,
+    // `isValidNamespace(namespace)` via `namespace.equals("..")`,
+    // `isValidPath(path)` via `path.length()`).
+    let null = |index: usize| matches!(args.get(index), Some(Value::Ref(None)));
+    let npe = |call: &str, name: &str| {
+        Some(Err(NativeError::UncaughtException {
+            class: "java/lang/NullPointerException".into(),
+            message: Some(format!(
+                "Cannot invoke \"{call}\" because \"{name}\" is null"
+            )),
+            frame: None,
+        }))
+    };
+    match r.name.as_str() {
+        "parse" | "tryParse" | "bySeparator" | "tryBySeparator" if null(0) => {
+            return npe("String.indexOf(int)", "identifier");
+        }
+        "fromNamespaceAndPath" | "tryBuild" if null(0) => {
+            return npe("String.equals(Object)", "namespace");
+        }
+        "fromNamespaceAndPath" | "tryBuild" if null(1) => {
+            return npe("String.length()", "path");
+        }
+        "withDefaultNamespace" if null(0) => return npe("String.length()", "path"),
+        _ => {}
     }
     let text = |index: usize| args.get(index).map(expect_string).unwrap_or("");
     let char_arg = |index: usize| match args.get(index) {

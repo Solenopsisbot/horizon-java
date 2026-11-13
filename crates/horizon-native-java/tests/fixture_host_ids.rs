@@ -12,7 +12,9 @@ mod javac_fixture;
 use horizon_native_java::StdHost;
 
 /// `java` (Temurin 25.0.5) running this `Probe`, compiled with `javac
-/// --release 21` against the real 26.3 `server-game.jar` and its libraries,
+/// --release 21` against the real 26.3 `server-game.jar` and its libraries
+/// plus NeoForge 26.3.0.101's universal jar and its libraries (`main`, left
+/// out here, ran `Bootstrap.bootStrap()` first: a `DeferredHolder` needs it),
 /// printed these lines, the same on two runs; pasted verbatim. `keyHash` and
 /// `tagHash` are identity hashes (they changed when the probe changed): no
 /// run can reproduce them, so the interpreter counts them (tests below).
@@ -29,12 +31,17 @@ types=mc:stonetruefalsetruefalsetrue,id:a:xtruefalsetruefalsefalse,key:a:kfalset
 sorts=[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]|[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]|[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]|{a:a=3, b:a=0, a:b=1, c:b=6, c:b/c=5, minecraft:stone=2, z:stone=4}|a:az:stone3true|[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]true|[z:stone, minecraft:stone, c:b/c, c:b, a:b, b:a, a:a]|z:stonea:a\n\
 keySort=CCE\n\
 collections=4,truetruetruetrue4|truetrue[b:y]|onetrue{a:x=one}|true5true1|{a:x=ResourceKey[minecraft:block / a:k], b:k=TagKey[minecraft:item / a:t]}TagKey[minecraft:item / a:t]true|a:x=3|101057,3127,[a:x]\n\
+holders=demo:thing|ResourceKey[minecraft:item / demo:thing]|truetruefalsefalse|demo:other/path_1.x-y|other/path_1.x-y|IdentifierException:Non [a-z0-9_.-] character in namespace of identifier: x:y:z|IdentifierException:Non [a-z0-9/._-] character in path of location: x:y:z|IdentifierException:Non [a-z0-9_.-] character in namespace of identifier: Bad Mod:ok|IdentifierException:Non [a-z0-9/._-] character in path of location: ok:UPPER|case|IdentifierException:Non [a-z0-9_.-] character in namespace of identifier: x/y:z|IdentifierException:Non [a-z0-9/._-] character in path of location: x:y,z#w?\n\
+holderSeparators=trueIdentifierException:Non [a-z0-9/._-] character in path of location: a:b:c,truea:b/c,trueIdentifierException:Non [a-z0-9/._-] character in path of location: a:b|c,trueIdentifierException:Non [a-z0-9/._-] character in path of location: a:b,c,trueIdentifierException:Non [a-z0-9/._-] character in path of location: a:b#c,trueIdentifierException:Non [a-z0-9/._-] character in path of location: a:b?c,trueIdentifierException:Non [a-z0-9/._-] character in path of location: a:b\\\\c,trueIdentifierException:Non [a-z0-9/._-] character in path of location: a:b c,\n\
+tagRegistries=falsefalsefalse|falsetruetrue|trueResourceKey[minecraft:item / minecraft:block]|TagKey[minecraft:block / a:t]|a:t|truetruefalse\n\
+exceptions=E:net.minecraft.IdentifierException:Non [a-z0-9_.-] character in namespace of identifier: A:btrue|T:IdentifierException|R:Non [a-z0-9/._-] character in path of location: a:B|IdentifierException:Non [a-z0-9/._-] character in path of location: a:q\\\"\\\\\\t\\u00E9\\uD83D\\uDE00\u{7f}\\u0001/|IdentifierException:Non [a-z0-9_.-] character in namespace of identifier: \\u00C9:x\n\
+nulls=NullPointerException:Cannot invoke \"String.indexOf(int)\" because \"identifier\" is null|NullPointerException:Cannot invoke \"String.indexOf(int)\" because \"identifier\" is null|NullPointerException:Cannot invoke \"String.equals(Object)\" because \"namespace\" is null|NullPointerException:Cannot invoke \"String.length()\" because \"path\" is null|NullPointerException:Cannot invoke \"String.length()\" because \"path\" is null|NullPointerException:Cannot invoke \"String.equals(Object)\" because \"namespace\" is null\n\
 identity=truetruetruetruetrue|326\n\
 identifierIdentity=false\n\
 identifierIdentityMap=2\n\
 blockItemIdentity=false\n\
-keyHash=1786364562\n\
-tagHash=-1871552740\n\
+keyHash=362479845\n\
+tagHash=1497761092\n\
 ";
 
 const IDENTIFIER_STUB: &str = r#"package net.minecraft.resources;
@@ -42,6 +49,9 @@ const IDENTIFIER_STUB: &str = r#"package net.minecraft.resources;
 public final class Identifier implements Comparable<Identifier> {
     public static Identifier fromNamespaceAndPath(String n, String p) { return null; }
     public static Identifier parse(String id) { return null; }
+    public static Identifier tryParse(String id) { return null; }
+    public static Identifier withDefaultNamespace(String path) { return null; }
+    public static Identifier tryBuild(String n, String p) { return null; }
     public String getNamespace() { return null; }
     public String getPath() { return null; }
     public int compareTo(Identifier o) { return 0; }
@@ -77,6 +87,7 @@ import net.minecraft.resources.ResourceKey;
 public final class TagKey<T> {
     public static <T> TagKey<T> create(ResourceKey<?> registry, Identifier id) { return null; }
     public Identifier location() { return null; }
+    public ResourceKey<?> registry() { return null; }
     public boolean isFor(ResourceKey<?> registry) { return false; }
 }
 "#;
@@ -95,6 +106,31 @@ public final class BlockItemId {
 }
 "#;
 
+const HOLDER_STUB: &str = r#"package net.minecraft.core;
+
+public interface Holder<T> {
+    java.util.Optional<net.minecraft.resources.ResourceKey<T>> unwrapKey();
+}
+"#;
+
+const DEFERRED_REGISTER_STUB: &str = r#"package net.neoforged.neoforge.registries;
+
+import java.util.function.Supplier;
+import net.minecraft.resources.ResourceKey;
+
+public class DeferredRegister<T> {
+    public static <T> DeferredRegister<T> create(ResourceKey<?> registry, String namespace) { return null; }
+    public <I extends T> DeferredHolder<T, I> register(String name, Supplier<? extends I> value) { return null; }
+}
+"#;
+
+const DEFERRED_HOLDER_STUB: &str = r#"package net.neoforged.neoforge.registries;
+
+public class DeferredHolder<R, T extends R> {
+    public net.minecraft.resources.Identifier getId() { return null; }
+}
+"#;
+
 /// The probe the oracle ran (its `main` left out).
 const PROBE: &str = r##"package demo;
 
@@ -104,6 +140,8 @@ import net.minecraft.references.BlockItemId;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.tags.TagKey;
+import net.neoforged.neoforge.registries.DeferredHolder;
+import net.neoforged.neoforge.registries.DeferredRegister;
 
 public final class Probe {
     static Identifier id(String text) { return Identifier.parse(text); }
@@ -295,6 +333,91 @@ public final class Probe {
             + "|" + List.of(id("a:x"), id("b:y")).hashCode() + "," + Set.of(id("a:x")).hashCode() + "," + Arrays.asList(id("a:x")).toString();
     }
 
+    static String thrown(java.util.function.Supplier<Object> body) {
+        try {
+            return String.valueOf(body.get());
+        } catch (RuntimeException e) {
+            return e.getClass().getSimpleName() + ":" + e.getMessage();
+        }
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static DeferredHolder holder(String namespace, String name) {
+        DeferredRegister register = DeferredRegister.create(Registries.ITEM, namespace);
+        return register.register(name, () -> "value");
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    static Object key(DeferredHolder holder) {
+        return ((net.minecraft.core.Holder) holder).unwrapKey().get();
+    }
+
+    /** NeoForge holders: register builds the id with Identifier.fromNamespaceAndPath, so bad text throws. */
+    @SuppressWarnings("rawtypes")
+    public static String holders() {
+        DeferredHolder a = holder("demo", "thing");
+        DeferredHolder b = holder("demo", "thing");
+        DeferredHolder c = holder("demo", "other/path_1.x-y");
+        return a.getId() + "|" + key(a) + "|" + a.getId().equals(b.getId()) + (key(a) == key(b))
+            + a.getId().equals(c.getId()) + (key(a) == key(c)) + "|" + c.getId() + "|" + c.getId().getPath()
+            + "|" + thrown(() -> holder("x:y", "z").getId()) + "|" + thrown(() -> holder("x", "y:z").getId())
+            + "|" + thrown(() -> holder("Bad Mod", "ok")) + "|" + thrown(() -> holder("ok", "UPPER|case"))
+            + "|" + thrown(() -> holder("x/y", "z")) + "|" + thrown(() -> holder("x", "y,z#w?"));
+    }
+
+    /** Names carrying every separator never make an id, so never alias a real holder. */
+    public static String holderSeparators() {
+        StringBuilder out = new StringBuilder();
+        String[] parts = {":", "/", "|", ",", "#", "?", "\\", " "};
+        for (String part : parts) {
+            out.append(thrown(() -> holder("a" + part + "b", "c").getId()).startsWith("IdentifierException"))
+                .append(thrown(() -> holder("a", "b" + part + "c").getId())).append(',');
+        }
+        return out.toString();
+    }
+
+    /** A TagKey's registry is compared by identity: a key in another registry that shares the id is another tag. */
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static String tagRegistries() {
+        ResourceKey notRoot = ResourceKey.create(Registries.ITEM, id("minecraft:block"));
+        TagKey<?> odd = TagKey.create(notRoot, id("a:t"));
+        TagKey<?> real = TagKey.create(Registries.BLOCK, id("a:t"));
+        return "" + (odd == real) + odd.equals(real) + real.equals(odd) + "|" + odd.isFor(Registries.BLOCK) + odd.isFor(notRoot)
+            + real.isFor(Registries.BLOCK) + "|" + (odd.registry() == notRoot) + odd.registry() + "|" + odd + "|" + odd.location()
+            + "|" + (odd == TagKey.create((ResourceKey) ResourceKey.create(Registries.ITEM, id("minecraft:block")), id("a:t")))
+            + odd.equals(TagKey.create(notRoot, id("a:t"))) + List.of(odd).contains(real);
+    }
+
+    /** IdentifierException is a RuntimeException: every catch that covers one catches it. */
+    public static String exceptions() {
+        StringBuilder out = new StringBuilder();
+        try {
+            Identifier.parse("A:b");
+        } catch (Exception e) {
+            out.append("E:").append(e.getClass().getName()).append(':').append(e.getMessage()).append(e instanceof RuntimeException);
+        }
+        try {
+            BlockItemId.create("a:b");
+        } catch (Throwable t) {
+            out.append("|T:").append(t.getClass().getSimpleName());
+        }
+        try {
+            Identifier.fromNamespaceAndPath("a", "B");
+        } catch (RuntimeException e) {
+            out.append("|R:").append(e.getMessage());
+        }
+        // The message is `StringEscapeUtils.escapeJava`'d.
+        return out.append("|").append(thrown(() -> Identifier.fromNamespaceAndPath("a", "q\"\\\t\u00e9\ud83d\ude00\u007f\u0001/")))
+            .append("|").append(thrown(() -> Identifier.parse("\u00c9:x"))).toString();
+    }
+
+    /** null arguments throw where the real factories dereference them. */
+    public static String nulls() {
+        return thrown(() -> Identifier.parse(null)) + "|" + thrown(() -> Identifier.tryParse(null)) + "|"
+            + thrown(() -> Identifier.fromNamespaceAndPath(null, "x")) + "|" + thrown(() -> Identifier.fromNamespaceAndPath("a", null))
+            + "|" + thrown(() -> Identifier.withDefaultNamespace(null)) + "|" + thrown(() -> Identifier.tryBuild(null, "x"));
+    }
+
     /** Interned kinds are one object per value; the same handle is one object. */
     public static String identity() {
         Identifier a = id("a:x");
@@ -360,6 +483,15 @@ fn fixture(test: &str) -> javac_fixture::Fixture {
                 "net/minecraft/references/BlockItemId.java",
                 BLOCK_ITEM_ID_STUB,
             ),
+            ("net/minecraft/core/Holder.java", HOLDER_STUB),
+            (
+                "net/neoforged/neoforge/registries/DeferredRegister.java",
+                DEFERRED_REGISTER_STUB,
+            ),
+            (
+                "net/neoforged/neoforge/registries/DeferredHolder.java",
+                DEFERRED_HOLDER_STUB,
+            ),
             ("demo/Probe.java", PROBE),
         ],
     )
@@ -385,7 +517,11 @@ fn run(fixture: &javac_fixture::Fixture, method: &str) -> (String, Vec<(String, 
 /// in natural order (`Collections.sort`, `List.sort(null)`, `sorted()`,
 /// `TreeMap`/`TreeSet`), inside host collections, through type switches,
 /// patterns and `Class.isInstance`/`isAssignableFrom`; identity of the
-/// interned keys; and strings spelled like their handles' text are Strings.
+/// interned keys; strings spelled like their handles' text are Strings;
+/// NeoForge holders whose namespace or name is no id throw `IdentifierException`
+/// (so names carrying separators never alias another holder); a `TagKey`
+/// compares its registry key's whole identity; `IdentifierException` is
+/// caught as a `RuntimeException`; and `null` throws Java 25's NPE.
 #[test]
 fn the_ids_answer_as_java_25_and_no_string_spells_one() {
     let fixture = fixture("host-ids");
@@ -400,6 +536,11 @@ fn the_ids_answer_as_java_25_and_no_string_spells_one() {
         "types",
         "sorts",
         "collections",
+        "holders",
+        "holderSeparators",
+        "tagRegistries",
+        "exceptions",
+        "nulls",
         "identity",
     ] {
         let (text, unknown) = run(&fixture, method);
