@@ -54,10 +54,34 @@ impl<H: Host> Runtime<'_, H> {
         match (r.owner.as_str(), r.name.as_str()) {
             // Every overload (options, a set of options, an estimated depth)
             // walks the same way: the frames carry their class either way.
-            // Only `getInstance()` answers the JDK's one default walker.
-            ("java/lang/StackWalker", "getInstance") => Ok(Some(crate::runtime::host_jdk::stack_walker(
-                r.descriptor != "()Ljava/lang/StackWalker;",
-            ))),
+            // JDK 25 answers its one `DEFAULT_WALKER` for `getInstance()` and
+            // for `getInstance(Set)` of an empty set (`Set.isEmpty`, then
+            // `getstatic DEFAULT_WALKER`); the option and depth overloads
+            // build a new walker.
+            ("java/lang/StackWalker", "getInstance") => {
+                let options = match (r.descriptor.as_str(), args.first()) {
+                    ("()Ljava/lang/StackWalker;", _) => false,
+                    ("(Ljava/util/Set;)Ljava/lang/StackWalker;", Some(Value::Ref(None))) => {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
+                    ("(Ljava/util/Set;)Ljava/lang/StackWalker;", Some(set)) => {
+                        if self.host_collection_kind(set).is_none() {
+                            // Emptiness unknown: a key can't stand for "maybe
+                            // the default walker".
+                            self.host.unknown_operand_call(r)?;
+                            true
+                        } else {
+                            !self.collection_elements(set)?.is_empty()
+                        }
+                    }
+                    _ => true,
+                };
+                Ok(Some(crate::runtime::host_jdk::stack_walker(options)))
+            }
             ("java/lang/StackWalker", "walk")
                 if r.descriptor == "(Ljava/util/function/Function;)Ljava/lang/Object;" =>
             {

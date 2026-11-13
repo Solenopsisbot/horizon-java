@@ -4,9 +4,10 @@
 //!
 //! `fixtures/host_values/P2b.java` holds one `static String` method per case.
 //! The expected strings are what OpenJDK 25.0.5 printed for it (`javac
-//! --release 21`, two runs alike, on elysium), with log4j-api 2.26.0 on the
-//! class path. Here log4j is a stub that never ships, so the calls reach the
-//! host's logger model. `Exact`: Java's answer, nothing counted. `Counted`:
+//! --release 21`, two runs alike, on elysium), with the game's logging jars on
+//! the class path (log4j-api/core 2.26.0, log4j-slf4j2-impl 2.26.0, slf4j-api
+//! 2.0.17, Mojang logging 1.7.12). Here they are stubs that never ship, so
+//! the calls reach the runtime's and the host's logger models. `Exact`: Java's answer, nothing counted. `Counted`:
 //! Java's answer needs what no run can reproduce (an identity hash, the
 //! process's thread id, a line number, the backend's logger class, two
 //! objects with equal keys), or Java throws where the runtime counts.
@@ -44,7 +45,8 @@ const CASES: &[(&str, Outcome)] = &[
     ("genThreadSet", Exact(r#"true"#)),
     // As `genOrder`, through a TreeSet.
     ("genTreeSet", Counted),
-    // Java 25 (log4j-api alone): `org.apache.logging.log4j.simple.SimpleLogger`; the backend's class is unknown (`ClassRule::Unknown`).
+    // log4j's `getLogger()` is the caller class's logger; `Class`/`Object` overloads name it by the canonical name (#173 review).
+    // Java 25: `org.apache.logging.log4j.core.Logger`; the backend's class is unknown (`ClassRule::Unknown`).
     ("loggerClass", Counted),
     // A logger matches its declared type exactly.
     ("loggerDeclared", Exact(r#"LdemoJdemodemo"#)),
@@ -66,6 +68,7 @@ const CASES: &[(&str, Outcome)] = &[
     ("loggerSwitch", Counted),
     // Two anonymous loggers are two objects with equal keys: identity counted.
     ("loggerTwo", Counted),
+    // A JDK class's module is Java 25's for its package; an array's is its element's.
     (
         "moduleReal",
         Exact(
@@ -95,7 +98,7 @@ const CASES: &[(&str, Outcome)] = &[
             r#"java.lang.Stringtruefalsefalse1525255963|stack-walker|stack-walker|2sr|falsefalse|stack-frame/stackSpelled@demo/P2|stack-frame/stackSpelled@demo/P2|2sr|falsefalse|stack-trace-element/stackSpelled@demo/P2|stack-trace-element/stackSpelled@demo/P2|2sr"#,
         ),
     ),
-    // Java 25: `demo.P2b.stackText(P2b.java:113)`; the runtime keeps no file or line.
+    // Java 25: `demo.P2b.stackText(P2b.java:114)`; the runtime keeps no file or line.
     ("stackText", Counted),
     // Two walks hand out two frame objects with equal keys: identity counted.
     ("stackTwo", Counted),
@@ -111,6 +114,8 @@ const CASES: &[(&str, Outcome)] = &[
     ),
     // Java 25: `Thread[#3,main,5,main]`: the id and name are the process's.
     ("threadText", Counted),
+    // `getInstance(Set)` of an empty set is the default walker; the depth overload is a new one (#173 B1).
+    ("walkerEmptySet", Exact(r#"truetruefalsetrue"#)),
     // getClass of `word/` text: #156 P17 (counted).
     ("wordedClasses", Counted),
 ];

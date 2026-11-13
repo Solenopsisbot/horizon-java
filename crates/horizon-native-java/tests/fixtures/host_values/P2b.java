@@ -241,4 +241,12 @@ public final class P2b {
     for (String n : names) sb.append(LogManager.getLogger(n).getName()).append('|').append(java.util.logging.Logger.getLogger(n).getName()).append(';');
     return sb.toString() + (LogManager.getLogger("a,b") == LogManager.getLogger("a\\b"));
   }
+
+  /** `getInstance(Set)` of an empty set is the default walker (#173 B1). */
+  public static String walkerEmptySet() {
+    StackWalker d = StackWalker.getInstance();
+    return "" + (StackWalker.getInstance(Set.of()) == d) + (StackWalker.getInstance(new HashSet<>()) == d)
+        + (StackWalker.getInstance(Set.of(), 5) == d) + (StackWalker.getInstance(Set.of()) == StackWalker.getInstance(Set.of()));
+  }
+
 }
