@@ -217,3 +217,58 @@ fn builtin_containers_answer_only_what_is_known() {
         host.unknown_host_calls()
     );
 }
+
+/// What `IdentityOracle` printed on Java 25 (Temurin 25.0.5) for
+/// `Identity.facts`/`Identity.spelled` (`fixtures/fabric_mods/demo/Identity.java`)
+/// over Fabric Loader 0.19.5's own objects: `alpha.json` and `beta.json` parsed
+/// by its `ModMetadataParser`, each built into a `ModContainerImpl` through
+/// `ModCandidateImpl.createPlain` over `/horizon/mods/<id>`, and the same
+/// container passed twice for two `getModContainer("alpha")` calls (the
+/// loader's `getModContainer` is `modMap.get(id)`). Two runs printed the same.
+const IDENTITY_ORACLE: &str = "alpha 1.2.0+mc26.3|truetruefalsetrue|truetruefalsetrue|truetruetruetruetruetrue|truetruetruetrue|/horizon/mods/alphatruetruefalsePATHtrue|truetrue1truetrue";
+const SPELLED_ORACLE: &str = "falsefalsefalsefalsefalsefalsefalsefalsefalsemod-container/alpha/1.2.0+mc26.3,falsefalsefalsefalsefalsefalsefalsefalsefalsemetadata/alpha/1.2.0+mc26.3,falsefalsefalsefalsefalsefalsefalsefalsefalsemod-origin/path/alpha,falsefalsefalsefalsefalsefalsefalsefalsefalsefabric-person/alpha/authors/0,falsefalsefalsefalsefalsefalsefalsefalsefalsefabric-contact/alpha/contact,falsefalsefalsefalsefalsefalsefalsefalsefalsefabric-cv/alpha/custom/note,falsefalsefalsefalsefalsefalsefalsefalsefalsehfmc:ralpha,r1.2.0+mc26.3,falsefalsefalsefalsefalsefalsefalsefalsefalsehfmm:ralpha,Stringtrue1212236811,Stringtrue-227892216,2s";
+
+/// Fabric Loader's objects are one object per container (`host_fabric_loader.rs`):
+/// two `getModContainer` calls and `getAllMods` hand out the same container,
+/// whose metadata, origin, people, contacts and custom values are its own;
+/// `ModContainerImpl.toString` is `id version`; `equals` is identity; and no
+/// string spelled like the old markers (or a handle's text) is one.
+#[test]
+fn the_loaders_objects_keep_their_identity_text_and_types() {
+    let run = build("identity");
+    let mut host = host(&run, Some("26.3"));
+    assert_eq!(text(&run, &mut host, "identity"), IDENTITY_ORACLE);
+    assert_eq!(text(&run, &mut host, "spelled"), SPELLED_ORACLE);
+    // The old markers are `word/rest` text, whose `instanceof` against a
+    // loader type `is_plain_string` still counts until #156 P17.
+    assert!(
+        host.unknown_host_calls()
+            .iter()
+            .all(|(call, _)| call.ends_with("#<instanceof>(Ljava/lang/Object;)Z")),
+        "{:?}",
+        host.unknown_host_calls()
+    );
+}
+
+/// What only a JVM knows is counted, never answered: a container's identity
+/// hash (Java 25 printed `431687835`), its metadata's `Object.toString`
+/// (`net.fabricmc.loader.impl.metadata.V1ModMetadata@4563e9ab`) and the container's implementation class (`class net.fabricmc.loader.impl.ModContainerImpl`).
+#[test]
+fn identity_hashes_object_text_and_classes_are_counted() {
+    let run = build("identity-counted");
+    for (method, call) in [
+        ("containerHash", "#hashCode()I"),
+        ("metadataText", "#toString()Ljava/lang/String;"),
+        ("containerClass", "#getClass()Ljava/lang/Class;"),
+    ] {
+        let mut host = host(&run, Some("26.3"));
+        text(&run, &mut host, method);
+        assert!(
+            host.unknown_host_calls()
+                .iter()
+                .any(|(counted, _)| counted.ends_with(call)),
+            "{method}: {:?}",
+            host.unknown_host_calls()
+        );
+    }
+}

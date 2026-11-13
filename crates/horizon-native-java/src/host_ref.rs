@@ -214,6 +214,19 @@ pub enum HostKind {
     /// declared result is an array: key `<declared class>#empty`
     /// (`host_array.rs`). Its runtime class is unknown.
     UnknownArray,
+    /// A Fabric `ModContainer`: key its mod id and version
+    /// (`host_fabric_loader.rs`).
+    FabricModContainer,
+    /// A Fabric `ModMetadata`: key its mod id.
+    FabricModMetadata,
+    /// A Fabric `ModOrigin`: key its kind and argument.
+    FabricModOrigin,
+    /// A Fabric metadata `Person`: key the mod id and JSON pointer.
+    FabricPerson,
+    /// A Fabric `ContactInformation`: key the mod id and JSON pointer.
+    FabricContact,
+    /// A Fabric `CustomValue`: key the mod id and JSON pointer.
+    FabricCustomValue,
 }
 
 /// How a kind's Java class follows from its key.
@@ -619,6 +632,66 @@ const KINDS: &[KindInfo] = &[
         // One key stands for every array such a call returned.
         canonical: never_canonical,
         methods: &crate::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::FabricModContainer,
+        tag: "fmc",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_loader::container_types,
+        },
+        // `modMap.get(id)`: one container per mod.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_loader::CONTAINER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricModMetadata,
+        tag: "fmm",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_loader::metadata_types,
+        },
+        // The container's own metadata.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricModOrigin,
+        tag: "fmo",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_loader::origin_types,
+        },
+        // The container's own origin.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_loader::ORIGIN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricPerson,
+        tag: "fper",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_loader::person_types,
+        },
+        // The metadata's own `Person`.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricContact,
+        tag: "fcon",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_loader::contact_types,
+        },
+        // The metadata's own contact.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricCustomValue,
+        tag: "fcv",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_loader::custom_value_types,
+        },
+        // The metadata's own value at the pointer.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_loader::OBJECT_METHODS,
     },
 ];
 

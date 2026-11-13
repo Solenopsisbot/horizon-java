@@ -51,4 +51,30 @@ public final class Probe {
         }
         return out.toString();
     }
+
+    /** Identity, text and types of the loader's objects ({@link Identity}). */
+    public static String identity() {
+        FabricLoader loader = FabricLoader.getInstance();
+        return Identity.facts(loader.getModContainer("alpha").get(), loader.getModContainer("alpha").get(),
+            loader.getModContainer("beta").get(), loader.getAllMods());
+    }
+
+    public static String spelled() {
+        return Identity.spelled(FabricLoader.getInstance().getModContainer("alpha").get());
+    }
+
+    /** What only a JVM knows: an identity hash, `Object.toString`, the implementation class. */
+    public static String containerHash() {
+        return "" + FabricLoader.getInstance().getModContainer("alpha").get().hashCode();
+    }
+
+    public static String metadataText() {
+        String text = String.valueOf(FabricLoader.getInstance().getModContainer("alpha").get().getMetadata());
+        return text == null ? "null" : text;
+    }
+
+    public static String containerClass() {
+        Object type = FabricLoader.getInstance().getModContainer("alpha").get().getClass();
+        return String.valueOf(type);
+    }
 }
