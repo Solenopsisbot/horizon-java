@@ -63,7 +63,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_reflect_proxy(r, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_array_class(r, receiver) {
+        if let Some(value) = self.invoke_array_class(r, receiver)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_guava(r, receiver, args)? {
@@ -72,7 +72,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_filter_stream(r, receiver, args, class, method)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_byte_streams(r, receiver, args, class, method)? {
+        if let Some(value) = self.invoke_byte_streams(r, receiver, args)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_reflect_generic(r, receiver)? {
@@ -478,6 +478,10 @@ impl<H: Host> Runtime<'_, H> {
         if let Value::Host(handle) = value {
             return handle.instance_of(wanted, self) == Some(true);
         }
+        // Every array is a handle: no other value is one, however spelled.
+        if wanted.starts_with('[') {
+            return false;
+        }
         unboxed_instance_of(value, wanted)
             || expect_ref(value).is_some_and(|marker| {
                 self.proxy_instance_of(marker, wanted)
@@ -817,9 +821,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_io(&inner, Some(&wrapped), args, class, method)? {
             return Ok(Some(value));
         }
-        if let Some(value) =
-            self.invoke_byte_streams(&inner, Some(&wrapped), args, class, method)?
-        {
+        if let Some(value) = self.invoke_byte_streams(&inner, Some(&wrapped), args)? {
             return Ok(Some(value));
         }
         // A wrapped jar stream runs its own body.
@@ -849,8 +851,6 @@ impl<H: Host> Runtime<'_, H> {
         r: &MethodRef,
         receiver: Option<&Value>,
         args: &[Value],
-        class: &str,
-        method: &str,
     ) -> Result<Option<Value>, NativeError> {
         const BAIS: &str = "java/io/ByteArrayInputStream";
         if !matches!(
@@ -864,10 +864,10 @@ impl<H: Host> Runtime<'_, H> {
         };
         let field = |name: &str, descriptor: &str| format!("{marker}|{BAIS}#{name}{descriptor}");
         if r.owner == BAIS && r.name == "<init>" {
-            let Some(array) = args.first().and_then(expect_ref).cloned() else {
+            let Some(array) = args.first().cloned() else {
                 return Ok(None);
             };
-            let Some(length) = self.arrays.get(&array).map(Vec::len) else {
+            let Some(length) = self.owned_array(&array).map(Vec::len) else {
                 return Ok(None);
             };
             let (offset, count) = match r.descriptor.as_str() {
@@ -879,8 +879,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 _ => return Ok(None),
             };
-            self.fields
-                .insert(field("buf", "[B"), Value::Ref(Some(array)));
+            self.fields.insert(field("buf", "[B"), array);
             self.fields
                 .insert(field("pos", "I"), Value::Int(offset as i32));
             self.fields
@@ -891,10 +890,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // What the stream yields next: the array-backed stream's slice, or the
         // host resource stream's bytes.
-        let array_stream = match self.fields.get(&field("buf", "[B")) {
-            Some(Value::Ref(Some(array))) => Some(array.clone()),
-            _ => None,
-        };
+        let array_stream = self.fields.get(&field("buf", "[B")).cloned();
         let take = |this: &mut Self, limit: Option<usize>| -> Option<Vec<u8>> {
             match &array_stream {
                 Some(array) => {
@@ -906,7 +902,7 @@ impl<H: Host> Runtime<'_, H> {
                         Some(Value::Int(count)) => (*count).max(0) as usize,
                         _ => 0,
                     };
-                    let values = this.arrays.get(array)?;
+                    let values = this.owned_array(array)?;
                     let end = limit.map_or(count, |limit| pos.saturating_add(limit).min(count));
                     let bytes = values
                         .get(pos.min(end)..end)
@@ -929,7 +925,7 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(bytes) = take(self, None) else {
                     return Ok(None);
                 };
-                self.io_bytes_array(bytes, class, method)
+                self.io_bytes_array(bytes)
             }
             ("readNBytes", "(I)[B") => {
                 let wanted = args.first().and_then(boxed_integer).unwrap_or(0);
@@ -943,7 +939,7 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(bytes) = take(self, Some(wanted as usize)) else {
                     return Ok(None);
                 };
-                self.io_bytes_array(bytes, class, method)
+                self.io_bytes_array(bytes)
             }
             ("read", "()I") if array_stream.is_some() => {
                 let bytes = take(self, Some(1)).unwrap_or_default();
@@ -961,12 +957,18 @@ impl<H: Host> Runtime<'_, H> {
                 Value::Int((count - pos).max(0))
             }
             ("read", "([B)I" | "([BII)I") => {
-                let Some(target) = args.first().and_then(expect_ref).cloned() else {
-                    return Err(NativeError::UncaughtException {
-                        class: "java/lang/NullPointerException".into(),
-                        message: None,
-                        frame: None,
-                    });
+                let target = match args.first() {
+                    None | Some(Value::Ref(None)) => {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
+                    Some(target) => match host_array::array_key(target) {
+                        Some(key) => key.to_owned(),
+                        None => return Ok(None),
+                    },
                 };
                 let Some(capacity) = self.arrays.get(&target).map(Vec::len) else {
                     return Ok(None);
@@ -1031,9 +1033,10 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "asList"
             && r.descriptor == "([Ljava/lang/Object;)Ljava/util/List;"
         {
-            let Some(array) = args.first().filter(|value| {
-                expect_ref(value).is_some_and(|marker| self.arrays.contains_key(marker))
-            }) else {
+            let Some(array) = args
+                .first()
+                .filter(|value| self.owned_array(value).is_some())
+            else {
                 return Ok(None);
             };
             let values = self.array(array)?.clone();
@@ -1061,11 +1064,59 @@ impl<H: Host> Runtime<'_, H> {
             .iter()
             .map(|item| parse_collection_value(item))
             .collect::<Result<Vec<_>, _>>()?;
+        // `toArray(IntFunction)` is `toArray(generator.apply(0))`
+        // (`Collection`'s default): the generated array names the class.
+        let target = match r.descriptor.as_str() {
+            "()[Ljava/lang/Object;" => None,
+            "([Ljava/lang/Object;)[Ljava/lang/Object;" => args.first().cloned(),
+            _ => {
+                let Some(generator) = args.first() else {
+                    return Ok(None);
+                };
+                self.invoke_callback(generator, &[Value::Int(0)])?
+            }
+        };
+        let class = match &target {
+            None => "[Ljava/lang/Object;".to_owned(),
+            Some(target) => match host_array::exact_class(target) {
+                Some(class) => class.to_owned(),
+                None => return Ok(None),
+            },
+        };
+        // Each element is stored into a `T[]` (`array_store.rs`).
+        // `ArrayList.toArray(a)` copies its `Object[]` with
+        // `System.arraycopy`: into `a` itself, up to the first element that
+        // does not fit, when `a` is large enough. Another collection's
+        // message and partial writes are its own: counted.
+        if let Some(component) = value_class::component_of_array_class(&class)
+            && let Some(misfit) = self.first_misfit(&class, &component, &values)?
+        {
+            let array_list = expect_ref(receiver)
+                .and_then(|marker| crate::jar_text::object_marker_class(marker))
+                == Some("java/util/ArrayList");
+            let error = array_list
+                .then(|| self.arraycopy_store_exception("java/lang/Object", &component))
+                .flatten();
+            let Some(error) = error else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
+            if let Some(target) = &target
+                && let Some(slots) =
+                    host_array::array_key(target).and_then(|key| self.arrays.get_mut(key))
+                && slots.len() >= values.len()
+            {
+                for (slot, value) in slots.iter_mut().zip(&values[..misfit]) {
+                    *slot = value.clone();
+                }
+            }
+            return Err(error);
+        }
         // `toArray(T[] a)` fills `a` when it is large enough and nulls the
-        // slot after the last element, as the JDK's `AbstractCollection` does.
-        if r.descriptor == "([Ljava/lang/Object;)[Ljava/lang/Object;"
-            && let Some(target) = args.first().and_then(expect_ref).cloned()
-            && let Some(slots) = self.arrays.get_mut(&target)
+        // slot after the last element, as the JDK's `AbstractCollection` does;
+        // otherwise it answers a new array of `a`'s class.
+        if let Some(target) = target
+            && let Some(slots) =
+                host_array::array_key(&target).and_then(|key| self.arrays.get_mut(key))
             && slots.len() >= values.len()
         {
             let length = values.len();
@@ -1075,11 +1126,9 @@ impl<H: Host> Runtime<'_, H> {
             if let Some(after) = slots.get_mut(length) {
                 *after = Value::Ref(None);
             }
-            return Ok(Some(Value::Ref(Some(target))));
+            return Ok(Some(target));
         }
-        let marker = self.new_array("java/lang/Object", "toArray");
-        self.arrays.insert(marker.clone(), values);
-        Ok(Some(Value::Ref(Some(marker))))
+        Ok(Some(self.new_array_value(&class, values)))
     }
 
     /// `Throwable.getStackTrace()` / `Thread.getStackTrace()` and the
@@ -1133,9 +1182,7 @@ impl<H: Host> Runtime<'_, H> {
                 .iter()
                 .map(|(class, method)| stack_trace_element(class, method)),
         );
-        let array = self.new_array("java/lang/StackTraceElement", "getStackTrace");
-        self.arrays.insert(array.clone(), frames);
-        Some(Value::Ref(Some(array)))
+        Some(self.new_array_value("[Ljava/lang/StackTraceElement;", frames))
     }
 
     /// `Paths.get(first, more...)` / `Path.of(first, more...)`: the parts
@@ -1167,7 +1214,7 @@ impl<H: Host> Runtime<'_, H> {
             }
         };
         let more = match args.get(1) {
-            Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+            Some(value @ Value::Host(_)) => self.array(value)?.clone(),
             _ => Vec::new(),
         };
         let mut parts = vec![first];

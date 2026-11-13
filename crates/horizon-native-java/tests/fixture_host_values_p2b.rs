@@ -37,14 +37,17 @@ const CASES: &[(&str, Outcome)] = &[
         "genCollections",
         Exact(r#"[module java.base]|{module java.base=1}|1truetruetrue0"#),
     ),
-    // None of these kinds is Comparable: Java 25 throws ClassCastException, the runtime counts.
-    ("genOrder", Counted),
+    // None of these kinds is Comparable: Java 25 throws ClassCastException,
+    // and with #166's sort the runtime proves it too (StackTraceElement is
+    // final, and the JDK table knows its supertypes).
+    ("genOrder", Exact(r#"CCE"#)),
     // Type switch labels reach each kind's row (Runnable, StackWalker, Module, StackTraceElement, StackFrame).
     ("genSwitch", Exact(r#"RWMEFS"#)),
     // A HashSet holding the thread.
     ("genThreadSet", Exact(r#"true"#)),
-    // As `genOrder`, through a TreeSet.
-    ("genTreeSet", Counted),
+    // As `genOrder`, through a TreeSet: `Thread.currentThread()` is exactly
+    // `java.lang.Thread`, which is not Comparable.
+    ("genTreeSet", Exact(r#"CCE"#)),
     // A `MessageFactory` overload: one logger per name and factory, counted
     // (Java 25: `x`); the logger still answers.
     ("log4jFactory", Counted),
