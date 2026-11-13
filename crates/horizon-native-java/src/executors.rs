@@ -27,12 +27,14 @@ use super::*;
 const SHUTDOWN_FIELD: &str = "#executorShutdown";
 /// The synthetic field a future marker keeps its completed value under.
 const FUTURE_VALUE: &str = "#executorValue";
-/// `Executors.callable(runnable)` and `callable(runnable, result)` markers.
-const CALLABLE_PREFIX: &str = "executor-callable/";
-const CALLABLE_RESULT_PREFIX: &str = "executor-callable-result/";
-const THREAD_FACTORY: &str = "executor-thread-factory";
 
 const EXECUTOR: &str = "java/util/concurrent/Executor";
+/// The JDK executor classes a jar constructs with `new`.
+const JDK_EXECUTORS: &[&str] = &[
+    "java/util/concurrent/ThreadPoolExecutor",
+    "java/util/concurrent/ScheduledThreadPoolExecutor",
+    "java/util/concurrent/ForkJoinPool",
+];
 const EXECUTOR_SERVICE: &str = "java/util/concurrent/ExecutorService";
 const SCHEDULED_EXECUTOR_SERVICE: &str = "java/util/concurrent/ScheduledExecutorService";
 const SCHEDULED_FUTURE: &str = "java/util/concurrent/ScheduledFuture";
@@ -73,7 +75,17 @@ fn invoke_executors<H: Host>(
     r: &MethodRef,
     args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
-    let mut pool = || rt.new_object("executor");
+    // A fresh pool per call (`host_executors.rs`); a scheduled one is a
+    // `ScheduledExecutorService`.
+    let scheduled = r.descriptor.ends_with("ScheduledExecutorService;");
+    let mut pool = || {
+        let marker = rt.new_object(if scheduled {
+            "scheduled-executor"
+        } else {
+            "executor"
+        });
+        host_executors::allocated(HostKind::Executor, marker)
+    };
     let value = match (r.name.as_str(), r.descriptor.as_str()) {
         (
             "newSingleThreadExecutor"
@@ -139,19 +151,19 @@ fn invoke_executors<H: Host>(
             "(Ljava/lang/Runnable;)Ljava/util/concurrent/Callable;"
             | "(Ljava/lang/Runnable;Ljava/lang/Object;)Ljava/util/concurrent/Callable;",
         ) => {
-            let Some(task) = args.first() else {
+            // `Executors.callable(null)`: `Objects.requireNonNull(task)`.
+            let Some(task) = args.first().filter(|task| **task != Value::Ref(None)) else {
                 return Err(native_npe());
             };
-            let task = value_marker(task);
-            let result = args.get(1).map(value_marker).unwrap_or_default();
-            Value::Ref(Some(if r.descriptor.contains("Ljava/lang/Object;)") {
-                format!("{CALLABLE_RESULT_PREFIX}{task}|{result}")
-            } else {
-                format!("{CALLABLE_PREFIX}{task}")
-            }))
+            let result = r
+                .descriptor
+                .contains("Ljava/lang/Object;)")
+                .then(|| args.get(1).cloned().unwrap_or(Value::Ref(None)));
+            host_executors::callable(task, result.as_ref())
         }
         ("defaultThreadFactory" | "privilegedThreadFactory", _) => {
-            Value::Ref(Some(THREAD_FACTORY.into()))
+            let marker = rt.new_object("thread-factory");
+            host_executors::allocated(HostKind::ThreadFactory, marker)
         }
         _ => return Ok(None),
     };
@@ -166,20 +178,38 @@ fn invoke_callable<H: Host>(
     if (r.name.as_str(), r.descriptor.as_str()) != ("call", CALLABLE_CALL) {
         return Ok(None);
     }
-    let Some(marker) = receiver.and_then(expect_ref) else {
+    if receiver.is_none_or(|receiver| *receiver == Value::Ref(None)) {
         return Err(native_npe());
+    }
+    // `Executors.callable`: run the task, answer the result (or `null`).
+    let Some((task, result)) = receiver.and_then(host_executors::callable_parts) else {
+        return Ok(None);
     };
-    if let Some(rest) = marker.strip_prefix(CALLABLE_PREFIX) {
-        let task = parse_value_marker(rest)?;
-        run_runnable(rt, &task)?;
-        return Ok(Some(Value::Ref(None)));
+    run_runnable(rt, &task)?;
+    Ok(Some(result.unwrap_or(Value::Ref(None))))
+}
+
+/// The text an executor's or a future's state is kept under: a handle's
+/// allocation marker, or (as before) the marker of another object the call
+/// names; `Ok(None)` for another handle, `Err` for `null`.
+fn state_marker<H: Host>(
+    rt: &Runtime<'_, H>,
+    receiver: Option<&Value>,
+    kind: HostKind,
+) -> Result<Option<String>, NativeError> {
+    match receiver {
+        None | Some(Value::Ref(None)) => Err(native_npe()),
+        // Only an object `new` built keeps its state under its text: a jar's
+        // own (`AbstractExecutorService` subclass) or a JDK executor a jar
+        // constructs (`new ThreadPoolExecutor(..)`). A `String` spelled like
+        // a pool's marker (`"executor#0"`) is no executor, so its call goes
+        // on to be counted, never reaching a real pool's state. (Allocation
+        // markers are still text until #156 P12b.)
+        Some(Value::Ref(Some(marker))) => Ok(crate::jar_object::key_class(marker)
+            .is_some_and(|class| rt.class(class).is_some() || JDK_EXECUTORS.contains(&class))
+            .then(|| marker.clone())),
+        Some(value) => Ok(host_executors::allocation(value, kind).map(str::to_owned)),
     }
-    if let Some(rest) = marker.strip_prefix(CALLABLE_RESULT_PREFIX) {
-        let (task, result) = rest.split_once('|').unwrap_or((rest, ""));
-        run_runnable(rt, &parse_value_marker(task)?)?;
-        return Ok(Some(parse_value_marker(result)?));
-    }
-    Ok(None)
 }
 
 fn invoke_executor<H: Host>(
@@ -188,10 +218,9 @@ fn invoke_executor<H: Host>(
     receiver: Option<&Value>,
     args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
-    let Some(marker) = receiver.and_then(expect_ref) else {
-        return Err(native_npe());
+    let Some(marker) = state_marker(rt, receiver, HostKind::Executor)? else {
+        return Ok(None);
     };
-    let marker = marker.to_owned();
     let value = match (r.name.as_str(), r.descriptor.as_str()) {
         ("execute", "(Ljava/lang/Runnable;)V") => {
             reject_after_shutdown(rt, &marker)?;
@@ -239,7 +268,7 @@ fn invoke_executor<H: Host>(
                 run_runnable(rt, task)?;
                 Value::Ref(None)
             };
-            complete_future(rt, result)
+            complete_scheduled_future(rt, result)
         }
         ("shutdown" | "close", "()V") => {
             rt.set_executor_shutdown(&marker);
@@ -256,7 +285,6 @@ fn invoke_executor<H: Host>(
         ("awaitTermination", "(JLjava/util/concurrent/TimeUnit;)Z") => {
             Value::Int(i32::from(rt.executor_shutdown(&marker)))
         }
-        ("toString", "()Ljava/lang/String;") => Value::Ref(Some("executor".into())),
         _ => return Ok(None),
     };
     Ok(Some(value))
@@ -269,9 +297,9 @@ pub(super) fn invoke_thread_factory<H: Host>(
     receiver: Option<&Value>,
     _args: &[Value],
 ) -> Option<Value> {
-    if !receiver
-        .and_then(expect_ref)
-        .is_some_and(|marker| marker == THREAD_FACTORY)
+    if receiver
+        .and_then(|factory| host_executors::allocation(factory, HostKind::ThreadFactory))
+        .is_none()
         || (r.name.as_str(), r.descriptor.as_str())
             != ("newThread", "(Ljava/lang/Runnable;)Ljava/lang/Thread;")
     {
@@ -285,8 +313,8 @@ fn invoke_future<H: Host>(
     r: &MethodRef,
     receiver: Option<&Value>,
 ) -> Result<Option<Value>, NativeError> {
-    let Some(marker) = receiver.and_then(expect_ref) else {
-        return Err(native_npe());
+    let Some(marker) = state_marker(rt, receiver, HostKind::ExecutorFuture)? else {
+        return Ok(None);
     };
     Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
         ("get", "()Ljava/lang/Object;")
@@ -299,7 +327,6 @@ fn invoke_future<H: Host>(
         // and cannot be cancelled any more.
         ("isDone", "()Z") => Value::Int(1),
         ("isCancelled", "()Z") | ("cancel", "(Z)Z") => Value::Int(0),
-        ("toString", "()Ljava/lang/String;") => Value::Ref(Some("future".into())),
         _ => return Ok(None),
     }))
 }
@@ -317,17 +344,32 @@ fn reject_after_shutdown<H: Host>(rt: &Runtime<'_, H>, marker: &str) -> Result<(
 
 /// A completed future holding `value`.
 fn complete_future<H: Host>(rt: &mut Runtime<'_, H>, value: Value) -> Value {
-    let future = rt.new_object("future");
+    completed(rt, "future", value)
+}
+
+/// A completed `ScheduledFuture` holding `value`.
+fn complete_scheduled_future<H: Host>(rt: &mut Runtime<'_, H>, value: Value) -> Value {
+    completed(rt, "scheduled-future", value)
+}
+
+fn completed<H: Host>(rt: &mut Runtime<'_, H>, prefix: &str, value: Value) -> Value {
+    let future = rt.new_object(prefix);
     if let Some(marker) = expect_ref(&future) {
         rt.fields.insert(format!("{marker}|{FUTURE_VALUE}"), value);
     }
-    future
+    host_executors::allocated(HostKind::ExecutorFuture, future)
 }
 
 /// Run one `Runnable` value: a lambda marker runs its body, a jar object
 /// dispatches its own `run`, and anything else is the host's call (counted).
 fn run_runnable<H: Host>(rt: &mut Runtime<'_, H>, task: &Value) -> Result<(), NativeError> {
     if rt.invoke_callback(task, &[])?.is_some() {
+        return Ok(());
+    }
+    // A handle that is no callback (an `Executors.callable` passed as a
+    // `Runnable`) is the host's call: counted.
+    if matches!(task, Value::Host(_)) {
+        rt.host.invoke_instance(&run_ref(), task, &[])?;
         return Ok(());
     }
     if *task == Value::Ref(None) {
@@ -348,6 +390,11 @@ fn run_runnable<H: Host>(rt: &mut Runtime<'_, H>, task: &Value) -> Result<(), Na
 
 /// Run one `Callable` value and answer what it returned.
 fn run_callable<H: Host>(rt: &mut Runtime<'_, H>, task: &Value) -> Result<Value, NativeError> {
+    // `Executors.callable(task, result)`: run the task, answer the result.
+    if let Some((task, result)) = host_executors::callable_parts(task) {
+        run_runnable(rt, &task)?;
+        return Ok(result.unwrap_or(Value::Ref(None)));
+    }
     if let Some(value) = rt.invoke_callback(task, &[])? {
         return Ok(value);
     }

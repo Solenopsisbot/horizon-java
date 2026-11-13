@@ -37,8 +37,6 @@ use super::*;
 const SPLITTER: &str = "com/google/common/base/Splitter";
 const JOINER: &str = "com/google/common/base/Joiner";
 const LISTS: &str = "com/google/common/collect/Lists";
-const SPLITTER_PREFIX: &str = "guava-splitter/";
-const JOINER_PREFIX: &str = "guava-joiner/";
 
 fn npe() -> NativeError {
     NativeError::UncaughtException {
@@ -72,7 +70,6 @@ impl StdHost {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
-        let marker = receiver.and_then(expect_ref).map(String::as_str);
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
             (
                 SPLITTER,
@@ -88,7 +85,8 @@ impl StdHost {
                         frame: None,
                     });
                 }
-                Ok(Value::Ref(Some(format!("{SPLITTER_PREFIX}{separator}"))))
+                // A fresh `Splitter` (`host_guava.rs`).
+                Ok(crate::runtime::host_guava::splitter(&separator))
             })),
             (
                 SPLITTER,
@@ -96,7 +94,7 @@ impl StdHost {
                 "(Ljava/lang/CharSequence;)Ljava/lang/Iterable;"
                 | "(Ljava/lang/CharSequence;)Ljava/util/List;",
             ) => {
-                let separator = marker?.strip_prefix(SPLITTER_PREFIX)?.to_owned();
+                let separator = crate::runtime::host_guava::separator(receiver?, false)?;
                 Some(Self::argument(r, args, 0).and_then(|value| {
                     let Value::Ref(Some(text)) = value else {
                         return Err(npe());
@@ -113,19 +111,17 @@ impl StdHost {
                 "on",
                 "(Ljava/lang/String;)Lcom/google/common/base/Joiner;"
                 | "(C)Lcom/google/common/base/Joiner;",
-            ) => Some(Self::argument(r, args, 0).and_then(|value| {
-                Ok(Value::Ref(Some(format!(
-                    "{JOINER_PREFIX}{}",
-                    separator(r, value)?
-                ))))
-            })),
+            ) => Some(
+                Self::argument(r, args, 0)
+                    .and_then(|value| Ok(crate::runtime::host_guava::joiner(&separator(r, value)?))),
+            ),
             (
                 JOINER,
                 "join",
                 "(Ljava/lang/Iterable;)Ljava/lang/String;"
                 | "(Ljava/util/Iterator;)Ljava/lang/String;",
             ) => {
-                let separator = marker?.strip_prefix(JOINER_PREFIX)?.to_owned();
+                let separator = crate::runtime::host_guava::separator(receiver?, true)?;
                 let parts = Self::argument(r, args, 0).and_then(|value| self.guava_parts(value));
                 Some(match parts {
                     Err(error) => Err(error),
@@ -148,8 +144,12 @@ impl StdHost {
     /// The elements of an `Iterable` or `Iterator` argument the host holds, in iteration order; `Ok(None)` when it holds none (the
     /// call is then counted), an NPE for null.
     fn guava_parts(&mut self, value: &Value) -> Result<Option<Vec<Value>>, NativeError> {
-        let Value::Ref(Some(marker)) = value else {
-            return Err(npe());
+        let marker = match value {
+            Value::Ref(None) => return Err(npe()),
+            Value::Ref(Some(marker)) => marker,
+            // A host handle (a `ServiceLoader`, ...) is an `Iterable` whose
+            // elements only the runtime knows: counted.
+            _ => return Ok(None),
         };
         if let Some((values, index)) = self.iterators.get(marker) {
             return Ok(Some(values[(*index).min(values.len())..].to_vec()));
