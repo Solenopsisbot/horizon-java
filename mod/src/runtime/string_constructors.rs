@@ -72,7 +72,7 @@ pub(crate) fn build<H: Host>(
     }
     let codes = |runtime: &Runtime<'_, H>, parameter: &str| -> Result<Vec<i32>, NativeError> {
         match args.first() {
-            Some(array @ Value::Ref(Some(_))) => Ok(runtime
+            Some(array @ Value::Host(_)) => Ok(runtime
                 .array(array)?
                 .iter()
                 .map(|value| match value {

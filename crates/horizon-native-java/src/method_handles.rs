@@ -728,16 +728,15 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let classes = match args.get(2) {
-                    Some(value @ Value::Ref(Some(marker))) if self.arrays.contains_key(marker) => {
-                        self.array(value)?.clone()
-                    }
+                    Some(value) if self.owned_array(value).is_some() => self.array(value)?.clone(),
                     Some(value @ Value::Ref(Some(_))) => {
                         runtime_collection_values(self.host, value)?
                             .iter()
                             .map(|item| parse_collection_value(item))
                             .collect::<Result<_, _>>()?
                     }
-                    None => return Ok(None),
+                    // A shared empty array: what the unmodelled call returned.
+                    None | Some(Value::Host(_)) => return Ok(None),
                     Some(_) => return Err(npe()),
                 };
                 let types = classes
@@ -771,7 +770,9 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let values = match args.get(2) {
-                    Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+                    Some(value) if host_array::array_key(value).is_some() => {
+                        self.array(value)?.clone()
+                    }
                     _ => Vec::new(),
                 };
                 let parameters = descriptor_arguments(&target.descriptor()?);
@@ -984,7 +985,9 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("invokeWithArguments", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
                 let values = match args.first() {
-                    Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+                    Some(value) if host_array::array_key(value).is_some() => {
+                        self.array(value)?.clone()
+                    }
                     _ => Vec::new(),
                 };
                 let call_site = method_descriptor(

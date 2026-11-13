@@ -103,9 +103,8 @@ impl<H: Host> Runtime<'_, H> {
                     .iter()
                     .map(|item| self.annotation_value(item, element, annotation, r))
                     .collect::<Result<Vec<_>, _>>()?;
-                let marker = self.new_array("annotation", &r.name);
-                self.arrays.insert(marker.clone(), values);
-                Value::Ref(Some(marker))
+                // The member's own array type (`descriptor`, `[Ljava/lang/String;`).
+                self.new_array_value(descriptor, values)
             }
             (AnnotationValue::String(class), "Ljava/lang/Class;") => {
                 // `V` is `void.class`; a primitive keeps its name, as the

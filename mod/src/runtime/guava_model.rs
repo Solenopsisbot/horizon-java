@@ -121,7 +121,7 @@ impl<H: Host> Runtime<'_, H> {
                         continue;
                     }
                     match value {
-                        Value::Ref(Some(marker)) if self.arrays.contains_key(marker) => {
+                        array if self.owned_array(array).is_some() => {
                             values.extend(self.array(value)?.clone());
                         }
                         other => {

@@ -38,6 +38,66 @@ use crate::{Boxed, MethodRef, NativeError, Value, expect_ref};
 /// Prefix of a modelled `Comparator` marker.
 const COMPARATOR_PREFIX: &str = "@cmp:";
 
+/// Stream stages recorded instead of run, so a terminal operation that does
+/// not traverse never runs them (#166 F3).
+///
+/// JDK 25's `count()` on a SIZED pipeline answers the size without
+/// traversing (`ReduceOps.makeRefCounting`): no `peek` or `map` runs, and a
+/// `sorted()` never compares, so `Stream.of(new int[0], new int[0]).sorted()
+/// .count()` is `2`, not the `ClassCastException` of comparing two arrays.
+/// The stream model runs each stage eagerly. A stage that keeps SIZED
+/// (`map`, `peek`, `sorted`, `limit`, `skip`, `parallel`/`sequential`/
+/// `unordered`) is recorded here, and its stream gets a marker but no
+/// values. `count()` answers the size of a pipeline whose source reports
+/// SIZED. Any other operation replays the recorded stages first, in order.
+#[derive(Default)]
+pub(crate) struct StreamPlan {
+    /// Streams whose source reports SIZED and whose stages since all keep it.
+    sized: std::collections::BTreeSet<String>,
+    deferred: std::collections::BTreeMap<String, Deferred>,
+    /// Set while a recorded stage runs: run it, do not record it again.
+    replaying: usize,
+}
+
+/// One recorded stage: the call, on its source stream.
+struct Deferred {
+    source: Value,
+    call: MethodRef,
+    args: Vec<Value>,
+    class: String,
+    method: String,
+    size: usize,
+}
+
+/// Whether a stream call is a stage the model runs that keeps SIZED.
+fn keeps_sized(r: &MethodRef) -> bool {
+    matches!(
+        (r.name.as_str(), r.descriptor.as_str()),
+        (
+            "map",
+            "(Ljava/util/function/Function;)Ljava/util/stream/Stream;"
+        ) | (
+            "peek",
+            "(Ljava/util/function/Consumer;)Ljava/util/stream/Stream;"
+        ) | ("sorted", "()Ljava/util/stream/Stream;")
+            | (
+                "sorted",
+                "(Ljava/util/Comparator;)Ljava/util/stream/Stream;"
+            )
+            | ("sorted", "()Ljava/util/stream/IntStream;")
+            | ("sorted", "()Ljava/util/stream/LongStream;")
+            | ("limit", "(J)Ljava/util/stream/Stream;")
+            | ("skip", "(J)Ljava/util/stream/Stream;")
+            | (
+                "parallel" | "sequential" | "unordered",
+                "()Ljava/util/stream/Stream;"
+                    | "()Ljava/util/stream/BaseStream;"
+                    | "()Ljava/util/stream/IntStream;"
+                    | "()Ljava/util/stream/LongStream;"
+            )
+    )
+}
+
 fn comparator(body: &str) -> Value {
     Value::Ref(Some(format!("{COMPARATOR_PREFIX}{body}")))
 }
@@ -189,6 +249,33 @@ pub(crate) fn natural_compare(a: &Value, b: &Value) -> Result<i32, NativeError> 
                 }
             }
         }
+    }
+    // `((Comparable) a).compareTo(b)`: a handle whose kind is known not to
+    // be `Comparable` (an array) fails the cast, as `ComparableTimSort` does.
+    if let Value::Host(handle) = a
+        && handle.instance_of("java/lang/Comparable", &crate::host_ref::JdkHierarchy) == Some(false)
+        && let Some(class) = handle.class()
+    {
+        return Err(crate::checkcast::class_cast_exception(
+            class,
+            "java/lang/Comparable",
+        ));
+    }
+    // `String.compareTo(Object)`/`Integer.compareTo(Object)`... are bridges
+    // that cast the argument to their own class: a handle of another known
+    // class fails that cast (`"s".compareTo(new int[0])`).
+    let own = match a {
+        Value::Ref(Some(text)) if crate::value_class::is_plain_string(text) => {
+            Some("java/lang/String")
+        }
+        Value::Boxed(boxed) => Some(boxed.class()),
+        _ => None,
+    };
+    if let (Some(own), Value::Host(other)) = (own, b)
+        && other.instance_of(own, &crate::host_ref::JdkHierarchy) == Some(false)
+        && let Some(class) = other.class()
+    {
+        return Err(crate::checkcast::class_cast_exception(class, own));
     }
     Err(NativeError::Metadata(format!(
         "natural order of {} and {} is not modelled",
@@ -485,7 +572,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             ("empty", _) => Vec::new(),
             _ => return Ok(None),
         };
-        Ok(Some(self.new_stream(class, method, values)))
+        // `range`, `of` and `empty` are SIZED.
+        let stream = self.new_stream(class, method, values);
+        self.mark_sized(&stream);
+        Ok(Some(stream))
     }
 
     /// The stream stages beyond the interpreter's core set, applied to the
@@ -611,6 +701,125 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             _ => return Ok(None),
         };
         Ok(Some(result))
+    }
+}
+
+impl<H: crate::Host> crate::Runtime<'_, H> {
+    /// A stream built from a source whose spliterator reports SIZED
+    /// (`Stream.of`, an array, a collection, `IntStream.range`).
+    pub(crate) fn mark_sized(&mut self, stream: &Value) {
+        if let Some(marker) = expect_ref(stream) {
+            self.stream_plan.sized.insert(marker.clone());
+        }
+    }
+
+    /// Whether a stream's pipeline reports SIZED.
+    pub(crate) fn stream_is_sized(&self, marker: &str) -> bool {
+        self.stream_plan.sized.contains(marker)
+    }
+
+    /// How many elements a stream holds (or will, once its recorded stages
+    /// run).
+    fn stream_size(&self, marker: &str) -> Option<usize> {
+        match self.stream_plan.deferred.get(marker) {
+            Some(deferred) => Some(deferred.size),
+            None => self.streams.get(marker).map(Vec::len),
+        }
+    }
+
+    /// Record a SIZED-keeping stage, answer `count()` of a SIZED pipeline
+    /// without traversal, or run every recorded stage of `receiver` before
+    /// any other call (`Ok(None)`: the caller runs the call as it is).
+    pub(crate) fn plan_stream_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        if self.stream_plan.replaying > 0 {
+            return Ok(None);
+        }
+        let Some(marker) = expect_ref(receiver).filter(|marker| marker.starts_with("stream/"))
+        else {
+            return Ok(None);
+        };
+        let Some(size) = self.stream_size(marker) else {
+            return Ok(None);
+        };
+        if keeps_sized(r) {
+            let bound = |index: usize| match args.get(index) {
+                Some(Value::Long(n)) => usize::try_from((*n).max(0)).unwrap_or(usize::MAX),
+                Some(Value::Int(n)) => usize::try_from((*n).max(0)).unwrap_or(usize::MAX),
+                _ => 0,
+            };
+            let size = match r.name.as_str() {
+                "limit" => size.min(bound(0)),
+                "skip" => size.saturating_sub(bound(0)),
+                _ => size,
+            };
+            let sized = self.stream_plan.sized.contains(marker);
+            let stream = self.new_stream(class, method, Vec::new());
+            let Some(new_marker) = expect_ref(&stream).cloned() else {
+                return Ok(None);
+            };
+            self.streams.remove(&new_marker);
+            if sized {
+                self.stream_plan.sized.insert(new_marker.clone());
+            }
+            self.stream_plan.deferred.insert(
+                new_marker,
+                Deferred {
+                    source: receiver.clone(),
+                    call: r.clone(),
+                    args: args.to_vec(),
+                    class: class.to_owned(),
+                    method: method.to_owned(),
+                    size,
+                },
+            );
+            return Ok(Some(stream));
+        }
+        if (r.name.as_str(), r.descriptor.as_str()) == ("count", "()J")
+            && self.stream_plan.sized.contains(marker)
+        {
+            // As the model's own `count()` answers it.
+            return Ok(Some(Value::Int(size as i32)));
+        }
+        self.force_stream(receiver)?;
+        Ok(None)
+    }
+
+    /// Run the recorded stages of `stream`, so its values are in `streams`.
+    pub(crate) fn force_stream(&mut self, stream: &Value) -> Result<(), NativeError> {
+        let Some(marker) = expect_ref(stream).cloned() else {
+            return Ok(());
+        };
+        let Some(deferred) = self.stream_plan.deferred.remove(&marker) else {
+            return Ok(());
+        };
+        self.force_stream(&deferred.source)?;
+        self.stream_plan.replaying += 1;
+        let produced = self.invoke_stream(
+            &deferred.call,
+            Some(&deferred.source),
+            &deferred.args,
+            &deferred.class,
+            &deferred.method,
+        );
+        self.stream_plan.replaying -= 1;
+        let values = match produced? {
+            Some(Value::Ref(Some(produced))) => self.streams.remove(&produced).unwrap_or_default(),
+            _ => {
+                return Err(NativeError::Metadata(format!(
+                    "a recorded stream stage {}.{} answered no stream",
+                    deferred.call.owner, deferred.call.name
+                )));
+            }
+        };
+        self.streams.insert(marker, values);
+        Ok(())
     }
 }
 
