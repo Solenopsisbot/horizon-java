@@ -129,6 +129,85 @@ const CASES: &[(&str, Outcome)] = &[
     // Java says `25` and `java.lang.Integer`; counted, never `0` or a guess.
     ("jdkFieldModifiers", Counted),
     ("jdkFieldDeclaring", Counted),
+    // `getMethod` finds public methods only, the declaring class's own one
+    // through superclasses, superinterfaces (a default, not a static) and
+    // `Object` (not for an interface), with the most specific return type;
+    // a miss on held classes throws Java's `NoSuchMethodException`.
+    (
+        "getMethodRules",
+        Exact(concat!(
+            "NSME:demo.Refl.hidden()|demo.Refl$Super:public java.lang.String demo.Refl$Super.foo()",
+            "|truetruesuper-foo|demo.Refl$Api:public default int demo.Refl$Api.size()=1",
+            "|java.lang.Object,java.lang.Object|NSME:demo.Refl$Sub.nope()",
+            "|NSME:demo.Refl$Api.hashCode()|NSME:demo.Refl$Sub.util()",
+            "|demo.Refl$Api:public static void demo.Refl$Api.util()|NSME:demo.Refl.target(long)",
+            "|java.lang.String,demo.Refl$Cov"
+        )),
+    ),
+    // `Method.getModifiers` keeps the JVM's recognized flags: a bridge is
+    // `4161` (public, bridge, synthetic), a varargs method `137`.
+    ("methodModifiers", Exact("4161,truetrue,true,137,1")),
+    // A JDK method or constructor has no body in the run: Java says `4` and
+    // `xyz`; counted, never an aborted run.
+    ("jdkInvoke", Counted),
+    ("jdkNewInstance", Counted),
+    // #169 review F1: `getMethod`'s most specific return type. Between JDK
+    // types (`CharSequence`/`String`) the JDK hierarchy is not held: counted
+    // (Java: `demo.Refl$IStr:java.lang.String`), never the first one.
+    ("returnJdk", Counted),
+    // Arrays rank by element type and held classes by their hierarchy.
+    (
+        "returnKnown",
+        Exact("demo.Refl$IArrS:[Ljava.lang.String;|demo.Refl$IHeldSub:demo.Refl$Sub"),
+    ),
+    // F2: `Method.invoke` runs the receiver's override (superclass chain,
+    // then the most specific default); private and static targets their own
+    // body.
+    (
+        "virtualInvoke",
+        Exact("leaf-foo,leaf-foo,7,absleaf,sub,1,sub-long,i2,gj,base,base-static,super-foo"),
+    ),
+    // F4: a constructor or initializer is no method.
+    (
+        "initNotMethod",
+        Exact(
+            "NSME:demo.Refl$Super.<init>()|NSME:demo.Refl$Super.<init>()|NSME:demo.Refl.<clinit>()",
+        ),
+    ),
+    // F5: `getMethods`/`getFields` as sets (the JDK specifies no order):
+    // superclasses with `Object`'s methods, superinterfaces (no statics, the
+    // most specific default), interface constants.
+    (
+        "publicMethods",
+        Exact(concat!(
+            "12:demo.Refl$Api.size/0;demo.Refl$Sub.name/0;demo.Refl$Super.foo/0;",
+            "java.lang.Object.equals/1;java.lang.Object.getClass/0;java.lang.Object.hashCode/0;",
+            "java.lang.Object.notify/0;java.lang.Object.notifyAll/0;java.lang.Object.toString/0;",
+            "java.lang.Object.wait/0;java.lang.Object.wait/1;java.lang.Object.wait/2",
+            "|3:demo.Refl$Api.name/0;demo.Refl$Api.size/0;demo.Refl$Api.util/0",
+            "|10:demo.Refl$GJ.g/0;java.lang.Object.equals/1;java.lang.Object.getClass/0;",
+            "java.lang.Object.hashCode/0;java.lang.Object.notify/0;java.lang.Object.notifyAll/0;",
+            "java.lang.Object.toString/0;java.lang.Object.wait/0;java.lang.Object.wait/1;",
+            "java.lang.Object.wait/2",
+            "|10:demo.Refl$I2.d/0;java.lang.Object.equals/1;java.lang.Object.getClass/0;",
+            "java.lang.Object.hashCode/0;java.lang.Object.notify/0;java.lang.Object.notifyAll/0;",
+            "java.lang.Object.toString/0;java.lang.Object.wait/0;java.lang.Object.wait/1;",
+            "java.lang.Object.wait/2"
+        )),
+    ),
+    (
+        "publicFields",
+        Exact(concat!(
+            "5:demo.Refl$Consts.K;demo.Refl$Consts.S;demo.Refl$FBase.a;demo.Refl$FBase.sa;demo.Refl$FSub.b",
+            "|4:demo.Refl$Consts.K;demo.Refl$Consts.S;demo.Refl$FBase.a;demo.Refl$FBase.sa",
+            "|2:demo.Refl$Consts.K;demo.Refl$Consts.S"
+        )),
+    ),
+    // A JDK class's members are in no class file the run holds: Java says
+    // `93`, `5`, `151`; counted, never an empty array.
+    ("jdkMethods", Counted),
+    ("jdkFields", Counted),
+    ("jdkDeclaredMethods", Counted),
 ];
 
 #[test]
