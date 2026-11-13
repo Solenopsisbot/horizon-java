@@ -16,11 +16,14 @@
 //! `Object`'s `equals`, `hashCode` and `toString` on a proxy also go to the
 //! handler, with `java.lang.Object` as the declaring class, as on the JVM.
 //!
-//! Method handles: `MethodHandles.lookup()`/`privateLookupIn`,
-//! `Lookup.unreflect`/`unreflectSpecial`, `MethodHandle.bindTo` and
-//! `invokeWithArguments`. A special handle runs the named class's own body
-//! (a default method on the proxy), never a virtual override. Other lookups
-//! (`findVirtual` and friends) are not modelled.
+//! Method handles: `MethodHandles.lookup()`/`publicLookup()`/
+//! `privateLookupIn` (`Lookup` handles, `host_invoke.rs`), and
+//! `Lookup.unreflect`/`unreflectSpecial`/`findStatic`/`findVirtual`/
+//! `findConstructor` over jar classes, which hand out `method_handles.rs`'s
+//! direct handles: those answer `bindTo`, `invokeWithArguments` and the rest.
+//! A special handle runs the named class's own body (a default method on the
+//! proxy), never a virtual override; a virtual one on a proxy goes to its
+//! handler.
 
 use super::*;
 
@@ -29,10 +32,6 @@ const PROXY_CLASS: &str = "jdk/proxy/$Proxy";
 /// Interfaces one proxy may implement; `newProxyInstance` itself refuses
 /// more than 65535, a real config section names one.
 const MAX_PROXY_INTERFACES: usize = 64;
-/// The `Lookup` marker `MethodHandles.lookup()` and `privateLookupIn` answer.
-const LOOKUP_MARKER: &str = "method-handles-lookup";
-/// Prefix of a `MethodType` marker; the rest is its method descriptor.
-const METHOD_TYPE_PREFIX: &str = "method-type/";
 
 /// The field descriptor of a class marker: a primitive's letter, an array
 /// descriptor as is, `L...;` for anything else.
@@ -52,15 +51,11 @@ fn class_type_descriptor(name: &str) -> String {
     }
 }
 
-/// Prefix of a method handle marker:
-/// `method-handle/<special|virtual>/<bound receiver or ->/<method marker>`.
-const HANDLE_PREFIX: &str = "method-handle/";
-
 fn proxy_field(marker: &str, name: &str) -> String {
     format!("{marker}|{PROXY_CLASS}#{name}")
 }
 
-fn is_proxy(marker: &str) -> bool {
+pub(super) fn is_proxy(marker: &str) -> bool {
     marker
         .strip_prefix(PROXY_CLASS)
         .is_some_and(|rest| rest.starts_with('#'))
@@ -239,7 +234,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// A call on a proxy: `handler.invoke(proxy, method, args)`.
-    fn invoke_on_proxy(
+    pub(super) fn invoke_on_proxy(
         &mut self,
         marker: &str,
         r: &MethodRef,
@@ -341,7 +336,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// `MethodHandles.lookup()`, `privateLookupIn`, `Lookup.unreflect`/
-    /// `unreflectSpecial`, `MethodHandle.bindTo`/`invokeWithArguments`, and
+    /// `unreflectSpecial`, the `find*` lookups over jar classes, and
     /// `Module.addReads` (which the JDK 11 default-method path calls first).
     fn invoke_method_handles(
         &mut self,
@@ -350,45 +345,57 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
-            ("java/lang/invoke/MethodHandles", "lookup" | "publicLookup", _) => {
-                Ok(Some(Value::Ref(Some(LOOKUP_MARKER.into()))))
+            // `Lookup` handles (`host_invoke.rs`): the caller of `lookup()`
+            // and the class `in` narrows to are not recorded.
+            ("java/lang/invoke/MethodHandles", "lookup", _)
+            | ("java/lang/invoke/MethodHandles$Lookup", "in", _) => {
+                Ok(Some(host_invoke::lookup(None)))
+            }
+            ("java/lang/invoke/MethodHandles", "publicLookup", _) => {
+                Ok(Some(host_invoke::public_lookup()))
             }
             (
                 "java/lang/invoke/MethodHandles",
                 "privateLookupIn",
                 "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;",
-            ) => Ok(Some(Value::Ref(Some(LOOKUP_MARKER.into())))),
-            ("java/lang/invoke/MethodHandles$Lookup", "in", _) => {
-                Ok(Some(Value::Ref(Some(LOOKUP_MARKER.into()))))
+            ) => {
+                let class = args
+                    .first()
+                    .and_then(expect_ref)
+                    .map(|class| class.replace('.', "/"));
+                Ok(Some(host_invoke::lookup(class.as_deref())))
             }
             ("java/lang/invoke/MethodHandles$Lookup", "unreflect" | "unreflectSpecial", _) => {
                 let Some(method) = args.first().filter(|method| **method != Value::Ref(None))
                 else {
                     return Err(npe(None));
                 };
-                // The handle text names the member as `reflect-method/<class>#
-                // <name><descriptor>` (read back by `parse_handle`), so only
-                // a method the runtime read from a class file goes in: a name
-                // a lookup could not settle is the jar's own text (counted).
+                // A direct handle (`method_handles.rs`) on a method the
+                // runtime read from a class file; a lookup it could not
+                // settle is counted.
                 let Some(host_reflect::Member {
                     class,
                     name,
                     descriptor: Some(descriptor),
-                    access: Some(_),
+                    access: Some(access),
                     ..
                 }) = host_reflect::method_of(method)
                 else {
                     return Ok(None);
                 };
-                let method = format!("reflect-method/{class}#{name}{descriptor}");
                 let kind = if r.name == "unreflectSpecial" {
                     "special"
+                } else if access & 0x0008 != 0 {
+                    "static"
                 } else {
                     "virtual"
                 };
-                Ok(Some(Value::Ref(Some(format!(
-                    "{HANDLE_PREFIX}{kind}/-/{method}"
-                )))))
+                Ok(method_handles::direct_handle(
+                    kind,
+                    &class,
+                    &name,
+                    &descriptor,
+                ))
             }
             // A lookup by name over the class model. A static or virtual
             // method the model holds becomes a handle; anything else is the
@@ -409,8 +416,8 @@ impl<H: Host> Runtime<'_, H> {
                 let wanted_static = r.name == "findStatic";
                 let descriptor = args
                     .get(2)
-                    .and_then(expect_ref)
-                    .and_then(|marker| marker.strip_prefix(METHOD_TYPE_PREFIX).map(str::to_owned));
+                    .and_then(host_invoke::method_type_of)
+                    .map(str::to_owned);
                 let found = self.class(&class).and_then(|file| {
                     file.methods
                         .iter()
@@ -423,10 +430,14 @@ impl<H: Host> Runtime<'_, H> {
                         })
                         .map(|method| method.descriptor.clone())
                 });
+                let kind = if wanted_static { "static" } else { "virtual" };
                 match found {
-                    Some(descriptor) => Ok(Some(Value::Ref(Some(format!(
-                        "{HANDLE_PREFIX}virtual/-/reflect-method/{class}#{name}{descriptor}"
-                    ))))),
+                    Some(descriptor) => Ok(method_handles::direct_handle(
+                        kind,
+                        &class,
+                        &name,
+                        &descriptor,
+                    )),
                     None => Err(NativeError::UncaughtException {
                         class: "java/lang/NoSuchMethodException".into(),
                         message: Some(format!(
@@ -453,16 +464,19 @@ impl<H: Host> Runtime<'_, H> {
                 // `<init>` exactly.
                 let descriptor = args
                     .get(1)
-                    .and_then(expect_ref)
-                    .and_then(|marker| marker.strip_prefix(METHOD_TYPE_PREFIX).map(str::to_owned));
+                    .and_then(host_invoke::method_type_of)
+                    .map(str::to_owned);
                 let found = descriptor.as_deref().is_some_and(|descriptor| {
                     self.class(&class)
                         .is_some_and(|file| file.method("<init>", descriptor).is_some())
                 });
                 match (found, descriptor) {
-                    (true, Some(descriptor)) => Ok(Some(Value::Ref(Some(format!(
-                        "{HANDLE_PREFIX}new/-/reflect-method/{class}#<init>{descriptor}"
-                    ))))),
+                    (true, Some(descriptor)) => Ok(method_handles::direct_handle(
+                        "new",
+                        &class,
+                        "<init>",
+                        &descriptor,
+                    )),
                     _ => Err(NativeError::UncaughtException {
                         class: "java/lang/NoSuchMethodException".into(),
                         message: Some(format!("no such constructor: {}", class.replace('/', "."))),
@@ -481,7 +495,8 @@ impl<H: Host> Runtime<'_, H> {
                         Value::Ref(Some(marker)) if self.arrays.contains_key(marker) => {
                             types.extend(self.array(value)?.clone());
                         }
-                        Value::Ref(Some(marker)) if marker.starts_with(METHOD_TYPE_PREFIX) => {
+                        // `methodType(rtype, MethodType)` and friends.
+                        value if host_invoke::method_type_of(value).is_some() => {
                             return Ok(None);
                         }
                         other => types.push(other.clone()),
@@ -502,151 +517,14 @@ impl<H: Host> Runtime<'_, H> {
                     return Err(npe(None));
                 };
                 descriptor.push_str(&class_type_descriptor(result));
-                Ok(Some(Value::Ref(Some(format!(
-                    "{METHOD_TYPE_PREFIX}{descriptor}"
-                )))))
+                Ok(Some(host_invoke::method_type(&descriptor)))
             }
             ("java/lang/Module", "addReads", "(Ljava/lang/Module;)Ljava/lang/Module;") => {
                 Ok(receiver.cloned())
             }
-            ("java/lang/invoke/MethodHandle", "bindTo", _) => {
-                let Some((kind, bound, method)) = receiver.and_then(parse_handle) else {
-                    return Ok(None);
-                };
-                if bound != "-" {
-                    return Ok(None);
-                }
-                let Some(target) = args.first().and_then(expect_ref) else {
-                    return Err(npe(None));
-                };
-                // The bound receiver is an object marker; one with a `/` would
-                // make the handle ambiguous to parse, so it is not modelled.
-                if target.contains('/') && !is_proxy(target) {
-                    return Ok(None);
-                }
-                Ok(Some(Value::Ref(Some(format!(
-                    "{HANDLE_PREFIX}{kind}/{}/{method}",
-                    target.replace('/', "\u{1}")
-                )))))
-            }
-            (
-                "java/lang/invoke/MethodHandle",
-                "invokeWithArguments",
-                "([Ljava/lang/Object;)Ljava/lang/Object;",
-            ) => {
-                let Some((kind, bound, method)) = receiver.and_then(parse_handle) else {
-                    return Ok(None);
-                };
-                let mut values = match args.first() {
-                    Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
-                    _ => Vec::new(),
-                };
-                if bound != "-" {
-                    values.insert(0, Value::Ref(Some(bound.replace('\u{1}', "/"))));
-                }
-                self.invoke_handle(&kind, &method, values).map(Some)
-            }
             _ => Ok(None),
         }
     }
-
-    /// Run the method a handle names on `values` (the receiver first for an
-    /// instance method), unboxed to its parameter types; the answer is boxed
-    /// back, as `invokeWithArguments` returns `Object`.
-    fn invoke_handle(
-        &mut self,
-        kind: &str,
-        method: &str,
-        mut values: Vec<Value>,
-    ) -> Result<Value, NativeError> {
-        let marker = method.strip_prefix("reflect-method/").unwrap_or(method);
-        let Some((class, member)) = marker.split_once('#') else {
-            return Err(NativeError::Metadata("malformed method handle".into()));
-        };
-        let Some(at) = member.find('(') else {
-            return Err(NativeError::Metadata(
-                "method handle without a descriptor".into(),
-            ));
-        };
-        let (name, descriptor) = (&member[..at], &member[at..]);
-        if kind == "new" {
-            // A constructor handle builds the object, then runs `<init>`.
-            let values = coerce_arguments(descriptor, &values);
-            let instance = self.new_object(class);
-            self.invoke(class, "<init>", descriptor, Some(instance.clone()), &values)?;
-            return Ok(instance);
-        }
-        let is_static = self
-            .class(class)
-            .and_then(|file| file.method(name, descriptor))
-            .is_some_and(Method::is_static);
-        let receiver = if is_static || values.is_empty() {
-            None
-        } else {
-            Some(values.remove(0))
-        };
-        let parameters = descriptor_arguments(descriptor);
-        if parameters.len() != values.len() {
-            return Err(NativeError::UncaughtException {
-                class: "java/lang/invoke/WrongMethodTypeException".into(),
-                message: Some(format!(
-                    "{name}{descriptor} takes {} arguments, got {}",
-                    parameters.len(),
-                    values.len()
-                )),
-                frame: None,
-            });
-        }
-        let values = coerce_arguments(descriptor, &values);
-        // A special handle runs exactly the named class's body; a virtual one
-        // selects the receiver's override, as `invokevirtual` would.
-        let owner = if kind == "virtual"
-            && let Some(class) = receiver
-                .as_ref()
-                .and_then(expect_ref)
-                .and_then(|marker| marker.split_once('#'))
-                .map(|(class, _)| class.to_owned())
-            && let Some((owner, true)) = self.member_owner(&class, name, descriptor)
-        {
-            owner
-        } else {
-            class.to_owned()
-        };
-        if receiver
-            .as_ref()
-            .and_then(expect_ref)
-            .is_some_and(|marker| is_proxy(marker))
-            && kind == "virtual"
-        {
-            let marker = receiver
-                .as_ref()
-                .and_then(expect_ref)
-                .cloned()
-                .unwrap_or_default();
-            let r = MethodRef {
-                owner: class.to_owned(),
-                name: name.to_owned(),
-                descriptor: descriptor.to_owned(),
-            };
-            let answer = self.invoke_on_proxy(&marker, &r, &values)?;
-            return self.box_primitive(return_desc(descriptor), &answer);
-        }
-        let answer = self.invoke(&owner, name, descriptor, receiver, &values)?;
-        let answer = if answer == Value::Void {
-            Value::Ref(None)
-        } else {
-            answer
-        };
-        self.box_primitive(return_desc(descriptor), &answer)
-    }
-}
-
-/// `(kind, bound receiver or "-", method marker)` of a handle marker.
-fn parse_handle(value: &Value) -> Option<(String, String, String)> {
-    let rest = expect_ref(value)?.strip_prefix(HANDLE_PREFIX)?;
-    let (kind, rest) = rest.split_once('/')?;
-    let (bound, method) = rest.split_once('/')?;
-    Some((kind.to_owned(), bound.to_owned(), method.to_owned()))
 }
 
 /// One boxed handler answer as the primitive `descriptor` names.

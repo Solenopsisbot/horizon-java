@@ -30,6 +30,11 @@ public final class JdkSupertypes {
     "java.lang.Object", "java.lang.String", "java.lang.Class", "java.lang.Record", "java.lang.Enum",
     "java.lang.Number", "java.util.Optional", "java.util.OptionalInt", "java.util.OptionalLong",
     "java.util.OptionalDouble",
+    // host_invoke's and method_handles' kinds (#156 P10b), and CharSequence for getMethod's
+    // most specific return type
+    "java.lang.invoke.MethodType", "java.lang.invoke.MethodHandle",
+    "java.lang.invoke.MethodHandles$Lookup", "java.lang.invoke.ConstantCallSite",
+    "java.lang.CharSequence",
   };
 
   static void walk(Class<?> c, Set<String> out) {

@@ -288,8 +288,11 @@ impl<H: Host> Runtime<'_, H> {
     /// it rests on a hierarchy the runtime does not hold. Decided: a
     /// primitive (only itself); `Object` (every reference); an array (only
     /// `Object`, `Cloneable`, `Serializable` and arrays whose elements are
-    /// assignable); a class the runtime holds (its own hierarchy). A JDK
-    /// class below anything but `Object` is counted.
+    /// assignable); a class the runtime holds (its own hierarchy); a JDK class
+    /// of Java 25's generated table (`jdk_closure.rs`: its whole supertype
+    /// set), or any JDK class against a type outside the system modules'
+    /// packages (a JDK class never extends a jar's). Any other JDK class is
+    /// counted.
     fn return_assignable(&self, wide: &str, narrow: &str) -> Option<bool> {
         if wide == narrow {
             return Some(true);
@@ -319,9 +322,14 @@ impl<H: Host> Runtime<'_, H> {
         if narrow == "java/lang/Object" {
             return Some(false);
         }
-        // A JDK class's supertypes are not held (counted until they are).
-        self.class(&narrow)?;
-        crate::host_ref::ClassHierarchy::is_instance(self, &narrow, &wide)
+        if self.class(&narrow).is_some() {
+            return crate::host_ref::ClassHierarchy::is_instance(self, &narrow, &wide);
+        }
+        if let Some(row) = crate::jdk_closure::class(&narrow) {
+            return Some(row.supertypes.contains(&wide.as_str()));
+        }
+        let jdk = crate::jdk_closure::in_jdk_package;
+        (jdk(&narrow) && !jdk(&wide)).then_some(false)
     }
 
     /// The public methods `getMethod` collects for `class` (JDK 25's
@@ -437,9 +445,11 @@ impl<H: Host> Runtime<'_, H> {
     /// `PublicMethods.MethodList.merge` for one name and parameter list: a
     /// method with the same return type as one already listed replaces it
     /// when its class is a subtype of the listed one's, is dropped when its
-    /// class is a supertype, and is added otherwise. `None` when the
-    /// hierarchy cannot tell.
+    /// class is a supertype, and is added otherwise. A "yes" either way
+    /// settles it; adding needs both "no"s, which the hierarchy may not prove
+    /// for a jar class (another jar's Mixin can add an interface): `None`.
     fn merge_method(&self, list: &mut Vec<PublicMethod>, method: PublicMethod) -> Option<()> {
+        use crate::host_ref::ClassHierarchy;
         for listed in list.iter_mut() {
             if listed.name != method.name
                 || listed.parameters() != method.parameters()
@@ -447,13 +457,16 @@ impl<H: Host> Runtime<'_, H> {
             {
                 continue;
             }
-            if crate::host_ref::ClassHierarchy::is_instance(self, &method.class, &listed.class)? {
+            let narrower = self.is_instance(&method.class, &listed.class);
+            if narrower == Some(true) {
                 *listed = method;
                 return Some(());
             }
-            if crate::host_ref::ClassHierarchy::is_instance(self, &listed.class, &method.class)? {
+            let wider = self.is_instance(&listed.class, &method.class);
+            if wider == Some(true) {
                 return Some(());
             }
+            narrower.zip(wider)?;
         }
         list.push(method);
         Some(())

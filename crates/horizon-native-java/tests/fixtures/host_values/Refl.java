@@ -42,6 +42,9 @@ public class Refl {
   public interface ISeq { CharSequence seq(); }
   public interface IStr { String seq(); }
   public abstract static class SeqStr implements ISeq, IStr {}
+  public abstract static class StrSeq implements IStr, ISeq {}
+  public interface ISb { StringBuilder seq(); }
+  public abstract static class SeqSb implements ISeq, ISb {}
   public interface IArrO { Object[] arr(); }
   public interface IArrS { String[] arr(); }
   public abstract static class ArrBoth implements IArrO, IArrS {}
@@ -346,8 +349,11 @@ public class Refl {
     }
   }
 
-  /** getMethod's most specific return type among JDK types: counted until the JDK hierarchy is held. */
-  public static String returnJdk() { return declaring(SeqStr.class, "seq"); }
+  /** getMethod's most specific return type among JDK types of Java 25's generated table: exact. */
+  public static String returnJdk() { return declaring(SeqStr.class, "seq") + "|" + declaring(StrSeq.class, "seq"); }
+
+  /** ... and among JDK types outside it (StringBuilder): counted. */
+  public static String returnJdkUnknown() { return declaring(SeqSb.class, "seq"); }
 
   /** ... among arrays (by element type) and held classes: exact. */
   public static String returnKnown() { return declaring(ArrBoth.class, "arr") + "|" + declaring(HeldBoth.class, "get"); }
@@ -412,7 +418,7 @@ public class Refl {
   public static String jdkDeclaredMethods() { return "" + String.class.getDeclaredMethods().length; }
 
   public static void main(String[] args) throws Exception {
-    for (String name : new String[] {"returnJdk", "returnKnown", "virtualInvoke", "initNotMethod", "publicMethods", "publicFields", "jdkMethods", "jdkFields", "jdkDeclaredMethods", "getMethodRules", "methodModifiers", "jdkInvoke", "jdkNewInstance", "spelled", "text", "real", "collections", "sameHandle", "fieldCopies", "methodCopies", "constructorCopies", "fieldStream", "methodMap", "forgedNames", "forgedCopies", "inheritedFields", "jdkFieldModifiers", "jdkFieldDeclaring"}) {
+    for (String name : new String[] {"returnJdk", "returnJdkUnknown", "returnKnown", "virtualInvoke", "initNotMethod", "publicMethods", "publicFields", "jdkMethods", "jdkFields", "jdkDeclaredMethods", "getMethodRules", "methodModifiers", "jdkInvoke", "jdkNewInstance", "spelled", "text", "real", "collections", "sameHandle", "fieldCopies", "methodCopies", "constructorCopies", "fieldStream", "methodMap", "forgedNames", "forgedCopies", "inheritedFields", "jdkFieldModifiers", "jdkFieldDeclaring"}) {
       System.out.println("== " + name);
       System.out.println(Refl.class.getMethod(name).invoke(null));
     }

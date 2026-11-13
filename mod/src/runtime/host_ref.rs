@@ -193,6 +193,18 @@ pub enum HostKind {
     /// An event a host caller dispatches or posts: key its cancelled flag and
     /// name.
     PostedEvent,
+    /// `java.lang.invoke.MethodType`: key the method descriptor
+    /// (`host_invoke.rs`).
+    MethodType,
+    /// `java.lang.invoke.MethodHandles$Lookup`: key `[mode, class]`
+    /// (`host_invoke.rs`).
+    MethodHandlesLookup,
+    /// A `java.lang.invoke.MethodHandle`: key its combinator tree as JSON
+    /// (`method_handles.rs`).
+    MethodHandle,
+    /// The `CallSite` `LambdaMetafactory.metafactory` returns: key its target
+    /// handle's JSON (`method_handles.rs`).
+    CallSite,
 }
 
 /// How a kind's Java class follows from its key.
@@ -542,6 +554,41 @@ const KINDS: &[KindInfo] = &[
         },
         canonical: never_canonical,
         methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodType,
+        tag: "mtype",
+        class: ClassRule::Fixed(crate::runtime::host_invoke::METHOD_TYPE),
+        // Java interns method types: one object per descriptor.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_invoke::METHOD_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodHandlesLookup,
+        tag: "mhlk",
+        class: ClassRule::Fixed(crate::runtime::host_invoke::LOOKUP),
+        canonical: crate::runtime::host_invoke::lookup_canonical,
+        methods: &crate::runtime::host_invoke::LOOKUP_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodHandle,
+        tag: "mh",
+        // `DirectMethodHandle`, `BoundMethodHandle$Species_LL`, …: a
+        // `MethodHandle` of a class the runtime does not know.
+        class: ClassRule::Unknown {
+            declared: crate::runtime::method_handles::handle_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::runtime::method_handles::HANDLE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CallSite,
+        tag: "csite",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::method_handles::call_site_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::runtime::method_handles::CALL_SITE_METHODS,
     },
 ];
 

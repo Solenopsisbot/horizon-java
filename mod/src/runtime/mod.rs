@@ -69,6 +69,7 @@ mod heap;
 mod hook_shapes;
 mod host_entry;
 mod host_events;
+mod host_invoke;
 mod host_list_iterator;
 mod host_optional;
 mod host_path;
