@@ -291,6 +291,11 @@ pub enum HostKind {
     /// A Fabric `CustomValue`: key the mod id and JSON pointer, or `1`/`0`/
     /// `null` alone for the shared `true`/`false`/`null` constants.
     FabricCustomValue,
+    /// A NeoForge `AttachmentType`: key a serial minted per allocation
+    /// (`host_attachment.rs`).
+    AttachmentType,
+    /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
+    AttachmentBuilder,
 }
 
 /// How a kind's Java class follows from its key.
@@ -466,6 +471,14 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::LifecycleEvent,
         &crate::runtime::host_game_event::LIFECYCLE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentType,
+        &crate::runtime::host_attachment::TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentBuilder,
+        &crate::runtime::host_attachment::BUILDER_CLASS_SIDE,
     ),
 ];
 
@@ -1045,6 +1058,21 @@ const KINDS: &[KindInfo] = &[
         // The metadata's own value at the pointer, or one shared constant.
         canonical: always_canonical,
         methods: &crate::runtime::host_fabric_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentType,
+        tag: "natt",
+        class: ClassRule::FromKey(crate::runtime::host_attachment::type_class),
+        // One serial per allocation.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_attachment::TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentBuilder,
+        tag: "nattb",
+        class: ClassRule::FromKey(crate::runtime::host_attachment::builder_class),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_attachment::BUILDER_METHODS,
     },
 ];
 
