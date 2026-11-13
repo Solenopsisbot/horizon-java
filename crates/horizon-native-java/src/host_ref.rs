@@ -211,6 +211,9 @@ pub enum HostKind {
     Holder,
     /// The value a holder's registration registered: key the serial.
     Registered,
+    /// A Fabric `FabricRegistryBuilder`: key the [`HostRef::of_values`] of
+    /// the registry its `buildAndRegister()` answers (`fabric_registry.rs`).
+    RegistryBuilder,
 }
 
 /// How a kind's Java class follows from its key.
@@ -623,6 +626,15 @@ const KINDS: &[KindInfo] = &[
         },
         canonical: always_canonical,
         methods: &crate::host_registry::REGISTERED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::RegistryBuilder,
+        tag: "frb",
+        // A final class (fabric-registry-sync 8.0.4).
+        class: ClassRule::Fixed(crate::fabric_registry::BUILDER),
+        // `create(key)` twice is two builders for one registry.
+        canonical: never_canonical,
+        methods: &crate::host_registry::BUILDER_METHODS,
     },
 ];
 

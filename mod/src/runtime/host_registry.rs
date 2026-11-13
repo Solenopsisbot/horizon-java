@@ -198,14 +198,6 @@ pub(crate) fn registry_id(value: &Value) -> Option<&str> {
     }
 }
 
-/// What the host knows of a `Registry` handle's implementation.
-pub(crate) fn registry_implementation(value: &Value) -> Option<char> {
-    match value {
-        Value::Host(handle) if handle.kind() == HostKind::Registry => handle.key().chars().next(),
-        _ => None,
-    }
-}
-
 /// The declared types of a `Registry` with this key.
 pub(crate) fn registry_types(key: &str) -> &'static [&'static str] {
     match key.chars().next() {
@@ -360,6 +352,69 @@ pub(crate) const REGISTERED_METHODS: Methods = Methods {
     compare_to: None,
 };
 
+/// A `FabricRegistryBuilder` (`fabric_registry.rs`): a final class that
+/// keeps `Object`'s `toString`/`hashCode` (an identity hash: counted) and
+/// `equals` (identity).
+pub(crate) const BUILDER_METHODS: Methods = Methods {
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    equals: identity_equals,
+    instance_of: |handle, wanted, hierarchy| {
+        let class = handle.class()?;
+        if wanted == class
+            || wanted == "java/lang/Object"
+            || hierarchy.is_instance(class, wanted) == Some(true)
+        {
+            return Some(true);
+        }
+        // It extends `Object` and a Mixin adds no superclass: no other class
+        // is a supertype. An interface a loaded Mixin may add is unknown.
+        (hierarchy.is_interface(wanted) == Some(false)).then_some(false)
+    },
+    crosses_jars: |_, _| false,
+    compare_to: None,
+};
+
+/// The text forms this family's objects had before they were handles. The
+/// runtime makes no value spelled so any more, so a text value spelled so is
+/// a jar `String` (#177 review B1, M1).
+const RETIRED_MARKERS: &[&str] = &[
+    "registry/",
+    "holder/",
+    "registered/",
+    "fabric-registry-builder/",
+];
+
+/// The game classes only this family's handles (or a jar's own objects) are.
+fn family_class(target: &str) -> bool {
+    target == crate::runtime::fabric_registry::BUILDER
+        || [
+            DEFAULTED_TYPES,
+            DEFERRED_HOLDER_TYPES,
+            REGISTRY_OBJECT_TYPES,
+        ]
+        .iter()
+        .any(|types| types.contains(&target) && !target.starts_with("java/"))
+        || matches!(
+            target,
+            "net/neoforged/neoforge/registries/DeferredItem"
+                | "net/neoforged/neoforge/registries/DeferredBlock"
+        )
+}
+
+/// `checkcast` of a String spelled like a retired marker to one of this
+/// family's game classes: Java's `ClassCastException`, naming `String`.
+pub(crate) fn retired_marker_cast(value: &Value, target: &str) -> Option<String> {
+    let Value::Ref(Some(text)) = value else {
+        return None;
+    };
+    (family_class(target)
+        && RETIRED_MARKERS
+            .iter()
+            .any(|prefix| text.starts_with(prefix)))
+    .then(|| "java/lang/String".to_owned())
+}
+
 /// What `DeferredRegister.register` recorded for one registration.
 #[derive(Clone, Debug)]
 pub(crate) struct HolderRow {
@@ -465,6 +520,35 @@ impl crate::runtime::StdHost {
                 Some(id),
             )),
             None => self.unknown_host_call(r),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A builder's key holds the registry it answers, whatever that
+    /// registry's id is spelled with, and two registries never give one
+    /// builder key.
+    #[test]
+    fn builder_keys_round_trip_their_registry() {
+        let alphabet = [
+            "a", "|", ",", ":", "/", "\\", "#", "?", "r", "i1", "hreg:", "\\,", "",
+        ];
+        let mut seen = std::collections::BTreeMap::new();
+        for a in alphabet {
+            for b in alphabet {
+                let registry = built_registry(MAPPED, &format!("{a}{b}"));
+                let builder = crate::runtime::fabric_registry::builder(registry.clone());
+                let Value::Host(handle) = &builder else {
+                    panic!("{builder:?}")
+                };
+                assert_eq!(handle.values(), Some(vec![registry.clone()]));
+                if let Some(other) = seen.insert(handle.key().to_owned(), registry.clone()) {
+                    assert_eq!(other, registry);
+                }
+            }
         }
     }
 }

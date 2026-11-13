@@ -6059,7 +6059,7 @@ impl Host for StdHost {
         if let Some(value) = dfu_pair::instance_call(r, receiver, args) {
             return value;
         }
-        if let Some(value) = fabric_registry::instance_call(r, receiver) {
+        if let Some(value) = fabric_registry::instance_call(self, r, receiver) {
             return value;
         }
         if let Some(value) = self.block_item_id_instance(r, receiver) {

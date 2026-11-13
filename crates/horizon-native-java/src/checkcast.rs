@@ -197,6 +197,10 @@ impl<H: Host> Runtime<'_, H> {
                 None => HostCast::Unknown,
             });
         }
+        // A String spelled like a registry, holder or builder once was.
+        if let Some(class) = crate::host_registry::retired_marker_cast(value, target) {
+            return Some(HostCast::Throws(class));
+        }
         HostKind::of_class(target)?;
         if *value == Value::Ref(None) {
             return Some(HostCast::Fits);
