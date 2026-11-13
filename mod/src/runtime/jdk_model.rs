@@ -516,6 +516,62 @@ const TO_MAP_COLLECTOR_PREFIX: &str = "collector/to-map/";
 /// The leading operand that marks a `to-map` collector as Guava's.
 const GUAVA_COLLECTOR_FLAG: &str = "@guava";
 
+/// A `Collectors.toMap` collection in progress: its functions and the
+/// entries so far, in encounter order. The stream push feeds it one element
+/// at a time (`stream_pipeline.rs`), so the key and value functions run
+/// interleaved with the stages, as JDK 25's `ReduceOps` runs a collector's
+/// accumulator.
+#[derive(Clone, Debug)]
+pub(crate) struct ToMap {
+    key_fn: Value,
+    value_fn: Value,
+    merge_fn: Option<Value>,
+    guava: bool,
+    entries: Vec<(Value, Value)>,
+}
+
+impl ToMap {
+    /// The state for a `collector/to-map/` marker, `None` for any other.
+    pub(crate) fn begin(collector: &str) -> Result<Option<Self>, NativeError> {
+        let Some(payload) = collector.strip_prefix(TO_MAP_COLLECTOR_PREFIX) else {
+            return Ok(None);
+        };
+        let mut markers = super::split_capture_markers(payload)?;
+        let guava = markers
+            .first()
+            .is_some_and(|marker| marker == GUAVA_COLLECTOR_FLAG);
+        if guava {
+            markers.remove(0);
+        }
+        let functions = markers
+            .into_iter()
+            .map(|marker| super::parse_collection_value(&marker))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (key_fn, value_fn, merge_fn) = match functions.as_slice() {
+            [key, value] => (key.clone(), value.clone(), None),
+            [key, value, merge] => (key.clone(), value.clone(), Some(merge.clone())),
+            _ => return Ok(None),
+        };
+        Ok(Some(Self {
+            key_fn,
+            value_fn,
+            merge_fn,
+            guava,
+            entries: Vec::new(),
+        }))
+    }
+
+    /// The collected map.
+    pub(crate) fn finish(self) -> Value {
+        let flat = self
+            .entries
+            .into_iter()
+            .flat_map(|(key, value)| [key, value])
+            .collect::<Vec<_>>();
+        super::collection_value("map", &flat)
+    }
+}
+
 /// The `Collectors.toMap` overloads the host answers with a collector marker.
 pub(crate) fn to_map_collector(r: &MethodRef, args: &[Value]) -> Option<Value> {
     // Guava's immutable-map collectors (`ImmutableMap.toImmutableMap`,
@@ -1319,88 +1375,79 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         Ok(stream)
     }
 
-    /// `stream.collect(Collectors.toMap(key, value[, merge]))`.
-    ///
-    /// Keys keep the stream's order. A repeated key without a merge function
-    /// raises the JVM's `IllegalStateException` ("Duplicate key ..."); with
-    /// one, the merged value replaces the earlier one in place. A `null`
-    /// value raises `NullPointerException`, as `HashMap.merge` does.
+    /// `stream.collect(Collectors.toMap(key, value[, merge]))` over a value
+    /// list: [`Self::accept_to_map`] for each element in order, then
+    /// [`ToMap::finish`].
     pub(crate) fn collect_to_map(
         &mut self,
         collector: &str,
         values: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let Some(payload) = collector.strip_prefix(TO_MAP_COLLECTOR_PREFIX) else {
+        let Some(mut state) = ToMap::begin(collector)? else {
             return Ok(None);
         };
-        let mut markers = super::split_capture_markers(payload)?;
-        let guava = markers
-            .first()
-            .is_some_and(|marker| marker == GUAVA_COLLECTOR_FLAG);
-        if guava {
-            markers.remove(0);
-        }
-        let functions = markers
-            .into_iter()
-            .map(|marker| super::parse_collection_value(&marker))
-            .collect::<Result<Vec<_>, _>>()?;
-        let (key_fn, value_fn, merge_fn) = match functions.as_slice() {
-            [key, value] => (key.clone(), value.clone(), None),
-            [key, value, merge] => (key.clone(), value.clone(), Some(merge.clone())),
-            _ => return Ok(None),
-        };
-        let mut entries: Vec<(Value, Value)> = Vec::new();
         for element in values {
-            let key = self.apply_function(&key_fn, element)?;
-            let value = self.apply_function(&value_fn, element)?;
-            if matches!(value, Value::Ref(None)) {
+            self.accept_to_map(&mut state, element)?;
+        }
+        Ok(Some(state.finish()))
+    }
+
+    /// `toMap`'s accumulator for one element: the key function, then the
+    /// value function, then the insert. A repeated key without a merge
+    /// function raises the JVM's `IllegalStateException` ("Duplicate key
+    /// ..."); with one, the merged value replaces the earlier one in place.
+    /// A `null` value raises `NullPointerException`, as `HashMap.merge` does.
+    pub(crate) fn accept_to_map(
+        &mut self,
+        state: &mut ToMap,
+        element: &Value,
+    ) -> Result<(), NativeError> {
+        let key = self.apply_function(&state.key_fn, element)?;
+        let value = self.apply_function(&state.value_fn, element)?;
+        if matches!(value, Value::Ref(None)) {
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/NullPointerException".into(),
+                message: None,
+                frame: None,
+            });
+        }
+        let existing = state
+            .entries
+            .iter()
+            .position(|(other, _)| super::value_marker(other) == super::value_marker(&key));
+        match (existing, state.merge_fn.clone()) {
+            (None, _) => state.entries.push((key, value)),
+            (Some(index), Some(merge)) => {
+                let earlier = state.entries[index].1.clone();
+                let merged = self.apply_callback(&merge, &[earlier, value])?;
+                state.entries[index].1 = merged;
+            }
+            (Some(index), None) if state.guava => {
                 return Err(NativeError::UncaughtException {
-                    class: "java/lang/NullPointerException".into(),
-                    message: None,
+                    class: "java/lang/IllegalArgumentException".into(),
+                    message: Some(format!(
+                        "Multiple entries with same key: {key}={} and {key}={}",
+                        super::value_text(&state.entries[index].1),
+                        super::value_text(&value),
+                        key = super::value_text(&key),
+                    )),
                     frame: None,
                 });
             }
-            let existing = entries
-                .iter()
-                .position(|(other, _)| super::value_marker(other) == super::value_marker(&key));
-            match (existing, &merge_fn) {
-                (None, _) => entries.push((key, value)),
-                (Some(index), Some(merge)) => {
-                    let earlier = entries[index].1.clone();
-                    let merged = self.apply_callback(merge, &[earlier, value])?;
-                    entries[index].1 = merged;
-                }
-                (Some(index), None) if guava => {
-                    return Err(NativeError::UncaughtException {
-                        class: "java/lang/IllegalArgumentException".into(),
-                        message: Some(format!(
-                            "Multiple entries with same key: {key}={} and {key}={}",
-                            super::value_text(&entries[index].1),
-                            super::value_text(&value),
-                            key = super::value_text(&key),
-                        )),
-                        frame: None,
-                    });
-                }
-                (Some(index), None) => {
-                    return Err(NativeError::UncaughtException {
-                        class: "java/lang/IllegalStateException".into(),
-                        message: Some(format!(
-                            "Duplicate key {} (attempted merging values {} and {})",
-                            super::value_text(&key),
-                            super::value_text(&entries[index].1),
-                            super::value_text(&value)
-                        )),
-                        frame: None,
-                    });
-                }
+            (Some(index), None) => {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/IllegalStateException".into(),
+                    message: Some(format!(
+                        "Duplicate key {} (attempted merging values {} and {})",
+                        super::value_text(&key),
+                        super::value_text(&state.entries[index].1),
+                        super::value_text(&value)
+                    )),
+                    frame: None,
+                });
             }
         }
-        let flat = entries
-            .into_iter()
-            .flat_map(|(key, value)| [key, value])
-            .collect::<Vec<_>>();
-        Ok(Some(super::collection_value("map", &flat)))
+        Ok(())
     }
 
     fn apply_function(&mut self, function: &Value, element: &Value) -> Result<Value, NativeError> {

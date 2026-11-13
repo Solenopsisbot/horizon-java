@@ -15,6 +15,8 @@ mod javac_fixture;
 #[path = "support/jdk_differential.rs"]
 mod jdk_differential;
 
+use horizon_native_java::StdHost;
+
 fn check(cases: &[(&str, &str)]) {
     jdk_differential::check("stream-spliterators", PROBE, cases);
 }
@@ -149,6 +151,10 @@ public final class Probe {
             action.accept(left--);
             return true;
         }
+    }
+
+    public static String concatOfJarSpliterator() {
+        return take(Stream.concat(StreamSupport.stream(new Split(Spliterator.ORDERED, "a"), false), Stream.of("b")).toList());
     }
 
     public static String jarSpliteratorForEach() {
@@ -411,4 +417,29 @@ fn jdk_spliterators_run_as_jdk_25_does() {
             "split size get0 ta get1 fb => 16464,2,1",
         ),
     ]);
+}
+
+/// Not JDK behaviour, counted instead: `Stream.concat` asks a jar
+/// spliterator side's `estimateSize()`/`characteristics()` when it is made,
+/// which the lazy push asks later.
+#[test]
+fn concat_over_a_jar_spliterator_is_counted() {
+    let fixture =
+        javac_fixture::Fixture::build("stream-spliterators-concat", &[("demo/Probe.java", PROBE)]);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let _ = fixture.jar.invoke_method_with_args(
+        "demo/Probe",
+        "concatOfJarSpliterator",
+        "()Ljava/lang/String;",
+        None,
+        &[],
+        &mut host,
+    );
+    assert!(
+        host.unknown_host_calls()
+            .iter()
+            .any(|(call, _)| call.starts_with("java/util/stream/Stream#concat")),
+        "{:?}",
+        host.unknown_host_calls()
+    );
 }

@@ -32,27 +32,41 @@
 //!
 //! The terminals that run callbacks per element (`forEach`, `forEachOrdered`,
 //! `reduce` in all three forms, `max`/`min`, `collect(supplier, accumulator,
-//! combiner)`, the matches and `findFirst`/`findAny`) run inside the push,
-//! so their calls interleave with the stages' exactly. Sequential `reduce`
-//! and `collect` never call the combiner. Every other terminal (`collect` of
-//! a `Collector`, `toList`, `toArray`, `iterator`, the primitive sums) gets
-//! the pipeline's output list from one full push and then runs as before.
+//! combiner)`, `collect(Collectors.toMap(...))`, the matches and
+//! `findFirst`/`findAny`) run inside the push, so their calls interleave
+//! with the stages' exactly. Sequential `reduce` and `collect` never call
+//! the combiner. The terminals that run no jar code per element (`toList`,
+//! `toArray`, `iterator`, `toList()`/`toSet()`/`joining` collectors, the
+//! primitive sums) get the pipeline's output list from one full push and
+//! then run as before.
 //!
-//! **Departures**, all named in the PR:
+//! **A stream over a host collection** (`ArrayList`, `LinkedList`,
+//! `HashSet`, ...: the fail-fast ones) binds late, as their spliterators do:
+//! it reads the collection when the terminal starts, not when `stream()` was
+//! called. A change to the collection during the traversal is checked like
+//! the JDK's `modCount` check, after each element when the pipeline pulls
+//! (`tryAdvance`) and after the last when it pushes (`forEachRemaining`): a
+//! changed size throws `ConcurrentModificationException`. What the JDK's
+//! bulk traversal visits after a change depends on the collection's
+//! internals (a `HashSet` visits an element added behind the cursor), so any
+//! change other than appending to a list is counted; so is a list of the
+//! same size with different elements, which only `modCount` could tell from
+//! a `set`.
 //!
-//! * A `Collector`'s own callbacks (`Collectors.toMap`'s key and value
-//!   functions) run after the push, not interleaved with the upstream stages
-//!   (the JDK interleaves them). The answer differs only when those
-//!   functions and the stages observe each other's side effects.
-//! * A parallel pipeline (`parallel()`, `parallelStream()`) runs
-//!   sequentially and its terminal is counted (`Stream#parallel`): the JDK's
-//!   parallel element order is not reproducible.
-//! * Reusing a stream after a stage or terminal consumed it is not refused
-//!   with the JDK's `IllegalStateException`.
-//! * `iterator()` and `spliterator()` of a stream hand out the pushed list,
-//!   not a lazy pull.
-//! * `distinct()` compares by the runtime's value equality, as the eager
-//!   model did (the hash-collection series replaces it with `HashSet`).
+//! A stream is used once: linking a stage to it, or running a terminal on
+//! it, a second time throws the JDK's `IllegalStateException` ("stream has
+//! already been operated upon or closed").
+//!
+//! **Counted, not answered** (each counts an unknown host call and runs on):
+//!
+//! * a parallel pipeline (`parallel()`, `parallelStream()`), which runs
+//!   sequentially (`Stream#parallel`): the JDK's parallel element order is
+//!   not reproducible;
+//! * `iterator()`/`spliterator()` of a pipeline that runs code or binds to a
+//!   host collection (`Stream#iterator`): the JDK pulls it lazily as the
+//!   iterator advances, this hands out the pushed list;
+//! * `distinct()` over objects (`Stream#distinct`): the runtime compares by
+//!   value, where the JDK's `HashSet` runs their `equals`/`hashCode`.
 
 use crate::{MethodRef, NativeError, Value, expect_ref};
 use std::collections::{BTreeMap, BTreeSet};
@@ -163,6 +177,8 @@ enum Terminal {
     /// The same once begun: the accumulator and the container the supplier
     /// made.
     Container(Value, Value),
+    /// `collect(Collectors.toMap(...))`.
+    ToMap(Box<crate::jdk_model::ToMap>),
     /// The downstream of a `flatMap` or `concat`: the outer push and the
     /// stage its elements go to.
     Forward(u64, usize),
@@ -180,11 +196,42 @@ struct Drive {
     stages: Arc<Vec<Stage>>,
     states: Vec<State>,
     terminal: Terminal,
-    /// Whether the pipeline can stop early (`StreamOpFlag.SHORT_CIRCUIT`): a
-    /// spliterator source is then pulled with `tryAdvance`, else pushed with
-    /// `forEachRemaining`.
+    /// Whether the pipeline can stop early (`StreamOpFlag.SHORT_CIRCUIT`):
+    /// its source is then pulled one element at a time (`tryAdvance`), else
+    /// pushed in bulk (`forEachRemaining`).
     short: bool,
 }
+
+/// The host collection a value-list source streams (`Collection.stream()`),
+/// and its class.
+#[derive(Clone, Debug)]
+struct Origin {
+    collection: Value,
+    class: String,
+}
+
+/// The JDK collections whose spliterators bind late and check `modCount`.
+const FAIL_FAST: &[&str] = &[
+    "java/util/ArrayList",
+    "java/util/Vector",
+    "java/util/Stack",
+    "java/util/LinkedList",
+    "java/util/ArrayDeque",
+    "java/util/PriorityQueue",
+    "java/util/HashSet",
+    "java/util/LinkedHashSet",
+    "java/util/TreeSet",
+];
+
+/// The lists whose bulk traversal visits only the elements it bound to when
+/// elements are appended behind it (an array or node walk bounded by the
+/// size it read first).
+const APPEND_SAFE: &[&str] = &[
+    "java/util/ArrayList",
+    "java/util/Vector",
+    "java/util/Stack",
+    "java/util/LinkedList",
+];
 
 /// The runtime's lazy stream state.
 #[derive(Default)]
@@ -208,6 +255,10 @@ pub(crate) struct Pipelines {
     collectors: BTreeMap<String, (Value, Value, Option<Value>)>,
     drives: BTreeMap<u64, Drive>,
     next_drive: u64,
+    /// Value-list sources over a fail-fast host collection.
+    origins: BTreeMap<String, Origin>,
+    /// Streams a stage or terminal has used (`linkedOrConsumed`).
+    used: BTreeSet<String>,
 }
 
 /// The single abstract method of a `java.util.function` interface.
@@ -280,6 +331,14 @@ fn npe() -> NativeError {
     }
 }
 
+fn concurrent_modification() -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/util/ConcurrentModificationException".into(),
+        message: None,
+        frame: None,
+    }
+}
+
 fn illegal_state(message: Option<&str>) -> NativeError {
     NativeError::UncaughtException {
         class: "java/lang/IllegalStateException".into(),
@@ -332,6 +391,27 @@ fn is_stream_owner(owner: &str) -> bool {
 }
 
 impl<H: crate::Host> crate::Runtime<'_, H> {
+    /// `linkedOrConsumed`: a stream takes one stage or one terminal.
+    fn consume(&mut self, stream: &str) -> Result<(), NativeError> {
+        if !self.pipelines.used.insert(stream.to_owned()) {
+            return Err(illegal_state(Some(
+                "stream has already been operated upon or closed",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Count `Stream#name` once: a call this model cannot answer as the JDK.
+    fn count_stream(&mut self, name: &str, descriptor: &str) -> Result<(), NativeError> {
+        self.host
+            .unknown_operand_call(&MethodRef {
+                owner: "java/util/stream/Stream".into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            })
+            .map(drop)
+    }
+
     fn lazy_marker(&mut self, class: &str, method: &str) -> String {
         let marker = format!("stream/{class}/{method}/{}", self.next_stream);
         self.next_stream += 1;
@@ -353,6 +433,63 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         if let Some(marker) = expect_ref(stream) {
             let root = self.root(marker);
             self.pipelines.parallel.insert(root);
+        }
+    }
+
+    /// Mark a value-list source as `collection.stream()`: when the collection
+    /// is a fail-fast host collection, the stream binds late and checks for
+    /// modification.
+    pub(crate) fn mark_stream_origin(&mut self, stream: &Value, collection: &Value) {
+        let (Some(marker), Some(source)) = (expect_ref(stream), expect_ref(collection)) else {
+            return;
+        };
+        let class = source.split_once('#').map_or("", |(class, _)| class);
+        if FAIL_FAST.contains(&class) && self.host.mutable_collection_values(collection).is_some() {
+            self.pipelines.origins.insert(
+                marker.clone(),
+                Origin {
+                    collection: collection.clone(),
+                    class: class.to_owned(),
+                },
+            );
+        }
+    }
+
+    /// The host collection's elements now, as its encoded items.
+    fn origin_items(&self, origin: &Origin) -> Result<Vec<String>, NativeError> {
+        crate::runtime_collection_values(self.host, &origin.collection)
+    }
+
+    /// Bind every host-collection source of `stream` to the collection's
+    /// current elements (the spliterator's first use reads them).
+    fn bind_sources(&mut self, stream: &str) -> Result<(), NativeError> {
+        match self.chain(stream)?.0 {
+            Source::Values(marker) => {
+                if let Some(origin) = self.pipelines.origins.get(&marker).cloned() {
+                    let values = self
+                        .origin_items(&origin)?
+                        .iter()
+                        .map(|item| crate::parse_collection_value(item))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.streams.insert(marker, values);
+                }
+                Ok(())
+            }
+            Source::Concat(a, b) => {
+                self.bind_sources(&a)?;
+                self.bind_sources(&b)
+            }
+            Source::Spliterator(_) => Ok(()),
+        }
+    }
+
+    /// Whether a spliterator source feeds `stream` (directly or through a
+    /// concatenation).
+    fn spliterator_fed(&self, stream: &str) -> bool {
+        match self.chain(stream) {
+            Ok((Source::Spliterator(_), _)) => true,
+            Ok((Source::Concat(a, b), _)) => self.spliterator_fed(&a) || self.spliterator_fed(&b),
+            _ => false,
         }
     }
 
@@ -550,6 +687,18 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             let (Some(a), Some(b)) = (self.is_stream(a), self.is_stream(b)) else {
                 return Ok(None);
             };
+            // `a.spliterator()`, `b.spliterator()`: both are consumed.
+            self.consume(&a)?;
+            self.consume(&b)?;
+            // `ConcatSpliterator` asks both sides' `estimateSize()` and
+            // `characteristics()` now; a jar spliterator here would see those
+            // calls, which the lazy push makes later.
+            if self.spliterator_fed(&a) || self.spliterator_fed(&b) {
+                self.count_stream(
+                    "concat",
+                    "(Ljava/util/stream/Stream;Ljava/util/stream/Stream;)Ljava/util/stream/Stream;",
+                )?;
+            }
             let marker = self.lazy_marker(class, method);
             // `Stream.concat` is parallel when either side is.
             if self.pipelines.parallel.contains(&self.root(&a))
@@ -634,6 +783,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         {
             return Err(npe());
         }
+        self.consume(&stream)?;
         let marker = self.lazy_marker(class, method);
         self.pipelines.links.insert(
             marker.clone(),
@@ -674,6 +824,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 decided: None,
             },
             ("count", "()J") => {
+                self.consume(stream)?;
+                self.bind_sources(stream)?;
                 if let Some(size) = self.exact_size(stream)? {
                     self.count_parallel(stream)?;
                     return Ok(Some(Value::Long(size)));
@@ -697,26 +849,32 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             },
             ("collect", _) if reference && args.len() == 3 => Terminal::Supply(arg(1), arg(0)),
             // A `Collector.of` collector: `supplier` in `begin`, the
-            // accumulator per element, the finisher after the push.
+            // accumulator per element, the finisher after the push; a
+            // `Collectors.toMap` collector: its key and value functions per
+            // element. Both interleave with the stages.
             ("collect", "(Ljava/util/stream/Collector;)Ljava/lang/Object;") => {
-                let Some((supplier, accumulator, finisher)) = expect_ref(&arg(0))
-                    .and_then(|marker| self.pipelines.collectors.get(marker))
-                    .cloned()
-                else {
+                let collector = expect_ref(&arg(0)).cloned().unwrap_or_default();
+                if let Some((supplier, accumulator, finisher)) =
+                    self.pipelines.collectors.get(&collector).cloned()
+                {
+                    self.consume(stream)?;
+                    self.count_parallel(stream)?;
+                    let Terminal::Container(_, container) =
+                        self.drive(stream, Terminal::Supply(accumulator, supplier), None)?
+                    else {
+                        return Ok(Some(Value::Ref(None)));
+                    };
+                    return Ok(Some(match finisher {
+                        Some(finisher) => {
+                            self.call_sam("java/util/function/Function", &finisher, &[container])?
+                        }
+                        None => container,
+                    }));
+                }
+                let Some(state) = crate::jdk_model::ToMap::begin(&collector)? else {
                     return Ok(None);
                 };
-                self.count_parallel(stream)?;
-                let Terminal::Container(_, container) =
-                    self.drive(stream, Terminal::Supply(accumulator, supplier), None)?
-                else {
-                    return Ok(Some(Value::Ref(None)));
-                };
-                return Ok(Some(match finisher {
-                    Some(finisher) => {
-                        self.call_sam("java/util/function/Function", &finisher, &[container])?
-                    }
-                    None => container,
-                }));
+                Terminal::ToMap(Box::new(state))
             }
             _ => return Ok(None),
         };
@@ -731,6 +889,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         };
         if callbacks.contains(&Value::Ref(None)) {
             return Err(npe());
+        }
+        if !matches!(terminal, Terminal::Count(_)) {
+            self.consume(stream)?;
         }
         self.count_parallel(stream)?;
         let result = match self.drive(stream, terminal, None)? {
@@ -750,6 +911,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 None => crate::empty_optional(),
             },
             Terminal::Fold(_, _, value) | Terminal::Container(_, value) => value,
+            Terminal::ToMap(state) => state.finish(),
             Terminal::Collect(_) | Terminal::Forward(..) | Terminal::Supply(..) => Value::Void,
         };
         Ok(Some(result))
@@ -778,6 +940,21 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             .filter(|marker| marker.starts_with("stream/"))
             .ok_or_else(|| NativeError::Metadata("expected a native stream marker".into()))?
             .clone();
+        self.consume(&marker)?;
+        // The JDK's stream iterator pulls lazily as it advances; a pipeline
+        // that runs code, or reads a host collection, would see its calls
+        // move.
+        if matches!(terminal, "iterator" | "spliterator")
+            && (!self.streams.contains_key(&marker) || self.pipelines.origins.contains_key(&marker))
+        {
+            let descriptor = if terminal == "iterator" {
+                "()Ljava/util/Iterator;"
+            } else {
+                "()Ljava/util/Spliterator;"
+            };
+            self.count_stream(terminal, descriptor)?;
+        }
+        self.bind_sources(&marker)?;
         if let Some(values) = self.streams.get(&marker) {
             return Ok(values.clone());
         }
@@ -827,6 +1004,11 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                     .is_some_and(|drive| drive.short),
                 _ => false,
             };
+        if let Source::Values(marker) = &source
+            && self.pipelines.origins.contains_key(marker)
+        {
+            self.bind_sources(marker)?;
+        }
         let id = self.pipelines.next_drive;
         self.pipelines.next_drive += 1;
         self.pipelines.drives.insert(
@@ -877,13 +1059,17 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         match source {
             Source::Values(marker) => {
                 let values = self.streams.get(marker).cloned().unwrap_or_default();
-                for value in values {
-                    if self.cancelled(id, 0) {
-                        break;
+                let origin = self.pipelines.origins.get(marker).cloned();
+                let Some(origin) = origin else {
+                    for value in values {
+                        if self.cancelled(id, 0) {
+                            break;
+                        }
+                        self.accept(id, 0, value)?;
                     }
-                    self.accept(id, 0, value)?;
-                }
-                Ok(())
+                    return Ok(());
+                };
+                self.feed_collection(&origin, values, id)
             }
             Source::Concat(a, b) => {
                 for side in [a, b] {
@@ -929,6 +1115,65 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 Ok(())
             }
         }
+    }
+
+    /// Feed a host collection's bound elements, checking it for modification
+    /// as its fail-fast spliterator does: after each element when pulled,
+    /// after the last when pushed in bulk.
+    fn feed_collection(
+        &mut self,
+        origin: &Origin,
+        values: Vec<Value>,
+        id: u64,
+    ) -> Result<(), NativeError> {
+        let bound = self.origin_items(origin)?;
+        let short = self
+            .pipelines
+            .drives
+            .get(&id)
+            .is_some_and(|drive| drive.short);
+        let counted = MethodRef {
+            owner: origin.class.clone(),
+            name: "spliterator".into(),
+            descriptor: "()Ljava/util/Spliterator;".into(),
+        };
+        let list = APPEND_SAFE.contains(&origin.class.as_str());
+        let mut uncertain = false;
+        for value in values {
+            if self.cancelled(id, 0) {
+                break;
+            }
+            self.accept(id, 0, value)?;
+            let now = self.origin_items(origin)?;
+            if now == bound {
+                continue;
+            }
+            let resized = now.len() != bound.len();
+            if short {
+                // `tryAdvance` checks `modCount` right after the element.
+                if resized || !list {
+                    return Err(concurrent_modification());
+                }
+                // A list of the same size: a `set`, or a remove and an add.
+                if !uncertain {
+                    uncertain = true;
+                    self.host.unknown_operand_call(&counted)?;
+                }
+                continue;
+            }
+            // In bulk the traversal goes on over the bound elements only when
+            // a list was appended to; anything else changes what it visits.
+            let appended = list && now.len() > bound.len() && now.starts_with(&bound);
+            if !appended && !uncertain {
+                uncertain = true;
+                self.host.unknown_operand_call(&counted)?;
+            }
+        }
+        // `forEachRemaining`'s check after the last element.
+        if !short && self.origin_items(origin)?.len() != bound.len() {
+            return Err(concurrent_modification());
+        }
+        Ok(())
     }
 
     /// `cancellationRequested()` of push `id`'s sink at stage `at`.
@@ -1000,6 +1245,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                         crate::describe_value(&inner)
                     )));
                 };
+                self.consume(&inner)?;
                 self.drive(&inner, Terminal::Collect(Vec::new()), Some((id, next)))
                     .map(drop)
             }
@@ -1022,6 +1268,14 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 Ok(())
             }
             Stage::Distinct => {
+                // An object's `equals`/`hashCode` are its own; the runtime
+                // compares by value.
+                if expect_ref(&value)
+                    .and_then(|marker| crate::jvm_dispatch::constructed_object_class(marker))
+                    .is_some()
+                {
+                    self.count_stream("distinct", "()Ljava/util/stream/Stream;")?;
+                }
                 if let Some(State::Seen(seen)) = self.state(id, at) {
                     if seen.contains(&value) {
                         return Ok(());
@@ -1183,6 +1437,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                     &[container, value],
                 )?;
             }
+            Terminal::ToMap(state) => self.accept_to_map(state, &value)?,
             Terminal::Forward(outer, next) => {
                 let (outer, next) = (*outer, *next);
                 self.accept(outer, next, value)?;
