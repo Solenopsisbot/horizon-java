@@ -481,7 +481,10 @@ fn the_registry_is_neoforges_plural_key_and_registration_waits_for_the_register_
     let bound = fixture
         .call("unbound", "()Ljava/lang/Object;", &[])
         .unwrap();
-    assert!(expect_ref(&bound).unwrap().starts_with("nf-attachment/"));
+    assert!(
+        crate::runtime::host_attachment::key_of(&bound, crate::runtime::host_ref::HostKind::AttachmentType).is_some(),
+        "{bound:?}"
+    );
 }
 
 #[test]

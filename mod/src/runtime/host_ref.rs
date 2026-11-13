@@ -276,6 +276,11 @@ pub enum HostKind {
     StackTraceElement,
     /// A `java.lang.Module`: key `unnamed` or `java.base`.
     Module,
+    /// A NeoForge `AttachmentType`: key a serial minted per allocation
+    /// (`host_attachment.rs`).
+    AttachmentType,
+    /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
+    AttachmentBuilder,
 }
 
 /// How a kind's Java class follows from its key.
@@ -451,6 +456,14 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::LifecycleEvent,
         &crate::runtime::host_game_event::LIFECYCLE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentType,
+        &crate::runtime::host_attachment::TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentBuilder,
+        &crate::runtime::host_attachment::BUILDER_CLASS_SIDE,
     ),
 ];
 
@@ -970,6 +983,21 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("java/lang/Module"),
         canonical: always_canonical,
         methods: &crate::runtime::host_jdk::MODULE,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentType,
+        tag: "natt",
+        class: ClassRule::FromKey(crate::runtime::host_attachment::type_class),
+        // One serial per allocation.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_attachment::TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentBuilder,
+        tag: "nattb",
+        class: ClassRule::FromKey(crate::runtime::host_attachment::builder_class),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_attachment::BUILDER_METHODS,
     },
 ];
 
