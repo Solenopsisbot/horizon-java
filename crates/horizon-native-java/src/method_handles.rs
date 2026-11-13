@@ -12,16 +12,17 @@
 //! `MethodHandles.invoker(type)`. The host answered all of this null, so every
 //! converter lookup came back empty and the entrypoint stopped.
 //!
-//! A handle is a self-describing marker,
-//! `java/lang/invoke/MethodHandle#mh<json>`: the combinator tree, with bound
-//! values in the runtime's value-marker form. Nothing is kept in a side table,
-//! so a handle survives being captured by a lambda, stored in a collection, or
+//! A handle is a host handle (`Value::Host`, #156 P10b) of kind
+//! `MethodHandle` whose key is the combinator tree as JSON, with bound values
+//! in the runtime's value-marker form. Nothing is kept in a side table, so a
+//! handle survives being captured by a lambda, stored in a collection, or
 //! kept in a static for a later callback exactly like any other value. The
-//! class part before `#` is `MethodHandle`, so `getClass`/`instanceof` see one.
-//!
-//! The older `method-handle/...` markers `jdk_reflect_proxy.rs` hands out for
-//! `unreflect` and lookups of jar methods are read as direct handles wherever
-//! they reach a combinator, `type()`, `invoke`, `invokeExact` or `asType`.
+//! JSON is the runtime's own (names inside are JSON strings, never split), and
+//! no `String` is a handle. A handle's exact class (`DirectMethodHandle`,
+//! `BoundMethodHandle$Species_LL`, …) is not known, so `getClass` is counted;
+//! `toString` is `MethodHandle` + its type, as on Java 25. The handles
+//! `jdk_reflect_proxy.rs` makes for `unreflect` and lookups of jar methods are
+//! the same direct handles (`direct_handle`).
 //!
 //! What a handle answers follows the JDK: `type()` is the combinator's type,
 //! `invokeExact` with a call-site type other than `type()` throws
@@ -36,17 +37,8 @@
 use super::*;
 use serde_json::{Value as Json, json};
 
-/// The class part of every handle marker.
+/// The class every handle is (the declared type of an `Unknown` kind).
 const HANDLE_CLASS: &str = "java/lang/invoke/MethodHandle";
-/// What follows `#` in a handle marker, before its JSON.
-const HANDLE_TAG: &str = "#mh";
-/// A `CallSite` marker: `java/lang/invoke/ConstantCallSite#cs<handle json>`.
-const CALL_SITE_PREFIX: &str = "java/lang/invoke/ConstantCallSite#cs";
-/// Prefix of a `MethodType` marker (shared with `jdk_reflect_proxy.rs`); the
-/// rest is the method descriptor.
-const METHOD_TYPE_PREFIX: &str = "method-type/";
-/// The prefix of a legacy handle marker from `jdk_reflect_proxy.rs`.
-const LEGACY_HANDLE_PREFIX: &str = "method-handle/";
 /// Combinators one handle may nest; deeper trees are refused, not walked.
 const MAX_HANDLE_DEPTH: usize = 32;
 /// Where a lambda spun by a direct `metafactory` call says it came from, in
@@ -261,32 +253,34 @@ fn method_descriptor(parameters: &[String], result: &str) -> String {
 }
 
 fn method_type_value(descriptor: &str) -> Value {
-    Value::Ref(Some(format!("{METHOD_TYPE_PREFIX}{descriptor}")))
+    host_invoke::method_type(descriptor)
 }
 
-/// The descriptor of a `MethodType` marker.
+/// The descriptor of a `MethodType` handle.
 fn method_type_of(value: &Value) -> Option<String> {
-    expect_ref(value)?
-        .strip_prefix(METHOD_TYPE_PREFIX)
-        .map(str::to_owned)
+    host_invoke::method_type_of(value).map(str::to_owned)
 }
 
 /// The JVM's text for a method type, `(String,int)Integer`, as
-/// `MethodType.toString` and `WrongMethodTypeException` print it.
+/// `MethodType.toString` and `WrongMethodTypeException` print it
+/// (`host_invoke::method_type_text`). A jar's member class, whose simple name
+/// the runtime does not read, keeps its binary name's last segment.
 fn method_type_text(descriptor: &str) -> String {
-    let simple = |field: &str| {
-        let class = class_marker(field);
-        class.rsplit('/').next().unwrap_or(&class).to_owned()
-    };
-    let parameters: Vec<String> = descriptor_arguments(descriptor)
-        .iter()
-        .map(|field| simple(field))
-        .collect();
-    format!(
-        "({}){}",
-        parameters.join(","),
-        simple(return_desc(descriptor))
-    )
+    host_invoke::method_type_text(descriptor).unwrap_or_else(|| {
+        let simple = |field: &str| {
+            let class = class_marker(field);
+            class.rsplit('/').next().unwrap_or(&class).to_owned()
+        };
+        let parameters: Vec<String> = descriptor_arguments(descriptor)
+            .iter()
+            .map(|field| simple(field))
+            .collect();
+        format!(
+            "({}){}",
+            parameters.join(","),
+            simple(return_desc(descriptor))
+        )
+    })
 }
 
 fn wrong_method_type(message: String) -> NativeError {
@@ -510,19 +504,124 @@ impl Handle {
     }
 
     fn value(&self) -> Value {
-        Value::Ref(Some(format!(
-            "{HANDLE_CLASS}{HANDLE_TAG}{}",
-            self.to_json()
-        )))
+        Value::Host(HostRef::new(
+            HostKind::MethodHandle,
+            self.to_json().to_string(),
+        ))
     }
 }
 
-/// Whether a value is a handle this module built.
-fn is_handle_marker(marker: &str) -> bool {
-    marker
-        .strip_prefix(HANDLE_CLASS)
-        .is_some_and(|rest| rest.starts_with(HANDLE_TAG))
+/// The JSON of a handle of `kind`.
+fn handle_json(value: &Value, kind: HostKind) -> Option<&str> {
+    match value {
+        Value::Host(handle) if handle.kind() == kind => Some(handle.key()),
+        _ => None,
+    }
 }
+
+fn parse_handle(json: &str) -> Result<Handle, NativeError> {
+    let json: Json = serde_json::from_str(json).map_err(|error| malformed(&error.to_string()))?;
+    Handle::from_json(&json, 0)
+}
+
+/// A direct handle on a member, for `jdk_reflect_proxy.rs`'s `unreflect`,
+/// `findStatic`, `findVirtual` and `findConstructor` over jar classes: `kind`
+/// is `static`, `virtual`, `special` or `new`.
+pub(super) fn direct_handle(
+    kind: &str,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+) -> Option<Value> {
+    Some(
+        Handle::Direct {
+            kind: Kind::parse(kind)?,
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+            descriptor: descriptor.to_owned(),
+        }
+        .value(),
+    )
+}
+
+/// `Lookup.unreflectSpecial(method, specialCaller)`: a special handle on
+/// `owner`'s body whose receiver is typed as `caller` (Java 25:
+/// `MethodHandle(Impl)String` for an interface default unreflected for
+/// `Impl`). The receiver passes through unchanged, so a reference `asType`
+/// over the direct handle is exactly that.
+pub(super) fn special_handle(owner: &str, name: &str, descriptor: &str, caller: &str) -> Value {
+    let direct = Handle::Direct {
+        kind: Kind::Special,
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+        descriptor: descriptor.to_owned(),
+    };
+    if caller == owner {
+        return direct.value();
+    }
+    let mut parameters = vec![field_descriptor(caller)];
+    parameters.extend(descriptor_arguments(descriptor));
+    Handle::AsType {
+        target: Box::new(direct),
+        descriptor: method_descriptor(&parameters, return_desc(descriptor)),
+    }
+    .value()
+}
+
+/// The types a `MethodHandle` surely is.
+pub(crate) fn handle_types(_: &str) -> &'static [&'static str] {
+    &[HANDLE_CLASS]
+}
+
+/// A metafactory call site's class: Java 25 builds a plain `ConstantCallSite`.
+pub(crate) fn call_site_class(_: &str) -> &str {
+    "java/lang/invoke/ConstantCallSite"
+}
+
+/// `Object.equals` on an object without its own: identity, known for the
+/// same handle and for different ones (different keys); counted for two
+/// equal keys from different constructions.
+fn identity_equals(
+    handle: &HostRef,
+    other: &Value,
+    _: &mut dyn host_ref::Nested,
+) -> Result<Option<bool>, NativeError> {
+    Ok(match other {
+        Value::Host(other) => handle.same_object(other),
+        _ => Some(false),
+    })
+}
+
+/// `MethodHandle.toString()`: `MethodHandle` + its type (`MethodHandle(int)String`).
+fn handle_text(
+    handle: &HostRef,
+    _: &mut dyn host_ref::Nested,
+) -> Result<Option<String>, NativeError> {
+    let Ok(descriptor) = parse_handle(handle.key()).and_then(|tree| tree.descriptor()) else {
+        return Ok(None);
+    };
+    Ok(host_invoke::method_type_text(&descriptor).map(|text| format!("MethodHandle{text}")))
+}
+
+pub(crate) const HANDLE_METHODS: host_ref::Methods = host_ref::Methods {
+    to_string: handle_text,
+    // Identity hashes.
+    hash_code: |_, _| Ok(None),
+    equals: identity_equals,
+    instance_of: host_ref::instance_of_class,
+    crosses_jars: |_, _| false,
+    compare_to: None,
+};
+
+pub(crate) const CALL_SITE_METHODS: host_ref::Methods = host_ref::Methods {
+    // `Object.toString`: the identity hash.
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    equals: identity_equals,
+    instance_of: host_ref::instance_of_class,
+    crosses_jars: |_, _| false,
+    compare_to: None,
+};
 
 impl<H: Host> Runtime<'_, H> {
     /// The method-handle calls this module answers, or `None` to leave the
@@ -533,14 +632,6 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        // `Object`'s members on a `MethodType` (string concatenation calls
-        // `toString` through `Object`).
-        if let Some(receiver) = receiver
-            && method_type_of(receiver).is_some()
-            && matches!(r.name.as_str(), "toString" | "equals" | "hashCode")
-        {
-            return Ok(self.method_type_call(r, receiver, args));
-        }
         match (r.owner.as_str(), r.name.as_str()) {
             ("java/lang/invoke/MethodHandles$Lookup", "findStatic" | "findVirtual") => {
                 Ok(self.find_jdk_member(r.name == "findStatic", args)?)
@@ -557,12 +648,10 @@ impl<H: Host> Runtime<'_, H> {
                 | "java/lang/invoke/VolatileCallSite",
                 "dynamicInvoker" | "getTarget",
             ) => {
-                let Some(marker) = receiver.and_then(expect_ref) else {
-                    return Ok(None);
-                };
-                Ok(marker
-                    .strip_prefix(CALL_SITE_PREFIX)
-                    .map(|handle| Value::Ref(Some(handle.to_owned()))))
+                // The call site's target: its key is the target handle's.
+                Ok(receiver
+                    .and_then(|receiver| handle_json(receiver, HostKind::CallSite))
+                    .map(|json| Value::Host(HostRef::new(HostKind::MethodHandle, json))))
             }
             ("java/lang/invoke/MethodType", _) if let Some(receiver) = receiver => {
                 Ok(self.method_type_call(r, receiver, args))
@@ -572,57 +661,11 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    /// The handle a value names: this module's markers, or a legacy
-    /// `method-handle/` one read as a direct handle.
+    /// The handle a `MethodHandle` handle names.
     fn handle_of(&self, value: &Value) -> Result<Option<Handle>, NativeError> {
-        let Some(marker) = expect_ref(value) else {
-            return Ok(None);
-        };
-        if let Some(json) = marker
-            .strip_prefix(HANDLE_CLASS)
-            .and_then(|rest| rest.strip_prefix(HANDLE_TAG))
-        {
-            let json: Json =
-                serde_json::from_str(json).map_err(|error| malformed(&error.to_string()))?;
-            return Handle::from_json(&json, 0).map(Some);
-        }
-        Ok(self.legacy_handle(marker))
-    }
-
-    /// `method-handle/<kind>/<bound or ->/reflect-method/<owner>#<name><desc>`.
-    fn legacy_handle(&self, marker: &str) -> Option<Handle> {
-        let rest = marker.strip_prefix(LEGACY_HANDLE_PREFIX)?;
-        let (kind, rest) = rest.split_once('/')?;
-        let (bound, method) = rest.split_once('/')?;
-        let member = method.strip_prefix("reflect-method/").unwrap_or(method);
-        let (owner, member) = member.split_once('#')?;
-        let at = member.find('(')?;
-        let (name, descriptor) = (&member[..at], &member[at..]);
-        let is_static = self
-            .class(owner)
-            .and_then(|file| file.method(name, descriptor))
-            .is_some_and(Method::is_static);
-        let kind = match kind {
-            "new" => Kind::Constructor,
-            "special" => Kind::Special,
-            _ if is_static => Kind::Static,
-            _ => Kind::Virtual,
-        };
-        let direct = Handle::Direct {
-            kind,
-            owner: owner.to_owned(),
-            name: name.to_owned(),
-            descriptor: descriptor.to_owned(),
-        };
-        Some(if bound == "-" {
-            direct
-        } else {
-            Handle::Insert {
-                target: Box::new(direct),
-                position: 0,
-                values: vec![Value::Ref(Some(bound.replace('\u{1}', "/")))],
-            }
-        })
+        handle_json(value, HostKind::MethodHandle)
+            .map(parse_handle)
+            .transpose()
     }
 
     /// The argument at `index` as a handle, or the JDK's NPE for null.
@@ -728,16 +771,15 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let classes = match args.get(2) {
-                    Some(value @ Value::Ref(Some(marker))) if self.arrays.contains_key(marker) => {
-                        self.array(value)?.clone()
-                    }
+                    Some(value) if self.owned_array(value).is_some() => self.array(value)?.clone(),
                     Some(value @ Value::Ref(Some(_))) => {
                         runtime_collection_values(self.host, value)?
                             .iter()
                             .map(|item| parse_collection_value(item))
                             .collect::<Result<_, _>>()?
                     }
-                    None => return Ok(None),
+                    // A shared empty array: what the unmodelled call returned.
+                    None | Some(Value::Host(_)) => return Ok(None),
                     Some(_) => return Err(npe()),
                 };
                 let types = classes
@@ -754,6 +796,10 @@ impl<H: Host> Runtime<'_, H> {
                         message: Some(format!("bad argument count {position}")),
                         frame: None,
                     })?;
+                // Nothing to drop: Java answers the target itself.
+                if types.is_empty() {
+                    return Ok(args.first().cloned());
+                }
                 Handle::Drop {
                     target: Box::new(target),
                     position,
@@ -771,7 +817,9 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let values = match args.get(2) {
-                    Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+                    Some(value) if host_array::array_key(value).is_some() => {
+                        self.array(value)?.clone()
+                    }
                     _ => Vec::new(),
                 };
                 let parameters = descriptor_arguments(&target.descriptor()?);
@@ -783,6 +831,10 @@ impl<H: Host> Runtime<'_, H> {
                         message: Some("too many values to insert".into()),
                         frame: None,
                     })?;
+                // Nothing to insert: Java answers the target itself.
+                if values.is_empty() {
+                    return Ok(args.first().cloned());
+                }
                 Handle::Insert {
                     target: Box::new(target),
                     position,
@@ -872,12 +924,12 @@ impl<H: Host> Runtime<'_, H> {
             descriptor: factory,
             implementation: Box::new(implementation),
         };
-        // The call site keeps the whole handle marker after its own prefix,
-        // so `dynamicInvoker`/`getTarget` hand it back unchanged.
-        let handle = expect_ref(&target.value()).cloned().unwrap_or_default();
-        Ok(Some(Value::Ref(Some(format!(
-            "{CALL_SITE_PREFIX}{handle}"
-        )))))
+        // The call site keeps the target handle's key, so `dynamicInvoker`/
+        // `getTarget` hand an equal handle back.
+        Ok(Some(Value::Host(HostRef::new(
+            HostKind::CallSite,
+            target.to_json().to_string(),
+        ))))
     }
 
     fn method_type_call(
@@ -905,15 +957,10 @@ impl<H: Host> Runtime<'_, H> {
             ("toMethodDescriptorString", "()Ljava/lang/String;") => {
                 Value::Ref(Some(descriptor.clone()))
             }
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(method_type_text(&descriptor))),
             ("changeReturnType", "(Ljava/lang/Class;)Ljava/lang/invoke/MethodType;") => {
                 let class = args.first().and_then(expect_ref)?;
                 method_type_value(&method_descriptor(&parameters, &field_descriptor(class)))
             }
-            ("equals", "(Ljava/lang/Object;)Z") => Value::Int(i32::from(
-                args.first().and_then(method_type_of).as_deref() == Some(descriptor.as_str()),
-            )),
-            ("hashCode", "()I") => Value::Int(java_string_hash_code(&descriptor)),
             _ => return None,
         })
     }
@@ -930,10 +977,6 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        let own = expect_ref(receiver).is_some_and(|marker| is_handle_marker(marker));
-        if !own && matches!(r.name.as_str(), "bindTo" | "invokeWithArguments") {
-            return Ok(None);
-        }
         let Some(handle) = self.handle_of(receiver)? else {
             return Ok(None);
         };
@@ -946,7 +989,7 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 if arg_count(&wanted) != arg_count(&descriptor) {
                     return Err(wrong_method_type(format!(
-                        "cannot convert {} to {}",
+                        "cannot convert MethodHandle{} to {}",
                         method_type_text(&descriptor),
                         method_type_text(&wanted)
                     )));
@@ -984,7 +1027,9 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("invokeWithArguments", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
                 let values = match args.first() {
-                    Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+                    Some(value) if host_array::array_key(value).is_some() => {
+                        self.array(value)?.clone()
+                    }
                     _ => Vec::new(),
                 };
                 let call_site = method_descriptor(
@@ -1021,7 +1066,7 @@ impl<H: Host> Runtime<'_, H> {
         let to = descriptor_arguments(&descriptor);
         if from.len() != to.len() || args.len() != to.len() {
             return Err(wrong_method_type(format!(
-                "cannot convert {} to {}",
+                "cannot convert MethodHandle{} to {}",
                 method_type_text(&descriptor),
                 method_type_text(call_site)
             )));
@@ -1270,6 +1315,16 @@ impl<H: Host> Runtime<'_, H> {
                     return Err(npe());
                 }
                 let values = coerce_arguments(descriptor, rest);
+                // A virtual call on a `Proxy` goes to its invocation handler,
+                // as the JVM routes it (`jdk_reflect_proxy.rs`).
+                if kind == Kind::Virtual
+                    && let Some(proxy) =
+                        expect_ref(receiver).filter(|marker| jdk_reflect_proxy::is_proxy(marker))
+                {
+                    let proxy = proxy.clone();
+                    let answer = self.invoke_on_proxy(&proxy, &member, &values)?;
+                    return Ok(answer);
+                }
                 // A virtual handle selects the receiver's override, as
                 // `invokevirtual` would; a special one runs `owner`'s body.
                 let receiver_class = expect_ref(receiver)
@@ -1311,13 +1366,6 @@ impl<H: Host> Runtime<'_, H> {
     }
 }
 
-/// `String.hashCode` of a method descriptor, so equal types hash equally.
-fn java_string_hash_code(text: &str) -> i32 {
-    text.encode_utf16().fold(0i32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,16 +1389,55 @@ mod tests {
                 exact: true,
             }),
         };
-        let Value::Ref(Some(marker)) = handle.value() else {
-            panic!("a handle is a marker");
-        };
-        assert!(marker.starts_with("java/lang/invoke/MethodHandle#"));
-        let json = marker
-            .strip_prefix("java/lang/invoke/MethodHandle#mh")
-            .unwrap();
-        let parsed = Handle::from_json(&serde_json::from_str(json).unwrap(), 0).unwrap();
+        let value = handle.value();
+        let json = handle_json(&value, HostKind::MethodHandle).expect("a handle is a MethodHandle");
+        let parsed = parse_handle(json).unwrap();
         assert_eq!(parsed, handle);
         assert_eq!(parsed.descriptor().unwrap(), "(I)Ljava/lang/String;");
+    }
+
+    /// A member name is jar text (`findStatic(cls, name, type)`): it goes in
+    /// a handle's key as a JSON string and reads back as itself, whatever it
+    /// holds, and distinct names never share a key (#156: keys never parse
+    /// jar text).
+    #[test]
+    fn names_with_every_separator_round_trip_as_their_own_names() {
+        const ALPHABET: &[&str] = &[
+            "\"", "\\", "{", "}", "[", "]", ",", ":", "#", "(", ")", ";", "/", "mh", "k", "direct",
+            "null", "é", "😀", "\u{0}", "\n", "a",
+        ];
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut seen = std::collections::BTreeMap::new();
+        for _ in 0..3000 {
+            let length = next() % 8;
+            let name: String = (0..length)
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                .collect();
+            for kind in ["static", "virtual", "special", "new"] {
+                let value = direct_handle(kind, "demo/Owner", &name, "(I)V").unwrap();
+                let json = handle_json(&value, HostKind::MethodHandle).unwrap();
+                match parse_handle(json).unwrap() {
+                    Handle::Direct {
+                        name: back, owner, ..
+                    } => {
+                        assert_eq!(
+                            (back.as_str(), owner.as_str()),
+                            (name.as_str(), "demo/Owner")
+                        );
+                    }
+                    other => panic!("{other:?}"),
+                }
+                if let Some(previous) = seen.insert(json.to_owned(), (kind, name.clone())) {
+                    assert_eq!(previous, (kind, name.clone()));
+                }
+            }
+        }
     }
 
     #[test]

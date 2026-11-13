@@ -37,6 +37,7 @@ pub(crate) fn object_marker_class(marker: &str) -> Option<&str> {
     let (class, serial) = marker.split_once('#')?;
     (!class.is_empty()
         && class.contains('/')
+        && !host_array::handle_only_class(class)
         && !class.contains([':', ' ', '.'])
         && !serial.is_empty()
         && serial.bytes().all(|byte| byte.is_ascii_digit()))
@@ -206,6 +207,14 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
+        // A class name a family kind owns may be a `Class` (an event's `getClass()`, text until
+        // #156 P13) or a String spelled like it: which text Java prints is not known. Counted.
+        if self.owned_class_side(marker).is_some() {
+            return self
+                .host
+                .unknown_operand_call(&object_to_string())
+                .map(Some);
+        }
         if let Some(text) = self.string_builders.get(marker) {
             return Ok(Some(Value::Ref(Some(text.clone()))));
         }

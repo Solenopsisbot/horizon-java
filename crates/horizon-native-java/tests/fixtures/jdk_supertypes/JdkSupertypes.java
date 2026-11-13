@@ -35,6 +35,11 @@ public final class JdkSupertypes {
     "java.lang.Thread", "java.lang.StackWalker", "java.lang.StackFrameInfo",
     "java.lang.StackTraceElement", "java.lang.Module", "java.util.logging.Logger",
     "java.lang.System$Logger",
+    // host_invoke's and method_handles' kinds (#156 P10b), and CharSequence for getMethod's
+    // most specific return type
+    "java.lang.invoke.MethodType", "java.lang.invoke.MethodHandle",
+    "java.lang.invoke.MethodHandles$Lookup", "java.lang.invoke.ConstantCallSite",
+    "java.lang.CharSequence",
   };
 
   static void walk(Class<?> c, Set<String> out) {

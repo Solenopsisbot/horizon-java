@@ -91,7 +91,7 @@ const CASES: &[(&str, Outcome)] = &[
     // and `get` on each: the pair hands back each copy (counted while a
     // pair's text dropped the copy number; Shulker Box Tooltip's config
     // tree, through DFU's `Pair`).
-    ("fieldStream", Exact("names=array,plain=4")),
+    ("fieldStream", Exact("names=array1,plain=4")),
     // A `HashMap` keyed by `Method`, copied, iterated and wrapped (counted
     // while a `Method` had no `hashCode`; DazzleConf's default-method map).
     ("methodMap", Exact("2,2,size,false")),
@@ -152,9 +152,15 @@ const CASES: &[(&str, Outcome)] = &[
     ("jdkInvoke", Counted),
     ("jdkNewInstance", Counted),
     // #169 review F1: `getMethod`'s most specific return type. Between JDK
-    // types (`CharSequence`/`String`) the JDK hierarchy is not held: counted
-    // (Java: `demo.Refl$IStr:java.lang.String`), never the first one.
-    ("returnJdk", Counted),
+    // types of Java 25's generated table (`String` is a `CharSequence`,
+    // `jdk_closure.rs`): exact, whichever interface comes first.
+    (
+        "returnJdk",
+        Exact("demo.Refl$IStr:java.lang.String|demo.Refl$IStr:java.lang.String"),
+    ),
+    // A JDK class outside the table (`StringBuilder`): counted (Java:
+    // `demo.Refl$ISb:java.lang.StringBuilder`).
+    ("returnJdkUnknown", Counted),
     // Arrays rank by element type and held classes by their hierarchy.
     (
         "returnKnown",

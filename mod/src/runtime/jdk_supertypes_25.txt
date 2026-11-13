@@ -2,6 +2,7 @@
 class	java/io/File	class	java/io/Serializable java/lang/Comparable java/lang/Object
 class	java/lang/Boolean	final	java/io/Serializable java/lang/Comparable java/lang/Object java/lang/constant/Constable
 class	java/lang/Byte	final	java/io/Serializable java/lang/Comparable java/lang/Number java/lang/Object java/lang/constant/Constable
+class	java/lang/CharSequence	interface	
 class	java/lang/Character	final	java/io/Serializable java/lang/Comparable java/lang/Object java/lang/constant/Constable
 class	java/lang/Class	final	java/io/Serializable java/lang/Object java/lang/constant/Constable java/lang/invoke/TypeDescriptor java/lang/invoke/TypeDescriptor$OfField java/lang/reflect/AnnotatedElement java/lang/reflect/GenericDeclaration java/lang/reflect/Type
 class	java/lang/Double	final	java/io/Serializable java/lang/Comparable java/lang/Number java/lang/Object java/lang/constant/Constable java/lang/constant/ConstantDesc
@@ -20,6 +21,10 @@ class	java/lang/StackWalker	final	java/lang/Object
 class	java/lang/String	final	java/io/Serializable java/lang/CharSequence java/lang/Comparable java/lang/Object java/lang/constant/Constable java/lang/constant/ConstantDesc
 class	java/lang/System$Logger	interface	
 class	java/lang/Thread	class	java/lang/Object java/lang/Runnable
+class	java/lang/invoke/ConstantCallSite	class	java/lang/Object java/lang/invoke/CallSite
+class	java/lang/invoke/MethodHandle	class	java/lang/Object java/lang/constant/Constable
+class	java/lang/invoke/MethodHandles$Lookup	final	java/lang/Object
+class	java/lang/invoke/MethodType	final	java/io/Serializable java/lang/Object java/lang/constant/Constable java/lang/invoke/TypeDescriptor java/lang/invoke/TypeDescriptor$OfMethod
 class	java/util/ArrayDeque	class	java/io/Serializable java/lang/Cloneable java/lang/Iterable java/lang/Object java/util/AbstractCollection java/util/Collection java/util/Deque java/util/Queue java/util/SequencedCollection
 class	java/util/ArrayList	class	java/io/Serializable java/lang/Cloneable java/lang/Iterable java/lang/Object java/util/AbstractCollection java/util/AbstractList java/util/Collection java/util/List java/util/RandomAccess java/util/SequencedCollection
 class	java/util/Collections$UnmodifiableMap	class	java/io/Serializable java/lang/Object java/util/Map

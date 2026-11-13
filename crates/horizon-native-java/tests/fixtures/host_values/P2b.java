@@ -75,8 +75,7 @@ public final class P2b {
 
   public static String stackSpelled() {
     try {
-      return plain("stack-walker", StackWalker.getInstance()) + "|" + worded("stack-frame/stackSpelled@demo/P2", "x")
-          + "|" + worded("stack-trace-element/stackSpelled@demo/P2", new Throwable().getStackTrace()[0]);
+      return plain("stack-walker", StackWalker.getInstance()) + "|" + worded("stack-frame/stackSpelled@demo/P2", "x");
     } catch (Throwable e) { return ex(e); }
   }
 
@@ -299,5 +298,10 @@ public final class P2b {
   /** A MessageFactory overload: one logger per name and factory, counted (the logger still answers). */
   public static String log4jFactory() {
     return LogManager.getLogger("x", new org.apache.logging.log4j.message.ParameterizedMessageFactory()).getName();
+  }
+
+  /** Spelled like a stack trace element; the element's hash (file and line) is counted. */
+  public static String steSpelled() {
+    try { return worded("stack-trace-element/stackSpelled@demo/P2", new Throwable().getStackTrace()[0]); } catch (Throwable e) { return ex(e); }
   }
 }

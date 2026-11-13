@@ -37,14 +37,14 @@ const CASES: &[(&str, Outcome)] = &[
         "genCollections",
         Exact(r#"[module java.base]|{module java.base=1}|1truetruetrue0"#),
     ),
-    // None of these kinds is Comparable: Java 25 throws ClassCastException, the runtime counts.
-    ("genOrder", Counted),
+    // None of these kinds is Comparable: a sort throws Java 25's ClassCastException.
+    ("genOrder", Exact(r#"CCE"#)),
     // Type switch labels reach each kind's row (Runnable, StackWalker, Module, StackTraceElement, StackFrame).
     ("genSwitch", Exact(r#"RWMEFS"#)),
     // A HashSet holding the thread.
     ("genThreadSet", Exact(r#"true"#)),
     // As `genOrder`, through a TreeSet.
-    ("genTreeSet", Counted),
+    ("genTreeSet", Exact(r#"CCE"#)),
     // A `MessageFactory` overload: one logger per name and factory, counted
     // (Java 25: `x`); the logger still answers.
     ("log4jFactory", Counted),
@@ -118,10 +118,14 @@ const CASES: &[(&str, Outcome)] = &[
     (
         "stackSpelled",
         Exact(
-            r#"java.lang.Stringtruefalsefalse1525255963|stack-walker|stack-walker|2sr|falsefalse|stack-frame/stackSpelled@demo/P2|stack-frame/stackSpelled@demo/P2|2sr|falsefalse|stack-trace-element/stackSpelled@demo/P2|stack-trace-element/stackSpelled@demo/P2|2sr"#,
+            r#"java.lang.Stringtruefalsefalse1525255963|stack-walker|stack-walker|2sr|falsefalse|stack-frame/stackSpelled@demo/P2|stack-frame/stackSpelled@demo/P2|2sr"#,
         ),
     ),
-    // Java 25: `demo.P2b.stackText(P2b.java:114)`; the runtime keeps no file or line.
+    // Spelled like a stack trace element: the String stays a String, and the
+    // element's own hash (file and line) is counted in the HashMap (Java 25:
+    // `falsefalse|stack-trace-element/stackSpelled@demo/P2|...|2sr`).
+    ("steSpelled", Counted),
+    // Java 25: `demo.P2b.stackText(P2b.java:113)`; the runtime keeps no file or line.
     ("stackText", Counted),
     // Two walks hand out two frame objects with equal keys: identity counted.
     ("stackTwo", Counted),
