@@ -28,7 +28,7 @@ pub(crate) const STRING_TYPES: &[&str] = &[
 
 /// Runtime markers with no `/`, `#`, `@` or `:` in them, which the shape rule
 /// of [`is_plain_string`] cannot tell from text.
-const SEPARATOR_FREE_MARKERS: &[&str] = &["guava-cache-builder", "mixin-environment"];
+const SEPARATOR_FREE_MARKERS: &[&str] = &["mixin-environment"];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
 /// is one of the types a string is an instance of.
