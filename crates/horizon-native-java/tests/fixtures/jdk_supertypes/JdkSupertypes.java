@@ -30,6 +30,10 @@ public final class JdkSupertypes {
     "java.lang.Object", "java.lang.String", "java.lang.Class", "java.lang.Record", "java.lang.Enum",
     "java.lang.Number", "java.util.Optional", "java.util.OptionalInt", "java.util.OptionalLong",
     "java.util.OptionalDouble",
+    // host_jdk's kinds (#156 P2)
+    "java.lang.Thread", "java.lang.StackWalker", "java.lang.StackFrameInfo",
+    "java.lang.StackTraceElement", "java.lang.Module", "java.util.logging.Logger",
+    "java.lang.System$Logger",
   };
 
   static void walk(Class<?> c, Set<String> out) {

@@ -9,11 +9,17 @@ class	java/lang/Enum	class	java/io/Serializable java/lang/Comparable java/lang/O
 class	java/lang/Float	final	java/io/Serializable java/lang/Comparable java/lang/Number java/lang/Object java/lang/constant/Constable java/lang/constant/ConstantDesc
 class	java/lang/Integer	final	java/io/Serializable java/lang/Comparable java/lang/Number java/lang/Object java/lang/constant/Constable java/lang/constant/ConstantDesc
 class	java/lang/Long	final	java/io/Serializable java/lang/Comparable java/lang/Number java/lang/Object java/lang/constant/Constable java/lang/constant/ConstantDesc
+class	java/lang/Module	final	java/lang/Object java/lang/reflect/AnnotatedElement
 class	java/lang/Number	class	java/io/Serializable java/lang/Object
 class	java/lang/Object	class	
 class	java/lang/Record	class	java/lang/Object
 class	java/lang/Short	final	java/io/Serializable java/lang/Comparable java/lang/Number java/lang/Object java/lang/constant/Constable
+class	java/lang/StackFrameInfo	class	java/lang/ClassFrameInfo java/lang/Object java/lang/StackWalker$StackFrame
+class	java/lang/StackTraceElement	final	java/io/Serializable java/lang/Object
+class	java/lang/StackWalker	final	java/lang/Object
 class	java/lang/String	final	java/io/Serializable java/lang/CharSequence java/lang/Comparable java/lang/Object java/lang/constant/Constable java/lang/constant/ConstantDesc
+class	java/lang/System$Logger	interface	
+class	java/lang/Thread	class	java/lang/Object java/lang/Runnable
 class	java/util/ArrayDeque	class	java/io/Serializable java/lang/Cloneable java/lang/Iterable java/lang/Object java/util/AbstractCollection java/util/Collection java/util/Deque java/util/Queue java/util/SequencedCollection
 class	java/util/ArrayList	class	java/io/Serializable java/lang/Cloneable java/lang/Iterable java/lang/Object java/util/AbstractCollection java/util/AbstractList java/util/Collection java/util/List java/util/RandomAccess java/util/SequencedCollection
 class	java/util/Collections$UnmodifiableMap	class	java/io/Serializable java/lang/Object java/util/Map
@@ -47,6 +53,7 @@ class	java/util/concurrent/ConcurrentSkipListMap	class	java/io/Serializable java
 class	java/util/concurrent/ConcurrentSkipListSet	class	java/io/Serializable java/lang/Cloneable java/lang/Iterable java/lang/Object java/util/AbstractCollection java/util/AbstractSet java/util/Collection java/util/NavigableSet java/util/SequencedCollection java/util/SequencedSet java/util/Set java/util/SortedSet
 class	java/util/concurrent/CopyOnWriteArrayList	class	java/io/Serializable java/lang/Cloneable java/lang/Iterable java/lang/Object java/util/Collection java/util/List java/util/RandomAccess java/util/SequencedCollection
 class	java/util/concurrent/CopyOnWriteArraySet	class	java/io/Serializable java/lang/Iterable java/lang/Object java/util/AbstractCollection java/util/AbstractSet java/util/Collection java/util/Set
+class	java/util/logging/Logger	class	java/lang/Object
 package	com/sun/accessibility/internal/resources
 package	com/sun/beans
 package	com/sun/beans/decoder
