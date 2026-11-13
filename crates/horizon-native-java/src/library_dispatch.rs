@@ -83,7 +83,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_array_views(r, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_module(r, receiver, args) {
+        if let Some(value) = self.invoke_module(r, receiver, args)? {
             return Ok(Some(value));
         }
         if let Some(value) = unboxed_to_string(r, receiver) {
@@ -588,22 +588,35 @@ impl<H: Host> Runtime<'_, H> {
         r: &MethodRef,
         receiver: Option<&Value>,
         args: &[Value],
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
         if r.owner == "java/lang/Class"
             && r.name == "getModule"
             && r.descriptor == "()Ljava/lang/Module;"
         {
-            let class = expect_ref(receiver?)?;
-            let java_base = class.starts_with("java/")
-                || class.starts_with('[')
-                || PRIMITIVE_CLASSES.contains(&class.as_str());
-            return Some(host_jdk::module_value(
-                if java_base && !self.has_class(class) {
-                    JAVA_BASE_MODULE
-                } else {
-                    UNNAMED_MODULE
-                },
-            ));
+            let Some(class) = expect_ref(receiver) else {
+                return Ok(None);
+            };
+            // An array is in its element type's module, a primitive (and a
+            // primitive array) in `java.base`, a JDK class in the module
+            // Java 25 puts its package in (`jdk_closure::module_of`).
+            let element = if class.starts_with('[') {
+                erased_field_type(class.trim_start_matches('['))
+            } else {
+                class.clone()
+            };
+            let module = if PRIMITIVE_CLASSES.contains(&element.as_str()) {
+                Some(JAVA_BASE_MODULE)
+            } else if self.has_class(&element) {
+                None
+            } else {
+                crate::jdk_closure::module_of(&element)
+            };
+            return Ok(Some(host_jdk::module_value(
+                module.unwrap_or(UNNAMED_MODULE),
+            )));
         }
         // A primitive's package is `java.lang` and an array's is its
         // element's, as `Class.getPackageName` documents; the host's name
@@ -612,7 +625,9 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getPackageName"
             && r.descriptor == "()Ljava/lang/String;"
         {
-            let class = expect_ref(receiver?)?;
+            let Some(class) = expect_ref(receiver) else {
+                return Ok(None);
+            };
             let element = class.trim_start_matches('[');
             let element = if class.starts_with('[') {
                 erased_field_type(element)
@@ -620,38 +635,50 @@ impl<H: Host> Runtime<'_, H> {
                 element.to_owned()
             };
             if PRIMITIVE_CLASSES.contains(&element.as_str()) {
-                return Some(Value::Ref(Some("java.lang".into())));
+                return Ok(Some(Value::Ref(Some("java.lang".into()))));
             }
             if class.starts_with('[') {
                 let package = element.rsplit_once('/').map_or("", |(package, _)| package);
-                return Some(Value::Ref(Some(package.replace('/', "."))));
+                return Ok(Some(Value::Ref(Some(package.replace('/', ".")))));
             }
-            return None;
+            return Ok(None);
         }
         if r.owner != "java/lang/Module" {
-            return None;
+            return Ok(None);
         }
-        let named = host_jdk::module_name(receiver?)? == JAVA_BASE_MODULE;
-        Some(match (r.name.as_str(), r.descriptor.as_str()) {
+        let Some(name) = host_jdk::module_name(receiver).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let named = name != UNNAMED_MODULE;
+        let java_base = name == JAVA_BASE_MODULE;
+        Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("isNamed", "()Z") => Value::Int(i32::from(named)),
-            ("getName", "()Ljava/lang/String;") => {
-                Value::Ref(named.then(|| "java.base".to_owned()))
-            }
+            ("getName", "()Ljava/lang/String;") => Value::Ref(named.then_some(name)),
+            // Every system module is in the boot layer; an unnamed module is
+            // in none.
             ("getLayer", "()Ljava/lang/ModuleLayer;") => {
                 Value::Ref(named.then(|| "module-layer/boot".to_owned()))
             }
+            // A named module's descriptor is an object the runtime does not
+            // model: counted. An unnamed module has none.
+            ("getDescriptor", "()Ljava/lang/module/ModuleDescriptor;") if named => {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
             ("getDescriptor", "()Ljava/lang/module/ModuleDescriptor;") => Value::Ref(None),
-            ("getClassLoader", "()Ljava/lang/ClassLoader;") => {
-                Value::Ref((!named).then(|| "classloader/bootstrap".to_owned()))
+            // `java.base` is the bootstrap loader's (`null`); another system
+            // module may be the platform loader's: counted.
+            ("getClassLoader", "()Ljava/lang/ClassLoader;") if java_base => Value::Ref(None),
+            ("getClassLoader", "()Ljava/lang/ClassLoader;") if !named => {
+                Value::Ref(Some("classloader/bootstrap".to_owned()))
             }
             (
                 "isExported" | "isOpen",
                 "(Ljava/lang/String;)Z" | "(Ljava/lang/String;Ljava/lang/Module;)Z",
-            ) => {
+            ) if java_base || !named => {
                 // `java.base` exports `java.*`; it opens none of them to an
-                // unnamed module.
+                // unnamed module. An unnamed module exports and opens all.
                 let package = args.first().and_then(expect_ref).map(String::as_str);
-                Value::Int(i32::from(if named {
+                Value::Int(i32::from(if java_base {
                     r.name == "isExported"
                         && package.is_some_and(|package| package.starts_with("java."))
                 } else {
@@ -659,8 +686,12 @@ impl<H: Host> Runtime<'_, H> {
                 }))
             }
             ("canRead", "(Ljava/lang/Module;)Z") => Value::Int(1),
-            _ => return None,
-        })
+            // Another system module's loader and exports are not modelled.
+            ("getClassLoader" | "isExported" | "isOpen", _) => {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
+            _ => return Ok(None),
+        }))
     }
 
     /// A jar subclass of `java.io.FilterInputStream` reads through the

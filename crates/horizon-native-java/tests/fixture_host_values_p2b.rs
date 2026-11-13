@@ -68,7 +68,17 @@ const CASES: &[(&str, Outcome)] = &[
     ("loggerSwitch", Counted),
     // Two anonymous loggers are two objects with equal keys: identity counted.
     ("loggerTwo", Counted),
+    // Java 25: `true`; a named module's descriptor is not modelled: counted.
+    ("moduleDescriptor", Counted),
+    // Java 25: `true`; another system module's exports are not modelled: counted.
+    ("moduleExports", Counted),
     // A JDK class's module is Java 25's for its package; an array's is its element's.
+    (
+        "moduleNames",
+        Exact(
+            r#"java.loggingtruemodule java.logging|falsetruefalse|java.sql|nulljava.basetruetrue|null|true"#,
+        ),
+    ),
     (
         "moduleReal",
         Exact(

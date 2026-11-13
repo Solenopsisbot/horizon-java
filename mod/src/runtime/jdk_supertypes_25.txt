@@ -54,918 +54,918 @@ class	java/util/concurrent/ConcurrentSkipListSet	class	java/io/Serializable java
 class	java/util/concurrent/CopyOnWriteArrayList	class	java/io/Serializable java/lang/Cloneable java/lang/Iterable java/lang/Object java/util/Collection java/util/List java/util/RandomAccess java/util/SequencedCollection
 class	java/util/concurrent/CopyOnWriteArraySet	class	java/io/Serializable java/lang/Iterable java/lang/Object java/util/AbstractCollection java/util/AbstractSet java/util/Collection java/util/Set
 class	java/util/logging/Logger	class	java/lang/Object
-package	com/sun/accessibility/internal/resources
-package	com/sun/beans
-package	com/sun/beans/decoder
-package	com/sun/beans/editors
-package	com/sun/beans/finder
-package	com/sun/beans/infos
-package	com/sun/beans/introspect
-package	com/sun/beans/util
-package	com/sun/crypto/provider
-package	com/sun/imageio/plugins/bmp
-package	com/sun/imageio/plugins/common
-package	com/sun/imageio/plugins/gif
-package	com/sun/imageio/plugins/jpeg
-package	com/sun/imageio/plugins/png
-package	com/sun/imageio/plugins/tiff
-package	com/sun/imageio/plugins/wbmp
-package	com/sun/imageio/spi
-package	com/sun/imageio/stream
-package	com/sun/java/accessibility/util
-package	com/sun/java/accessibility/util/internal
-package	com/sun/java/swing
-package	com/sun/java/swing/action
-package	com/sun/java/swing/plaf/gtk
-package	com/sun/java/swing/plaf/gtk/icons
-package	com/sun/java/swing/plaf/gtk/resources
-package	com/sun/java/swing/plaf/motif
-package	com/sun/java/swing/plaf/motif/icons
-package	com/sun/java/swing/plaf/motif/resources
-package	com/sun/java/swing/ui
-package	com/sun/java_cup/internal/runtime
-package	com/sun/jdi
-package	com/sun/jdi/connect
-package	com/sun/jdi/connect/spi
-package	com/sun/jdi/event
-package	com/sun/jdi/request
-package	com/sun/jmx/defaults
-package	com/sun/jmx/interceptor
-package	com/sun/jmx/mbeanserver
-package	com/sun/jmx/remote/internal
-package	com/sun/jmx/remote/internal/rmi
-package	com/sun/jmx/remote/protocol/rmi
-package	com/sun/jmx/remote/security
-package	com/sun/jmx/remote/util
-package	com/sun/jndi/dns
-package	com/sun/jndi/ldap
-package	com/sun/jndi/ldap/ext
-package	com/sun/jndi/ldap/pool
-package	com/sun/jndi/ldap/sasl
-package	com/sun/jndi/rmi/registry
-package	com/sun/jndi/toolkit/ctx
-package	com/sun/jndi/toolkit/dir
-package	com/sun/jndi/toolkit/url
-package	com/sun/jndi/url/dns
-package	com/sun/jndi/url/ldap
-package	com/sun/jndi/url/ldaps
-package	com/sun/jndi/url/rmi
-package	com/sun/management
-package	com/sun/management/internal
-package	com/sun/media/sound
-package	com/sun/naming/internal
-package	com/sun/net/httpserver
-package	com/sun/net/httpserver/spi
-package	com/sun/nio/file
-package	com/sun/nio/sctp
-package	com/sun/org/apache/bcel/internal
-package	com/sun/org/apache/bcel/internal/classfile
-package	com/sun/org/apache/bcel/internal/generic
-package	com/sun/org/apache/bcel/internal/util
-package	com/sun/org/apache/xalan/internal/extensions
-package	com/sun/org/apache/xalan/internal/lib
-package	com/sun/org/apache/xalan/internal/res
-package	com/sun/org/apache/xalan/internal/templates
-package	com/sun/org/apache/xalan/internal/utils
-package	com/sun/org/apache/xalan/internal/xsltc
-package	com/sun/org/apache/xalan/internal/xsltc/compiler
-package	com/sun/org/apache/xalan/internal/xsltc/compiler/util
-package	com/sun/org/apache/xalan/internal/xsltc/dom
-package	com/sun/org/apache/xalan/internal/xsltc/runtime
-package	com/sun/org/apache/xalan/internal/xsltc/runtime/output
-package	com/sun/org/apache/xalan/internal/xsltc/trax
-package	com/sun/org/apache/xalan/internal/xsltc/util
-package	com/sun/org/apache/xerces/internal/dom
-package	com/sun/org/apache/xerces/internal/dom/events
-package	com/sun/org/apache/xerces/internal/impl
-package	com/sun/org/apache/xerces/internal/impl/dtd
-package	com/sun/org/apache/xerces/internal/impl/dtd/models
-package	com/sun/org/apache/xerces/internal/impl/dv
-package	com/sun/org/apache/xerces/internal/impl/dv/dtd
-package	com/sun/org/apache/xerces/internal/impl/dv/util
-package	com/sun/org/apache/xerces/internal/impl/dv/xs
-package	com/sun/org/apache/xerces/internal/impl/io
-package	com/sun/org/apache/xerces/internal/impl/msg
-package	com/sun/org/apache/xerces/internal/impl/validation
-package	com/sun/org/apache/xerces/internal/impl/xpath
-package	com/sun/org/apache/xerces/internal/impl/xpath/regex
-package	com/sun/org/apache/xerces/internal/impl/xs
-package	com/sun/org/apache/xerces/internal/impl/xs/identity
-package	com/sun/org/apache/xerces/internal/impl/xs/models
-package	com/sun/org/apache/xerces/internal/impl/xs/opti
-package	com/sun/org/apache/xerces/internal/impl/xs/traversers
-package	com/sun/org/apache/xerces/internal/impl/xs/util
-package	com/sun/org/apache/xerces/internal/jaxp
-package	com/sun/org/apache/xerces/internal/jaxp/datatype
-package	com/sun/org/apache/xerces/internal/jaxp/validation
-package	com/sun/org/apache/xerces/internal/parsers
-package	com/sun/org/apache/xerces/internal/util
-package	com/sun/org/apache/xerces/internal/utils
-package	com/sun/org/apache/xerces/internal/xinclude
-package	com/sun/org/apache/xerces/internal/xni
-package	com/sun/org/apache/xerces/internal/xni/grammars
-package	com/sun/org/apache/xerces/internal/xni/parser
-package	com/sun/org/apache/xerces/internal/xpointer
-package	com/sun/org/apache/xerces/internal/xs
-package	com/sun/org/apache/xerces/internal/xs/datatypes
-package	com/sun/org/apache/xml/internal/dtm
-package	com/sun/org/apache/xml/internal/dtm/ref
-package	com/sun/org/apache/xml/internal/dtm/ref/dom2dtm
-package	com/sun/org/apache/xml/internal/dtm/ref/sax2dtm
-package	com/sun/org/apache/xml/internal/res
-package	com/sun/org/apache/xml/internal/security
-package	com/sun/org/apache/xml/internal/security/algorithms
-package	com/sun/org/apache/xml/internal/security/algorithms/implementations
-package	com/sun/org/apache/xml/internal/security/c14n
-package	com/sun/org/apache/xml/internal/security/c14n/helper
-package	com/sun/org/apache/xml/internal/security/c14n/implementations
-package	com/sun/org/apache/xml/internal/security/exceptions
-package	com/sun/org/apache/xml/internal/security/keys
-package	com/sun/org/apache/xml/internal/security/keys/content
-package	com/sun/org/apache/xml/internal/security/keys/content/keyvalues
-package	com/sun/org/apache/xml/internal/security/keys/content/x509
-package	com/sun/org/apache/xml/internal/security/keys/keyresolver
-package	com/sun/org/apache/xml/internal/security/keys/keyresolver/implementations
-package	com/sun/org/apache/xml/internal/security/keys/storage
-package	com/sun/org/apache/xml/internal/security/keys/storage/implementations
-package	com/sun/org/apache/xml/internal/security/parser
-package	com/sun/org/apache/xml/internal/security/resource
-package	com/sun/org/apache/xml/internal/security/signature
-package	com/sun/org/apache/xml/internal/security/signature/reference
-package	com/sun/org/apache/xml/internal/security/transforms
-package	com/sun/org/apache/xml/internal/security/transforms/implementations
-package	com/sun/org/apache/xml/internal/security/transforms/params
-package	com/sun/org/apache/xml/internal/security/utils
-package	com/sun/org/apache/xml/internal/security/utils/resolver
-package	com/sun/org/apache/xml/internal/security/utils/resolver/implementations
-package	com/sun/org/apache/xml/internal/serialize
-package	com/sun/org/apache/xml/internal/serializer
-package	com/sun/org/apache/xml/internal/serializer/dom3
-package	com/sun/org/apache/xml/internal/serializer/utils
-package	com/sun/org/apache/xml/internal/utils
-package	com/sun/org/apache/xml/internal/utils/res
-package	com/sun/org/apache/xpath/internal
-package	com/sun/org/apache/xpath/internal/axes
-package	com/sun/org/apache/xpath/internal/compiler
-package	com/sun/org/apache/xpath/internal/functions
-package	com/sun/org/apache/xpath/internal/jaxp
-package	com/sun/org/apache/xpath/internal/objects
-package	com/sun/org/apache/xpath/internal/operations
-package	com/sun/org/apache/xpath/internal/patterns
-package	com/sun/org/apache/xpath/internal/res
-package	com/sun/org/slf4j/internal
-package	com/sun/rowset
-package	com/sun/rowset/internal
-package	com/sun/rowset/providers
-package	com/sun/security/auth
-package	com/sun/security/auth/callback
-package	com/sun/security/auth/login
-package	com/sun/security/auth/module
-package	com/sun/security/jgss
-package	com/sun/security/ntlm
-package	com/sun/security/sasl
-package	com/sun/security/sasl/digest
-package	com/sun/security/sasl/gsskerb
-package	com/sun/security/sasl/ntlm
-package	com/sun/security/sasl/util
-package	com/sun/source/doctree
-package	com/sun/source/tree
-package	com/sun/source/util
-package	com/sun/swing/internal/plaf/basic/resources
-package	com/sun/swing/internal/plaf/metal/resources
-package	com/sun/swing/internal/plaf/synth/resources
-package	com/sun/tools/attach
-package	com/sun/tools/attach/spi
-package	com/sun/tools/doclint
-package	com/sun/tools/example/debug/expr
-package	com/sun/tools/example/debug/tty
-package	com/sun/tools/javac
-package	com/sun/tools/javac/api
-package	com/sun/tools/javac/code
-package	com/sun/tools/javac/comp
-package	com/sun/tools/javac/file
-package	com/sun/tools/javac/jvm
-package	com/sun/tools/javac/launcher
-package	com/sun/tools/javac/main
-package	com/sun/tools/javac/model
-package	com/sun/tools/javac/parser
-package	com/sun/tools/javac/platform
-package	com/sun/tools/javac/processing
-package	com/sun/tools/javac/resources
-package	com/sun/tools/javac/tree
-package	com/sun/tools/javac/util
-package	com/sun/tools/javap
-package	com/sun/tools/javap/resources
-package	com/sun/tools/jconsole
-package	com/sun/tools/jdeprscan
-package	com/sun/tools/jdeprscan/resources
-package	com/sun/tools/jdeprscan/scan
-package	com/sun/tools/jdeps
-package	com/sun/tools/jdeps/resources
-package	com/sun/tools/jdi
-package	com/sun/tools/jdi/resources
-package	com/sun/tools/jnativescan
-package	com/sun/tools/script/shell
-package	com/sun/xml/internal/stream
-package	com/sun/xml/internal/stream/dtd
-package	com/sun/xml/internal/stream/dtd/nonvalidating
-package	com/sun/xml/internal/stream/events
-package	com/sun/xml/internal/stream/util
-package	com/sun/xml/internal/stream/writers
-package	images/toolbarButtonGraphics/general
-package	java/applet
-package	java/awt
-package	java/awt/color
-package	java/awt/datatransfer
-package	java/awt/desktop
-package	java/awt/dnd
-package	java/awt/dnd/peer
-package	java/awt/event
-package	java/awt/font
-package	java/awt/geom
-package	java/awt/im
-package	java/awt/im/spi
-package	java/awt/image
-package	java/awt/image/renderable
-package	java/awt/peer
-package	java/awt/print
-package	java/beans
-package	java/beans/beancontext
-package	java/io
-package	java/lang
-package	java/lang/annotation
-package	java/lang/classfile
-package	java/lang/classfile/attribute
-package	java/lang/classfile/constantpool
-package	java/lang/classfile/instruction
-package	java/lang/constant
-package	java/lang/foreign
-package	java/lang/instrument
-package	java/lang/invoke
-package	java/lang/management
-package	java/lang/module
-package	java/lang/ref
-package	java/lang/reflect
-package	java/lang/runtime
-package	java/math
-package	java/net
-package	java/net/http
-package	java/net/spi
-package	java/nio
-package	java/nio/channels
-package	java/nio/channels/spi
-package	java/nio/charset
-package	java/nio/charset/spi
-package	java/nio/file
-package	java/nio/file/attribute
-package	java/nio/file/spi
-package	java/rmi
-package	java/rmi/dgc
-package	java/rmi/registry
-package	java/rmi/server
-package	java/security
-package	java/security/cert
-package	java/security/interfaces
-package	java/security/spec
-package	java/sql
-package	java/text
-package	java/text/spi
-package	java/time
-package	java/time/chrono
-package	java/time/format
-package	java/time/temporal
-package	java/time/zone
-package	java/util
-package	java/util/concurrent
-package	java/util/concurrent/atomic
-package	java/util/concurrent/locks
-package	java/util/function
-package	java/util/jar
-package	java/util/logging
-package	java/util/prefs
-package	java/util/random
-package	java/util/regex
-package	java/util/spi
-package	java/util/stream
-package	java/util/zip
-package	javax/accessibility
-package	javax/annotation/processing
-package	javax/crypto
-package	javax/crypto/interfaces
-package	javax/crypto/spec
-package	javax/imageio
-package	javax/imageio/event
-package	javax/imageio/metadata
-package	javax/imageio/plugins/bmp
-package	javax/imageio/plugins/jpeg
-package	javax/imageio/plugins/tiff
-package	javax/imageio/spi
-package	javax/imageio/stream
-package	javax/lang/model
-package	javax/lang/model/element
-package	javax/lang/model/type
-package	javax/lang/model/util
-package	javax/management
-package	javax/management/loading
-package	javax/management/modelmbean
-package	javax/management/monitor
-package	javax/management/openmbean
-package	javax/management/relation
-package	javax/management/remote
-package	javax/management/remote/rmi
-package	javax/management/timer
-package	javax/naming
-package	javax/naming/directory
-package	javax/naming/event
-package	javax/naming/ldap
-package	javax/naming/ldap/spi
-package	javax/naming/spi
-package	javax/net
-package	javax/net/ssl
-package	javax/print
-package	javax/print/attribute
-package	javax/print/attribute/standard
-package	javax/print/event
-package	javax/rmi/ssl
-package	javax/script
-package	javax/security/auth
-package	javax/security/auth/callback
-package	javax/security/auth/kerberos
-package	javax/security/auth/login
-package	javax/security/auth/spi
-package	javax/security/auth/x500
-package	javax/security/cert
-package	javax/security/sasl
-package	javax/smartcardio
-package	javax/sound
-package	javax/sound/midi
-package	javax/sound/midi/spi
-package	javax/sound/sampled
-package	javax/sound/sampled/spi
-package	javax/sql
-package	javax/sql/rowset
-package	javax/sql/rowset/serial
-package	javax/sql/rowset/spi
-package	javax/swing
-package	javax/swing/beaninfo/images
-package	javax/swing/border
-package	javax/swing/colorchooser
-package	javax/swing/event
-package	javax/swing/filechooser
-package	javax/swing/plaf
-package	javax/swing/plaf/basic
-package	javax/swing/plaf/basic/icons
-package	javax/swing/plaf/metal
-package	javax/swing/plaf/metal/icons
-package	javax/swing/plaf/metal/icons/ocean
-package	javax/swing/plaf/metal/sounds
-package	javax/swing/plaf/multi
-package	javax/swing/plaf/nimbus
-package	javax/swing/plaf/synth
-package	javax/swing/table
-package	javax/swing/text
-package	javax/swing/text/html
-package	javax/swing/text/html/parser
-package	javax/swing/text/rtf
-package	javax/swing/text/rtf/charsets
-package	javax/swing/tree
-package	javax/swing/undo
-package	javax/tools
-package	javax/transaction/xa
-package	javax/xml
-package	javax/xml/catalog
-package	javax/xml/crypto
-package	javax/xml/crypto/dom
-package	javax/xml/crypto/dsig
-package	javax/xml/crypto/dsig/dom
-package	javax/xml/crypto/dsig/keyinfo
-package	javax/xml/crypto/dsig/spec
-package	javax/xml/datatype
-package	javax/xml/namespace
-package	javax/xml/parsers
-package	javax/xml/stream
-package	javax/xml/stream/events
-package	javax/xml/stream/util
-package	javax/xml/transform
-package	javax/xml/transform/dom
-package	javax/xml/transform/sax
-package	javax/xml/transform/stax
-package	javax/xml/transform/stream
-package	javax/xml/validation
-package	javax/xml/xpath
-package	jdk/dynalink
-package	jdk/dynalink/beans
-package	jdk/dynalink/internal
-package	jdk/dynalink/linker
-package	jdk/dynalink/linker/support
-package	jdk/dynalink/support
-package	jdk/editpad
-package	jdk/editpad/resources
-package	jdk/incubator/vector
-package	jdk/internal
-package	jdk/internal/access
-package	jdk/internal/access/foreign
-package	jdk/internal/agent
-package	jdk/internal/agent/resources
-package	jdk/internal/classfile/components
-package	jdk/internal/classfile/impl
-package	jdk/internal/classfile/impl/verifier
-package	jdk/internal/constant
-package	jdk/internal/editor/external
-package	jdk/internal/editor/spi
-package	jdk/internal/event
-package	jdk/internal/foreign
-package	jdk/internal/foreign/abi
-package	jdk/internal/foreign/abi/aarch64
-package	jdk/internal/foreign/abi/aarch64/linux
-package	jdk/internal/foreign/abi/aarch64/macos
-package	jdk/internal/foreign/abi/aarch64/windows
-package	jdk/internal/foreign/abi/fallback
-package	jdk/internal/foreign/abi/ppc64
-package	jdk/internal/foreign/abi/ppc64/aix
-package	jdk/internal/foreign/abi/ppc64/linux
-package	jdk/internal/foreign/abi/riscv64
-package	jdk/internal/foreign/abi/riscv64/linux
-package	jdk/internal/foreign/abi/s390
-package	jdk/internal/foreign/abi/s390/linux
-package	jdk/internal/foreign/abi/x64
-package	jdk/internal/foreign/abi/x64/sysv
-package	jdk/internal/foreign/abi/x64/windows
-package	jdk/internal/foreign/layout
-package	jdk/internal/icu/impl
-package	jdk/internal/icu/impl/data/icudt76b
-package	jdk/internal/icu/lang
-package	jdk/internal/icu/text
-package	jdk/internal/icu/util
-package	jdk/internal/invoke
-package	jdk/internal/io
-package	jdk/internal/javac
-package	jdk/internal/jimage
-package	jdk/internal/jimage/decompressor
-package	jdk/internal/jmod
-package	jdk/internal/joptsimple
-package	jdk/internal/joptsimple/internal
-package	jdk/internal/joptsimple/util
-package	jdk/internal/jrtfs
-package	jdk/internal/jshell/debug
-package	jdk/internal/jshell/tool
-package	jdk/internal/jshell/tool/resources
-package	jdk/internal/lang/stable
-package	jdk/internal/loader
-package	jdk/internal/logger
-package	jdk/internal/markdown
-package	jdk/internal/math
-package	jdk/internal/misc
-package	jdk/internal/module
-package	jdk/internal/net/http
-package	jdk/internal/net/http/common
-package	jdk/internal/net/http/frame
-package	jdk/internal/net/http/hpack
-package	jdk/internal/net/http/websocket
-package	jdk/internal/opt
-package	jdk/internal/org/commonmark
-package	jdk/internal/org/commonmark/ext/gfm/tables
-package	jdk/internal/org/commonmark/ext/gfm/tables/internal
-package	jdk/internal/org/commonmark/internal
-package	jdk/internal/org/commonmark/internal/inline
-package	jdk/internal/org/commonmark/internal/renderer
-package	jdk/internal/org/commonmark/internal/renderer/text
-package	jdk/internal/org/commonmark/internal/util
-package	jdk/internal/org/commonmark/node
-package	jdk/internal/org/commonmark/parser
-package	jdk/internal/org/commonmark/parser/beta
-package	jdk/internal/org/commonmark/parser/block
-package	jdk/internal/org/commonmark/parser/delimiter
-package	jdk/internal/org/commonmark/renderer
-package	jdk/internal/org/commonmark/renderer/html
-package	jdk/internal/org/commonmark/renderer/markdown
-package	jdk/internal/org/commonmark/renderer/text
-package	jdk/internal/org/commonmark/text
-package	jdk/internal/org/jline
-package	jdk/internal/org/jline/keymap
-package	jdk/internal/org/jline/reader
-package	jdk/internal/org/jline/reader/impl
-package	jdk/internal/org/jline/reader/impl/completer
-package	jdk/internal/org/jline/reader/impl/history
-package	jdk/internal/org/jline/terminal
-package	jdk/internal/org/jline/terminal/impl
-package	jdk/internal/org/jline/terminal/impl/exec
-package	jdk/internal/org/jline/terminal/impl/ffm
-package	jdk/internal/org/jline/terminal/spi
-package	jdk/internal/org/jline/utils
-package	jdk/internal/org/xml/sax
-package	jdk/internal/org/xml/sax/helpers
-package	jdk/internal/perf
-package	jdk/internal/platform
-package	jdk/internal/platform/cgroupv1
-package	jdk/internal/platform/cgroupv2
-package	jdk/internal/random
-package	jdk/internal/ref
-package	jdk/internal/reflect
-package	jdk/internal/shellsupport/doc
-package	jdk/internal/shellsupport/doc/resources
-package	jdk/internal/util
-package	jdk/internal/util/random
-package	jdk/internal/util/regex
-package	jdk/internal/util/xml
-package	jdk/internal/util/xml/impl
-package	jdk/internal/vm
-package	jdk/internal/vm/annotation
-package	jdk/internal/vm/vector
-package	jdk/javadoc/doclet
-package	jdk/javadoc/internal
-package	jdk/javadoc/internal/api
-package	jdk/javadoc/internal/doclets/formats/html
-package	jdk/javadoc/internal/doclets/formats/html/markup
-package	jdk/javadoc/internal/doclets/formats/html/resources
-package	jdk/javadoc/internal/doclets/formats/html/resources/fonts
-package	jdk/javadoc/internal/doclets/formats/html/resources/jquery
-package	jdk/javadoc/internal/doclets/formats/html/resources/legal
-package	jdk/javadoc/internal/doclets/formats/html/taglets
-package	jdk/javadoc/internal/doclets/formats/html/taglets/snippet
-package	jdk/javadoc/internal/doclets/toolkit
-package	jdk/javadoc/internal/doclets/toolkit/resources
-package	jdk/javadoc/internal/doclets/toolkit/resources/releases
-package	jdk/javadoc/internal/doclets/toolkit/util
-package	jdk/javadoc/internal/doclint
-package	jdk/javadoc/internal/doclint/resources
-package	jdk/javadoc/internal/html
-package	jdk/javadoc/internal/tool
-package	jdk/javadoc/internal/tool/resources
-package	jdk/jfr
-package	jdk/jfr/consumer
-package	jdk/jfr/events
-package	jdk/jfr/internal
-package	jdk/jfr/internal/consumer
-package	jdk/jfr/internal/consumer/filter
-package	jdk/jfr/internal/dcmd
-package	jdk/jfr/internal/event
-package	jdk/jfr/internal/jfc
-package	jdk/jfr/internal/jfc/model
-package	jdk/jfr/internal/management
-package	jdk/jfr/internal/periodic
-package	jdk/jfr/internal/query
-package	jdk/jfr/internal/settings
-package	jdk/jfr/internal/test
-package	jdk/jfr/internal/tool
-package	jdk/jfr/internal/tracing
-package	jdk/jfr/internal/types
-package	jdk/jfr/internal/util
-package	jdk/jfr/tracing
-package	jdk/jpackage/internal
-package	jdk/jpackage/internal/model
-package	jdk/jpackage/internal/pipeline
-package	jdk/jpackage/internal/resources
-package	jdk/jpackage/internal/util
-package	jdk/jpackage/internal/util/function
-package	jdk/jpackage/main
-package	jdk/jshell
-package	jdk/jshell/execution
-package	jdk/jshell/execution/impl
-package	jdk/jshell/resources
-package	jdk/jshell/spi
-package	jdk/jshell/tool
-package	jdk/jshell/tool/resources
-package	jdk/management
-package	jdk/management/jfr
-package	jdk/management/jfr/internal
-package	jdk/net
-package	jdk/nio
-package	jdk/nio/mapmode
-package	jdk/nio/zipfs
-package	jdk/security/jarsigner
-package	jdk/swing/interop
-package	jdk/swing/interop/internal
-package	jdk/tools/jimage
-package	jdk/tools/jimage/resources
-package	jdk/tools/jlink/builder
-package	jdk/tools/jlink/internal
-package	jdk/tools/jlink/internal/plugins
-package	jdk/tools/jlink/internal/runtimelink
-package	jdk/tools/jlink/plugin
-package	jdk/tools/jlink/resources
-package	jdk/tools/jmod
-package	jdk/tools/jmod/resources
-package	jdk/vm/ci/aarch64
-package	jdk/vm/ci/amd64
-package	jdk/vm/ci/code
-package	jdk/vm/ci/code/site
-package	jdk/vm/ci/code/stack
-package	jdk/vm/ci/common
-package	jdk/vm/ci/hotspot
-package	jdk/vm/ci/hotspot/aarch64
-package	jdk/vm/ci/hotspot/amd64
-package	jdk/vm/ci/hotspot/riscv64
-package	jdk/vm/ci/meta
-package	jdk/vm/ci/riscv64
-package	jdk/vm/ci/runtime
-package	jdk/vm/ci/services
-package	jdk/xml/internal
-package	jdk/xml/internal/jdkcatalog
-package	jdk/xml/internal/jdkcatalog/java/dtd
-package	jdk/xml/internal/jdkcatalog/w3c/dtd/schema10
-package	jdk/xml/internal/jdkcatalog/w3c/dtd/xhtml10
-package	jdk/xml/internal/jdkcatalog/w3c/dtd/xhtml11
-package	jdk/xml/internal/jdkcatalog/w3c/dtd/xmlspec2_10
-package	jdk/xml/internal/jdkcatalog/w3c/xsd/schema10
-package	jdk/xml/internal/jdkcatalog/w3c/xsd/xhtml10
-package	jdk/xml/internal/jdkcatalog/w3c/xsd/xhtml11
-package	jdk/xml/internal/jdkcatalog/w3c/xsd/xmlNS2001
-package	netscape/javascript
-package	org/ietf/jgss
-package	org/jcp/xml/dsig/internal
-package	org/jcp/xml/dsig/internal/dom
-package	org/w3c/dom
-package	org/w3c/dom/bootstrap
-package	org/w3c/dom/css
-package	org/w3c/dom/events
-package	org/w3c/dom/html
-package	org/w3c/dom/ls
-package	org/w3c/dom/ranges
-package	org/w3c/dom/stylesheets
-package	org/w3c/dom/traversal
-package	org/w3c/dom/views
-package	org/w3c/dom/xpath
-package	org/xml/sax
-package	org/xml/sax/ext
-package	org/xml/sax/helpers
-package	sun/awt
-package	sun/awt/X11
-package	sun/awt/datatransfer
-package	sun/awt/dnd
-package	sun/awt/event
-package	sun/awt/geom
-package	sun/awt/im
-package	sun/awt/image
-package	sun/awt/resources
-package	sun/awt/resources/cursors
-package	sun/awt/screencast
-package	sun/awt/shell
-package	sun/awt/util
-package	sun/awt/www/content
-package	sun/awt/www/content/audio
-package	sun/awt/www/content/image
-package	sun/datatransfer
-package	sun/datatransfer/resources
-package	sun/font
-package	sun/font/lookup
-package	sun/instrument
-package	sun/invoke/empty
-package	sun/invoke/util
-package	sun/java2d
-package	sun/java2d/cmm
-package	sun/java2d/cmm/lcms
-package	sun/java2d/cmm/profiles
-package	sun/java2d/loops
-package	sun/java2d/marlin
-package	sun/java2d/marlin/stats
-package	sun/java2d/opengl
-package	sun/java2d/pipe
-package	sun/java2d/pipe/hw
-package	sun/java2d/x11
-package	sun/java2d/xr
-package	sun/jvm/hotspot
-package	sun/jvm/hotspot/asm
-package	sun/jvm/hotspot/classfile
-package	sun/jvm/hotspot/code
-package	sun/jvm/hotspot/compiler
-package	sun/jvm/hotspot/debugger
-package	sun/jvm/hotspot/debugger/aarch64
-package	sun/jvm/hotspot/debugger/amd64
-package	sun/jvm/hotspot/debugger/bsd
-package	sun/jvm/hotspot/debugger/bsd/aarch64
-package	sun/jvm/hotspot/debugger/bsd/amd64
-package	sun/jvm/hotspot/debugger/bsd/x86
-package	sun/jvm/hotspot/debugger/cdbg
-package	sun/jvm/hotspot/debugger/cdbg/basic
-package	sun/jvm/hotspot/debugger/dummy
-package	sun/jvm/hotspot/debugger/linux
-package	sun/jvm/hotspot/debugger/linux/aarch64
-package	sun/jvm/hotspot/debugger/linux/amd64
-package	sun/jvm/hotspot/debugger/linux/ppc64
-package	sun/jvm/hotspot/debugger/linux/riscv64
-package	sun/jvm/hotspot/debugger/linux/x86
-package	sun/jvm/hotspot/debugger/posix
-package	sun/jvm/hotspot/debugger/posix/elf
-package	sun/jvm/hotspot/debugger/ppc64
-package	sun/jvm/hotspot/debugger/remote
-package	sun/jvm/hotspot/debugger/remote/aarch64
-package	sun/jvm/hotspot/debugger/remote/amd64
-package	sun/jvm/hotspot/debugger/remote/ppc64
-package	sun/jvm/hotspot/debugger/remote/riscv64
-package	sun/jvm/hotspot/debugger/remote/x86
-package	sun/jvm/hotspot/debugger/riscv64
-package	sun/jvm/hotspot/debugger/win32/coff
-package	sun/jvm/hotspot/debugger/windbg
-package	sun/jvm/hotspot/debugger/windbg/aarch64
-package	sun/jvm/hotspot/debugger/windbg/amd64
-package	sun/jvm/hotspot/debugger/windows/amd64
-package	sun/jvm/hotspot/debugger/x86
-package	sun/jvm/hotspot/gc/epsilon
-package	sun/jvm/hotspot/gc/g1
-package	sun/jvm/hotspot/gc/parallel
-package	sun/jvm/hotspot/gc/serial
-package	sun/jvm/hotspot/gc/shared
-package	sun/jvm/hotspot/gc/shenandoah
-package	sun/jvm/hotspot/gc/z
-package	sun/jvm/hotspot/interpreter
-package	sun/jvm/hotspot/memory
-package	sun/jvm/hotspot/oops
-package	sun/jvm/hotspot/prims
-package	sun/jvm/hotspot/runtime
-package	sun/jvm/hotspot/runtime/aarch64
-package	sun/jvm/hotspot/runtime/amd64
-package	sun/jvm/hotspot/runtime/bsd
-package	sun/jvm/hotspot/runtime/bsd_aarch64
-package	sun/jvm/hotspot/runtime/bsd_amd64
-package	sun/jvm/hotspot/runtime/bsd_x86
-package	sun/jvm/hotspot/runtime/linux
-package	sun/jvm/hotspot/runtime/linux_aarch64
-package	sun/jvm/hotspot/runtime/linux_amd64
-package	sun/jvm/hotspot/runtime/linux_ppc64
-package	sun/jvm/hotspot/runtime/linux_riscv64
-package	sun/jvm/hotspot/runtime/linux_x86
-package	sun/jvm/hotspot/runtime/posix
-package	sun/jvm/hotspot/runtime/ppc64
-package	sun/jvm/hotspot/runtime/riscv64
-package	sun/jvm/hotspot/runtime/win32_aarch64
-package	sun/jvm/hotspot/runtime/win32_amd64
-package	sun/jvm/hotspot/runtime/x86
-package	sun/jvm/hotspot/tools
-package	sun/jvm/hotspot/tools/jcore
-package	sun/jvm/hotspot/types
-package	sun/jvm/hotspot/types/basic
-package	sun/jvm/hotspot/ui
-package	sun/jvm/hotspot/ui/action
-package	sun/jvm/hotspot/ui/classbrowser
-package	sun/jvm/hotspot/ui/resources
-package	sun/jvm/hotspot/ui/table
-package	sun/jvm/hotspot/ui/tree
-package	sun/jvm/hotspot/ui/treetable
-package	sun/jvm/hotspot/utilities
-package	sun/jvm/hotspot/utilities/memo
-package	sun/jvmstat
-package	sun/jvmstat/monitor
-package	sun/jvmstat/monitor/event
-package	sun/jvmstat/monitor/remote
-package	sun/jvmstat/perfdata/monitor
-package	sun/jvmstat/perfdata/monitor/protocol/file
-package	sun/jvmstat/perfdata/monitor/protocol/local
-package	sun/jvmstat/perfdata/monitor/protocol/rmi
-package	sun/jvmstat/perfdata/monitor/v1_0
-package	sun/jvmstat/perfdata/monitor/v2_0
-package	sun/jvmstat/perfdata/resources
-package	sun/launcher
-package	sun/launcher/resources
-package	sun/management
-package	sun/management/counter
-package	sun/management/counter/perf
-package	sun/management/jdp
-package	sun/management/jmxremote
-package	sun/management/spi
-package	sun/misc
-package	sun/net
-package	sun/net/dns
-package	sun/net/ext
-package	sun/net/ftp
-package	sun/net/ftp/impl
-package	sun/net/httpserver
-package	sun/net/httpserver/simpleserver
-package	sun/net/httpserver/simpleserver/resources
-package	sun/net/idn
-package	sun/net/sdp
-package	sun/net/smtp
-package	sun/net/spi
-package	sun/net/util
-package	sun/net/www
-package	sun/net/www/content/text
-package	sun/net/www/http
-package	sun/net/www/protocol/file
-package	sun/net/www/protocol/ftp
-package	sun/net/www/protocol/http
-package	sun/net/www/protocol/http/logging
-package	sun/net/www/protocol/http/ntlm
-package	sun/net/www/protocol/http/spnego
-package	sun/net/www/protocol/https
-package	sun/net/www/protocol/jar
-package	sun/net/www/protocol/jmod
-package	sun/net/www/protocol/jrt
-package	sun/net/www/protocol/mailto
-package	sun/nio
-package	sun/nio/ch
-package	sun/nio/ch/sctp
-package	sun/nio/cs
-package	sun/nio/cs/ext
-package	sun/nio/fs
-package	sun/print
-package	sun/print/resources
-package	sun/reflect
-package	sun/reflect/annotation
-package	sun/reflect/generics/factory
-package	sun/reflect/generics/parser
-package	sun/reflect/generics/reflectiveObjects
-package	sun/reflect/generics/repository
-package	sun/reflect/generics/scope
-package	sun/reflect/generics/tree
-package	sun/reflect/generics/visitor
-package	sun/reflect/misc
-package	sun/rmi/log
-package	sun/rmi/registry
-package	sun/rmi/registry/resources
-package	sun/rmi/runtime
-package	sun/rmi/server
-package	sun/rmi/transport
-package	sun/rmi/transport/tcp
-package	sun/security/ec
-package	sun/security/ec/ed
-package	sun/security/ec/point
-package	sun/security/internal/interfaces
-package	sun/security/internal/spec
-package	sun/security/jca
-package	sun/security/jgss
-package	sun/security/jgss/krb5
-package	sun/security/jgss/krb5/internal
-package	sun/security/jgss/spi
-package	sun/security/jgss/spnego
-package	sun/security/jgss/wrapper
-package	sun/security/krb5
-package	sun/security/krb5/internal
-package	sun/security/krb5/internal/ccache
-package	sun/security/krb5/internal/crypto
-package	sun/security/krb5/internal/crypto/dk
-package	sun/security/krb5/internal/ktab
-package	sun/security/krb5/internal/rcache
-package	sun/security/krb5/internal/util
-package	sun/security/pkcs
-package	sun/security/pkcs10
-package	sun/security/pkcs11
-package	sun/security/pkcs11/wrapper
-package	sun/security/pkcs12
-package	sun/security/provider
-package	sun/security/provider/certpath
-package	sun/security/provider/certpath/ldap
-package	sun/security/provider/certpath/ssl
-package	sun/security/rsa
-package	sun/security/smartcardio
-package	sun/security/ssl
-package	sun/security/timestamp
-package	sun/security/tools
-package	sun/security/tools/jarsigner
-package	sun/security/tools/jarsigner/resources
-package	sun/security/tools/keytool
-package	sun/security/tools/keytool/resources
-package	sun/security/util
-package	sun/security/util/math
-package	sun/security/util/math/intpoly
-package	sun/security/util/resources
-package	sun/security/validator
-package	sun/security/x509
-package	sun/swing
-package	sun/swing/icon
-package	sun/swing/plaf
-package	sun/swing/plaf/synth
-package	sun/swing/table
-package	sun/swing/text
-package	sun/swing/text/html
-package	sun/text
-package	sun/text/resources
-package	sun/text/resources/cldr
-package	sun/text/resources/cldr/ext
-package	sun/text/resources/ext
-package	sun/text/spi
-package	sun/tools/attach
-package	sun/tools/common
-package	sun/tools/jar
-package	sun/tools/jar/resources
-package	sun/tools/jcmd
-package	sun/tools/jconsole
-package	sun/tools/jconsole/inspector
-package	sun/tools/jconsole/resources
-package	sun/tools/jinfo
-package	sun/tools/jmap
-package	sun/tools/jps
-package	sun/tools/jstack
-package	sun/tools/jstat
-package	sun/tools/jstat/resources
-package	sun/tools/jstatd
-package	sun/tools/serialver
-package	sun/tools/serialver/resources
-package	sun/util
-package	sun/util/calendar
-package	sun/util/cldr
-package	sun/util/locale
-package	sun/util/locale/provider
-package	sun/util/logging
-package	sun/util/logging/internal
-package	sun/util/logging/resources
-package	sun/util/resources
-package	sun/util/resources/cldr
-package	sun/util/resources/cldr/ext
-package	sun/util/resources/cldr/provider
-package	sun/util/resources/ext
-package	sun/util/resources/provider
-package	sun/util/spi
-package	toolbarButtonGraphics/development
-package	toolbarButtonGraphics/general
-package	toolbarButtonGraphics/navigation
-package	toolbarButtonGraphics/text
+package	com/sun/accessibility/internal/resources	java.desktop
+package	com/sun/beans	java.desktop
+package	com/sun/beans/decoder	java.desktop
+package	com/sun/beans/editors	java.desktop
+package	com/sun/beans/finder	java.desktop
+package	com/sun/beans/infos	java.desktop
+package	com/sun/beans/introspect	java.desktop
+package	com/sun/beans/util	java.desktop
+package	com/sun/crypto/provider	java.base
+package	com/sun/imageio/plugins/bmp	java.desktop
+package	com/sun/imageio/plugins/common	java.desktop
+package	com/sun/imageio/plugins/gif	java.desktop
+package	com/sun/imageio/plugins/jpeg	java.desktop
+package	com/sun/imageio/plugins/png	java.desktop
+package	com/sun/imageio/plugins/tiff	java.desktop
+package	com/sun/imageio/plugins/wbmp	java.desktop
+package	com/sun/imageio/spi	java.desktop
+package	com/sun/imageio/stream	java.desktop
+package	com/sun/java/accessibility/util	jdk.accessibility
+package	com/sun/java/accessibility/util/internal	jdk.accessibility
+package	com/sun/java/swing	java.desktop
+package	com/sun/java/swing/action	jdk.hotspot.agent
+package	com/sun/java/swing/plaf/gtk	java.desktop
+package	com/sun/java/swing/plaf/gtk/icons	java.desktop
+package	com/sun/java/swing/plaf/gtk/resources	java.desktop
+package	com/sun/java/swing/plaf/motif	java.desktop
+package	com/sun/java/swing/plaf/motif/icons	java.desktop
+package	com/sun/java/swing/plaf/motif/resources	java.desktop
+package	com/sun/java/swing/ui	jdk.hotspot.agent
+package	com/sun/java_cup/internal/runtime	java.xml
+package	com/sun/jdi	jdk.jdi
+package	com/sun/jdi/connect	jdk.jdi
+package	com/sun/jdi/connect/spi	jdk.jdi
+package	com/sun/jdi/event	jdk.jdi
+package	com/sun/jdi/request	jdk.jdi
+package	com/sun/jmx/defaults	java.management
+package	com/sun/jmx/interceptor	java.management
+package	com/sun/jmx/mbeanserver	java.management
+package	com/sun/jmx/remote/internal	java.management
+package	com/sun/jmx/remote/internal/rmi	java.management.rmi
+package	com/sun/jmx/remote/protocol/rmi	java.management.rmi
+package	com/sun/jmx/remote/security	java.management
+package	com/sun/jmx/remote/util	java.management
+package	com/sun/jndi/dns	jdk.naming.dns
+package	com/sun/jndi/ldap	java.naming
+package	com/sun/jndi/ldap/ext	java.naming
+package	com/sun/jndi/ldap/pool	java.naming
+package	com/sun/jndi/ldap/sasl	java.naming
+package	com/sun/jndi/rmi/registry	jdk.naming.rmi
+package	com/sun/jndi/toolkit/ctx	java.naming
+package	com/sun/jndi/toolkit/dir	java.naming
+package	com/sun/jndi/toolkit/url	java.naming
+package	com/sun/jndi/url/dns	jdk.naming.dns
+package	com/sun/jndi/url/ldap	java.naming
+package	com/sun/jndi/url/ldaps	java.naming
+package	com/sun/jndi/url/rmi	jdk.naming.rmi
+package	com/sun/management	jdk.management
+package	com/sun/management/internal	jdk.management
+package	com/sun/media/sound	java.desktop
+package	com/sun/naming/internal	java.naming
+package	com/sun/net/httpserver	jdk.httpserver
+package	com/sun/net/httpserver/spi	jdk.httpserver
+package	com/sun/nio/file	jdk.unsupported
+package	com/sun/nio/sctp	jdk.sctp
+package	com/sun/org/apache/bcel/internal	java.xml
+package	com/sun/org/apache/bcel/internal/classfile	java.xml
+package	com/sun/org/apache/bcel/internal/generic	java.xml
+package	com/sun/org/apache/bcel/internal/util	java.xml
+package	com/sun/org/apache/xalan/internal/extensions	java.xml
+package	com/sun/org/apache/xalan/internal/lib	java.xml
+package	com/sun/org/apache/xalan/internal/res	java.xml
+package	com/sun/org/apache/xalan/internal/templates	java.xml
+package	com/sun/org/apache/xalan/internal/utils	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc/compiler	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc/compiler/util	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc/dom	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc/runtime	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc/runtime/output	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc/trax	java.xml
+package	com/sun/org/apache/xalan/internal/xsltc/util	java.xml
+package	com/sun/org/apache/xerces/internal/dom	java.xml
+package	com/sun/org/apache/xerces/internal/dom/events	java.xml
+package	com/sun/org/apache/xerces/internal/impl	java.xml
+package	com/sun/org/apache/xerces/internal/impl/dtd	java.xml
+package	com/sun/org/apache/xerces/internal/impl/dtd/models	java.xml
+package	com/sun/org/apache/xerces/internal/impl/dv	java.xml
+package	com/sun/org/apache/xerces/internal/impl/dv/dtd	java.xml
+package	com/sun/org/apache/xerces/internal/impl/dv/util	java.xml
+package	com/sun/org/apache/xerces/internal/impl/dv/xs	java.xml
+package	com/sun/org/apache/xerces/internal/impl/io	java.xml
+package	com/sun/org/apache/xerces/internal/impl/msg	java.xml
+package	com/sun/org/apache/xerces/internal/impl/validation	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xpath	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xpath/regex	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xs	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xs/identity	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xs/models	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xs/opti	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xs/traversers	java.xml
+package	com/sun/org/apache/xerces/internal/impl/xs/util	java.xml
+package	com/sun/org/apache/xerces/internal/jaxp	java.xml
+package	com/sun/org/apache/xerces/internal/jaxp/datatype	java.xml
+package	com/sun/org/apache/xerces/internal/jaxp/validation	java.xml
+package	com/sun/org/apache/xerces/internal/parsers	java.xml
+package	com/sun/org/apache/xerces/internal/util	java.xml
+package	com/sun/org/apache/xerces/internal/utils	java.xml
+package	com/sun/org/apache/xerces/internal/xinclude	java.xml
+package	com/sun/org/apache/xerces/internal/xni	java.xml
+package	com/sun/org/apache/xerces/internal/xni/grammars	java.xml
+package	com/sun/org/apache/xerces/internal/xni/parser	java.xml
+package	com/sun/org/apache/xerces/internal/xpointer	java.xml
+package	com/sun/org/apache/xerces/internal/xs	java.xml
+package	com/sun/org/apache/xerces/internal/xs/datatypes	java.xml
+package	com/sun/org/apache/xml/internal/dtm	java.xml
+package	com/sun/org/apache/xml/internal/dtm/ref	java.xml
+package	com/sun/org/apache/xml/internal/dtm/ref/dom2dtm	java.xml
+package	com/sun/org/apache/xml/internal/dtm/ref/sax2dtm	java.xml
+package	com/sun/org/apache/xml/internal/res	java.xml
+package	com/sun/org/apache/xml/internal/security	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/algorithms	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/algorithms/implementations	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/c14n	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/c14n/helper	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/c14n/implementations	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/exceptions	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys/content	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys/content/keyvalues	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys/content/x509	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys/keyresolver	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys/keyresolver/implementations	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys/storage	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/keys/storage/implementations	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/parser	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/resource	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/signature	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/signature/reference	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/transforms	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/transforms/implementations	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/transforms/params	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/utils	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/utils/resolver	java.xml.crypto
+package	com/sun/org/apache/xml/internal/security/utils/resolver/implementations	java.xml.crypto
+package	com/sun/org/apache/xml/internal/serialize	java.xml
+package	com/sun/org/apache/xml/internal/serializer	java.xml
+package	com/sun/org/apache/xml/internal/serializer/dom3	java.xml
+package	com/sun/org/apache/xml/internal/serializer/utils	java.xml
+package	com/sun/org/apache/xml/internal/utils	java.xml
+package	com/sun/org/apache/xml/internal/utils/res	java.xml
+package	com/sun/org/apache/xpath/internal	java.xml
+package	com/sun/org/apache/xpath/internal/axes	java.xml
+package	com/sun/org/apache/xpath/internal/compiler	java.xml
+package	com/sun/org/apache/xpath/internal/functions	java.xml
+package	com/sun/org/apache/xpath/internal/jaxp	java.xml
+package	com/sun/org/apache/xpath/internal/objects	java.xml
+package	com/sun/org/apache/xpath/internal/operations	java.xml
+package	com/sun/org/apache/xpath/internal/patterns	java.xml
+package	com/sun/org/apache/xpath/internal/res	java.xml
+package	com/sun/org/slf4j/internal	java.xml.crypto
+package	com/sun/rowset	java.sql.rowset
+package	com/sun/rowset/internal	java.sql.rowset
+package	com/sun/rowset/providers	java.sql.rowset
+package	com/sun/security/auth	jdk.security.auth
+package	com/sun/security/auth/callback	jdk.security.auth
+package	com/sun/security/auth/login	jdk.security.auth
+package	com/sun/security/auth/module	jdk.security.auth
+package	com/sun/security/jgss	jdk.security.jgss
+package	com/sun/security/ntlm	java.base
+package	com/sun/security/sasl	java.security.sasl
+package	com/sun/security/sasl/digest	java.security.sasl
+package	com/sun/security/sasl/gsskerb	jdk.security.jgss
+package	com/sun/security/sasl/ntlm	java.security.sasl
+package	com/sun/security/sasl/util	java.security.sasl
+package	com/sun/source/doctree	jdk.compiler
+package	com/sun/source/tree	jdk.compiler
+package	com/sun/source/util	jdk.compiler
+package	com/sun/swing/internal/plaf/basic/resources	java.desktop
+package	com/sun/swing/internal/plaf/metal/resources	java.desktop
+package	com/sun/swing/internal/plaf/synth/resources	java.desktop
+package	com/sun/tools/attach	jdk.attach
+package	com/sun/tools/attach/spi	jdk.attach
+package	com/sun/tools/doclint	jdk.compiler
+package	com/sun/tools/example/debug/expr	jdk.jdi
+package	com/sun/tools/example/debug/tty	jdk.jdi
+package	com/sun/tools/javac	jdk.compiler
+package	com/sun/tools/javac/api	jdk.compiler
+package	com/sun/tools/javac/code	jdk.compiler
+package	com/sun/tools/javac/comp	jdk.compiler
+package	com/sun/tools/javac/file	jdk.compiler
+package	com/sun/tools/javac/jvm	jdk.compiler
+package	com/sun/tools/javac/launcher	jdk.compiler
+package	com/sun/tools/javac/main	jdk.compiler
+package	com/sun/tools/javac/model	jdk.compiler
+package	com/sun/tools/javac/parser	jdk.compiler
+package	com/sun/tools/javac/platform	jdk.compiler
+package	com/sun/tools/javac/processing	jdk.compiler
+package	com/sun/tools/javac/resources	jdk.compiler
+package	com/sun/tools/javac/tree	jdk.compiler
+package	com/sun/tools/javac/util	jdk.compiler
+package	com/sun/tools/javap	jdk.jdeps
+package	com/sun/tools/javap/resources	jdk.jdeps
+package	com/sun/tools/jconsole	jdk.jconsole
+package	com/sun/tools/jdeprscan	jdk.jdeps
+package	com/sun/tools/jdeprscan/resources	jdk.jdeps
+package	com/sun/tools/jdeprscan/scan	jdk.jdeps
+package	com/sun/tools/jdeps	jdk.jdeps
+package	com/sun/tools/jdeps/resources	jdk.jdeps
+package	com/sun/tools/jdi	jdk.jdi
+package	com/sun/tools/jdi/resources	jdk.jdi
+package	com/sun/tools/jnativescan	jdk.jdeps
+package	com/sun/tools/script/shell	java.scripting
+package	com/sun/xml/internal/stream	java.xml
+package	com/sun/xml/internal/stream/dtd	java.xml
+package	com/sun/xml/internal/stream/dtd/nonvalidating	java.xml
+package	com/sun/xml/internal/stream/events	java.xml
+package	com/sun/xml/internal/stream/util	java.xml
+package	com/sun/xml/internal/stream/writers	java.xml
+package	images/toolbarButtonGraphics/general	jdk.hotspot.agent
+package	java/applet	java.desktop
+package	java/awt	java.desktop
+package	java/awt/color	java.desktop
+package	java/awt/datatransfer	java.datatransfer
+package	java/awt/desktop	java.desktop
+package	java/awt/dnd	java.desktop
+package	java/awt/dnd/peer	java.desktop
+package	java/awt/event	java.desktop
+package	java/awt/font	java.desktop
+package	java/awt/geom	java.desktop
+package	java/awt/im	java.desktop
+package	java/awt/im/spi	java.desktop
+package	java/awt/image	java.desktop
+package	java/awt/image/renderable	java.desktop
+package	java/awt/peer	java.desktop
+package	java/awt/print	java.desktop
+package	java/beans	java.desktop
+package	java/beans/beancontext	java.desktop
+package	java/io	java.base
+package	java/lang	java.base
+package	java/lang/annotation	java.base
+package	java/lang/classfile	java.base
+package	java/lang/classfile/attribute	java.base
+package	java/lang/classfile/constantpool	java.base
+package	java/lang/classfile/instruction	java.base
+package	java/lang/constant	java.base
+package	java/lang/foreign	java.base
+package	java/lang/instrument	java.instrument
+package	java/lang/invoke	java.base
+package	java/lang/management	java.management
+package	java/lang/module	java.base
+package	java/lang/ref	java.base
+package	java/lang/reflect	java.base
+package	java/lang/runtime	java.base
+package	java/math	java.base
+package	java/net	java.base
+package	java/net/http	java.net.http
+package	java/net/spi	java.base
+package	java/nio	java.base
+package	java/nio/channels	java.base
+package	java/nio/channels/spi	java.base
+package	java/nio/charset	java.base
+package	java/nio/charset/spi	java.base
+package	java/nio/file	java.base
+package	java/nio/file/attribute	java.base
+package	java/nio/file/spi	java.base
+package	java/rmi	java.rmi
+package	java/rmi/dgc	java.rmi
+package	java/rmi/registry	java.rmi
+package	java/rmi/server	java.rmi
+package	java/security	java.base
+package	java/security/cert	java.base
+package	java/security/interfaces	java.base
+package	java/security/spec	java.base
+package	java/sql	java.sql
+package	java/text	java.base
+package	java/text/spi	java.base
+package	java/time	java.base
+package	java/time/chrono	java.base
+package	java/time/format	java.base
+package	java/time/temporal	java.base
+package	java/time/zone	java.base
+package	java/util	java.base
+package	java/util/concurrent	java.base
+package	java/util/concurrent/atomic	java.base
+package	java/util/concurrent/locks	java.base
+package	java/util/function	java.base
+package	java/util/jar	java.base
+package	java/util/logging	java.logging
+package	java/util/prefs	java.prefs
+package	java/util/random	java.base
+package	java/util/regex	java.base
+package	java/util/spi	java.base
+package	java/util/stream	java.base
+package	java/util/zip	java.base
+package	javax/accessibility	java.desktop
+package	javax/annotation/processing	java.compiler
+package	javax/crypto	java.base
+package	javax/crypto/interfaces	java.base
+package	javax/crypto/spec	java.base
+package	javax/imageio	java.desktop
+package	javax/imageio/event	java.desktop
+package	javax/imageio/metadata	java.desktop
+package	javax/imageio/plugins/bmp	java.desktop
+package	javax/imageio/plugins/jpeg	java.desktop
+package	javax/imageio/plugins/tiff	java.desktop
+package	javax/imageio/spi	java.desktop
+package	javax/imageio/stream	java.desktop
+package	javax/lang/model	java.compiler
+package	javax/lang/model/element	java.compiler
+package	javax/lang/model/type	java.compiler
+package	javax/lang/model/util	java.compiler
+package	javax/management	java.management
+package	javax/management/loading	java.management
+package	javax/management/modelmbean	java.management
+package	javax/management/monitor	java.management
+package	javax/management/openmbean	java.management
+package	javax/management/relation	java.management
+package	javax/management/remote	java.management
+package	javax/management/remote/rmi	java.management.rmi
+package	javax/management/timer	java.management
+package	javax/naming	java.naming
+package	javax/naming/directory	java.naming
+package	javax/naming/event	java.naming
+package	javax/naming/ldap	java.naming
+package	javax/naming/ldap/spi	java.naming
+package	javax/naming/spi	java.naming
+package	javax/net	java.base
+package	javax/net/ssl	java.base
+package	javax/print	java.desktop
+package	javax/print/attribute	java.desktop
+package	javax/print/attribute/standard	java.desktop
+package	javax/print/event	java.desktop
+package	javax/rmi/ssl	java.rmi
+package	javax/script	java.scripting
+package	javax/security/auth	java.base
+package	javax/security/auth/callback	java.base
+package	javax/security/auth/kerberos	java.security.jgss
+package	javax/security/auth/login	java.base
+package	javax/security/auth/spi	java.base
+package	javax/security/auth/x500	java.base
+package	javax/security/cert	java.base
+package	javax/security/sasl	java.security.sasl
+package	javax/smartcardio	java.smartcardio
+package	javax/sound	java.desktop
+package	javax/sound/midi	java.desktop
+package	javax/sound/midi/spi	java.desktop
+package	javax/sound/sampled	java.desktop
+package	javax/sound/sampled/spi	java.desktop
+package	javax/sql	java.sql
+package	javax/sql/rowset	java.sql.rowset
+package	javax/sql/rowset/serial	java.sql.rowset
+package	javax/sql/rowset/spi	java.sql.rowset
+package	javax/swing	java.desktop
+package	javax/swing/beaninfo/images	java.desktop
+package	javax/swing/border	java.desktop
+package	javax/swing/colorchooser	java.desktop
+package	javax/swing/event	java.desktop
+package	javax/swing/filechooser	java.desktop
+package	javax/swing/plaf	java.desktop
+package	javax/swing/plaf/basic	java.desktop
+package	javax/swing/plaf/basic/icons	java.desktop
+package	javax/swing/plaf/metal	java.desktop
+package	javax/swing/plaf/metal/icons	java.desktop
+package	javax/swing/plaf/metal/icons/ocean	java.desktop
+package	javax/swing/plaf/metal/sounds	java.desktop
+package	javax/swing/plaf/multi	java.desktop
+package	javax/swing/plaf/nimbus	java.desktop
+package	javax/swing/plaf/synth	java.desktop
+package	javax/swing/table	java.desktop
+package	javax/swing/text	java.desktop
+package	javax/swing/text/html	java.desktop
+package	javax/swing/text/html/parser	java.desktop
+package	javax/swing/text/rtf	java.desktop
+package	javax/swing/text/rtf/charsets	java.desktop
+package	javax/swing/tree	java.desktop
+package	javax/swing/undo	java.desktop
+package	javax/tools	java.compiler
+package	javax/transaction/xa	java.transaction.xa
+package	javax/xml	java.xml
+package	javax/xml/catalog	java.xml
+package	javax/xml/crypto	java.xml.crypto
+package	javax/xml/crypto/dom	java.xml.crypto
+package	javax/xml/crypto/dsig	java.xml.crypto
+package	javax/xml/crypto/dsig/dom	java.xml.crypto
+package	javax/xml/crypto/dsig/keyinfo	java.xml.crypto
+package	javax/xml/crypto/dsig/spec	java.xml.crypto
+package	javax/xml/datatype	java.xml
+package	javax/xml/namespace	java.xml
+package	javax/xml/parsers	java.xml
+package	javax/xml/stream	java.xml
+package	javax/xml/stream/events	java.xml
+package	javax/xml/stream/util	java.xml
+package	javax/xml/transform	java.xml
+package	javax/xml/transform/dom	java.xml
+package	javax/xml/transform/sax	java.xml
+package	javax/xml/transform/stax	java.xml
+package	javax/xml/transform/stream	java.xml
+package	javax/xml/validation	java.xml
+package	javax/xml/xpath	java.xml
+package	jdk/dynalink	jdk.dynalink
+package	jdk/dynalink/beans	jdk.dynalink
+package	jdk/dynalink/internal	jdk.dynalink
+package	jdk/dynalink/linker	jdk.dynalink
+package	jdk/dynalink/linker/support	jdk.dynalink
+package	jdk/dynalink/support	jdk.dynalink
+package	jdk/editpad	jdk.editpad
+package	jdk/editpad/resources	jdk.editpad
+package	jdk/incubator/vector	jdk.incubator.vector
+package	jdk/internal	java.base
+package	jdk/internal/access	java.base
+package	jdk/internal/access/foreign	java.base
+package	jdk/internal/agent	jdk.management.agent
+package	jdk/internal/agent/resources	jdk.management.agent
+package	jdk/internal/classfile/components	java.base
+package	jdk/internal/classfile/impl	java.base
+package	jdk/internal/classfile/impl/verifier	java.base
+package	jdk/internal/constant	java.base
+package	jdk/internal/editor/external	jdk.internal.ed
+package	jdk/internal/editor/spi	jdk.internal.ed
+package	jdk/internal/event	java.base
+package	jdk/internal/foreign	java.base
+package	jdk/internal/foreign/abi	java.base
+package	jdk/internal/foreign/abi/aarch64	java.base
+package	jdk/internal/foreign/abi/aarch64/linux	java.base
+package	jdk/internal/foreign/abi/aarch64/macos	java.base
+package	jdk/internal/foreign/abi/aarch64/windows	java.base
+package	jdk/internal/foreign/abi/fallback	java.base
+package	jdk/internal/foreign/abi/ppc64	java.base
+package	jdk/internal/foreign/abi/ppc64/aix	java.base
+package	jdk/internal/foreign/abi/ppc64/linux	java.base
+package	jdk/internal/foreign/abi/riscv64	java.base
+package	jdk/internal/foreign/abi/riscv64/linux	java.base
+package	jdk/internal/foreign/abi/s390	java.base
+package	jdk/internal/foreign/abi/s390/linux	java.base
+package	jdk/internal/foreign/abi/x64	java.base
+package	jdk/internal/foreign/abi/x64/sysv	java.base
+package	jdk/internal/foreign/abi/x64/windows	java.base
+package	jdk/internal/foreign/layout	java.base
+package	jdk/internal/icu/impl	java.base
+package	jdk/internal/icu/impl/data/icudt76b	java.base
+package	jdk/internal/icu/lang	java.base
+package	jdk/internal/icu/text	java.base
+package	jdk/internal/icu/util	java.base
+package	jdk/internal/invoke	java.base
+package	jdk/internal/io	java.base
+package	jdk/internal/javac	java.base
+package	jdk/internal/jimage	java.base
+package	jdk/internal/jimage/decompressor	java.base
+package	jdk/internal/jmod	java.base
+package	jdk/internal/joptsimple	jdk.internal.opt
+package	jdk/internal/joptsimple/internal	jdk.internal.opt
+package	jdk/internal/joptsimple/util	jdk.internal.opt
+package	jdk/internal/jrtfs	java.base
+package	jdk/internal/jshell/debug	jdk.jshell
+package	jdk/internal/jshell/tool	jdk.jshell
+package	jdk/internal/jshell/tool/resources	jdk.jshell
+package	jdk/internal/lang/stable	java.base
+package	jdk/internal/loader	java.base
+package	jdk/internal/logger	java.base
+package	jdk/internal/markdown	jdk.internal.md
+package	jdk/internal/math	java.base
+package	jdk/internal/misc	java.base
+package	jdk/internal/module	java.base
+package	jdk/internal/net/http	java.net.http
+package	jdk/internal/net/http/common	java.net.http
+package	jdk/internal/net/http/frame	java.net.http
+package	jdk/internal/net/http/hpack	java.net.http
+package	jdk/internal/net/http/websocket	java.net.http
+package	jdk/internal/opt	jdk.internal.opt
+package	jdk/internal/org/commonmark	jdk.internal.md
+package	jdk/internal/org/commonmark/ext/gfm/tables	jdk.internal.md
+package	jdk/internal/org/commonmark/ext/gfm/tables/internal	jdk.internal.md
+package	jdk/internal/org/commonmark/internal	jdk.internal.md
+package	jdk/internal/org/commonmark/internal/inline	jdk.internal.md
+package	jdk/internal/org/commonmark/internal/renderer	jdk.internal.md
+package	jdk/internal/org/commonmark/internal/renderer/text	jdk.internal.md
+package	jdk/internal/org/commonmark/internal/util	jdk.internal.md
+package	jdk/internal/org/commonmark/node	jdk.internal.md
+package	jdk/internal/org/commonmark/parser	jdk.internal.md
+package	jdk/internal/org/commonmark/parser/beta	jdk.internal.md
+package	jdk/internal/org/commonmark/parser/block	jdk.internal.md
+package	jdk/internal/org/commonmark/parser/delimiter	jdk.internal.md
+package	jdk/internal/org/commonmark/renderer	jdk.internal.md
+package	jdk/internal/org/commonmark/renderer/html	jdk.internal.md
+package	jdk/internal/org/commonmark/renderer/markdown	jdk.internal.md
+package	jdk/internal/org/commonmark/renderer/text	jdk.internal.md
+package	jdk/internal/org/commonmark/text	jdk.internal.md
+package	jdk/internal/org/jline	jdk.internal.le
+package	jdk/internal/org/jline/keymap	jdk.internal.le
+package	jdk/internal/org/jline/reader	jdk.internal.le
+package	jdk/internal/org/jline/reader/impl	jdk.internal.le
+package	jdk/internal/org/jline/reader/impl/completer	jdk.internal.le
+package	jdk/internal/org/jline/reader/impl/history	jdk.internal.le
+package	jdk/internal/org/jline/terminal	jdk.internal.le
+package	jdk/internal/org/jline/terminal/impl	jdk.internal.le
+package	jdk/internal/org/jline/terminal/impl/exec	jdk.internal.le
+package	jdk/internal/org/jline/terminal/impl/ffm	jdk.internal.le
+package	jdk/internal/org/jline/terminal/spi	jdk.internal.le
+package	jdk/internal/org/jline/utils	jdk.internal.le
+package	jdk/internal/org/xml/sax	java.base
+package	jdk/internal/org/xml/sax/helpers	java.base
+package	jdk/internal/perf	java.base
+package	jdk/internal/platform	java.base
+package	jdk/internal/platform/cgroupv1	java.base
+package	jdk/internal/platform/cgroupv2	java.base
+package	jdk/internal/random	java.base
+package	jdk/internal/ref	java.base
+package	jdk/internal/reflect	java.base
+package	jdk/internal/shellsupport/doc	jdk.jshell
+package	jdk/internal/shellsupport/doc/resources	jdk.jshell
+package	jdk/internal/util	java.base
+package	jdk/internal/util/random	java.base
+package	jdk/internal/util/regex	java.base
+package	jdk/internal/util/xml	java.base
+package	jdk/internal/util/xml/impl	java.base
+package	jdk/internal/vm	java.base
+package	jdk/internal/vm/annotation	java.base
+package	jdk/internal/vm/vector	java.base
+package	jdk/javadoc/doclet	jdk.javadoc
+package	jdk/javadoc/internal	jdk.javadoc
+package	jdk/javadoc/internal/api	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html/markup	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html/resources	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html/resources/fonts	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html/resources/jquery	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html/resources/legal	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html/taglets	jdk.javadoc
+package	jdk/javadoc/internal/doclets/formats/html/taglets/snippet	jdk.javadoc
+package	jdk/javadoc/internal/doclets/toolkit	jdk.javadoc
+package	jdk/javadoc/internal/doclets/toolkit/resources	jdk.javadoc
+package	jdk/javadoc/internal/doclets/toolkit/resources/releases	jdk.javadoc
+package	jdk/javadoc/internal/doclets/toolkit/util	jdk.javadoc
+package	jdk/javadoc/internal/doclint	jdk.javadoc
+package	jdk/javadoc/internal/doclint/resources	jdk.javadoc
+package	jdk/javadoc/internal/html	jdk.javadoc
+package	jdk/javadoc/internal/tool	jdk.javadoc
+package	jdk/javadoc/internal/tool/resources	jdk.javadoc
+package	jdk/jfr	jdk.jfr
+package	jdk/jfr/consumer	jdk.jfr
+package	jdk/jfr/events	jdk.jfr
+package	jdk/jfr/internal	jdk.jfr
+package	jdk/jfr/internal/consumer	jdk.jfr
+package	jdk/jfr/internal/consumer/filter	jdk.jfr
+package	jdk/jfr/internal/dcmd	jdk.jfr
+package	jdk/jfr/internal/event	jdk.jfr
+package	jdk/jfr/internal/jfc	jdk.jfr
+package	jdk/jfr/internal/jfc/model	jdk.jfr
+package	jdk/jfr/internal/management	jdk.jfr
+package	jdk/jfr/internal/periodic	jdk.jfr
+package	jdk/jfr/internal/query	jdk.jfr
+package	jdk/jfr/internal/settings	jdk.jfr
+package	jdk/jfr/internal/test	jdk.jfr
+package	jdk/jfr/internal/tool	jdk.jfr
+package	jdk/jfr/internal/tracing	jdk.jfr
+package	jdk/jfr/internal/types	jdk.jfr
+package	jdk/jfr/internal/util	jdk.jfr
+package	jdk/jfr/tracing	jdk.jfr
+package	jdk/jpackage/internal	jdk.jpackage
+package	jdk/jpackage/internal/model	jdk.jpackage
+package	jdk/jpackage/internal/pipeline	jdk.jpackage
+package	jdk/jpackage/internal/resources	jdk.jpackage
+package	jdk/jpackage/internal/util	jdk.jpackage
+package	jdk/jpackage/internal/util/function	jdk.jpackage
+package	jdk/jpackage/main	jdk.jpackage
+package	jdk/jshell	jdk.jshell
+package	jdk/jshell/execution	jdk.jshell
+package	jdk/jshell/execution/impl	jdk.jshell
+package	jdk/jshell/resources	jdk.jshell
+package	jdk/jshell/spi	jdk.jshell
+package	jdk/jshell/tool	jdk.jshell
+package	jdk/jshell/tool/resources	jdk.jshell
+package	jdk/management	jdk.management
+package	jdk/management/jfr	jdk.management.jfr
+package	jdk/management/jfr/internal	jdk.management.jfr
+package	jdk/net	jdk.net
+package	jdk/nio	jdk.net
+package	jdk/nio/mapmode	jdk.nio.mapmode
+package	jdk/nio/zipfs	jdk.zipfs
+package	jdk/security/jarsigner	jdk.jartool
+package	jdk/swing/interop	jdk.unsupported.desktop
+package	jdk/swing/interop/internal	jdk.unsupported.desktop
+package	jdk/tools/jimage	jdk.jlink
+package	jdk/tools/jimage/resources	jdk.jlink
+package	jdk/tools/jlink/builder	jdk.jlink
+package	jdk/tools/jlink/internal	jdk.jlink
+package	jdk/tools/jlink/internal/plugins	jdk.jlink
+package	jdk/tools/jlink/internal/runtimelink	jdk.jlink
+package	jdk/tools/jlink/plugin	jdk.jlink
+package	jdk/tools/jlink/resources	jdk.jlink
+package	jdk/tools/jmod	jdk.jlink
+package	jdk/tools/jmod/resources	jdk.jlink
+package	jdk/vm/ci/aarch64	jdk.internal.vm.ci
+package	jdk/vm/ci/amd64	jdk.internal.vm.ci
+package	jdk/vm/ci/code	jdk.internal.vm.ci
+package	jdk/vm/ci/code/site	jdk.internal.vm.ci
+package	jdk/vm/ci/code/stack	jdk.internal.vm.ci
+package	jdk/vm/ci/common	jdk.internal.vm.ci
+package	jdk/vm/ci/hotspot	jdk.internal.vm.ci
+package	jdk/vm/ci/hotspot/aarch64	jdk.internal.vm.ci
+package	jdk/vm/ci/hotspot/amd64	jdk.internal.vm.ci
+package	jdk/vm/ci/hotspot/riscv64	jdk.internal.vm.ci
+package	jdk/vm/ci/meta	jdk.internal.vm.ci
+package	jdk/vm/ci/riscv64	jdk.internal.vm.ci
+package	jdk/vm/ci/runtime	jdk.internal.vm.ci
+package	jdk/vm/ci/services	jdk.internal.vm.ci
+package	jdk/xml/internal	java.xml
+package	jdk/xml/internal/jdkcatalog	java.xml
+package	jdk/xml/internal/jdkcatalog/java/dtd	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/dtd/schema10	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/dtd/xhtml10	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/dtd/xhtml11	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/dtd/xmlspec2_10	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/xsd/schema10	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/xsd/xhtml10	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/xsd/xhtml11	java.xml
+package	jdk/xml/internal/jdkcatalog/w3c/xsd/xmlNS2001	java.xml
+package	netscape/javascript	jdk.jsobject
+package	org/ietf/jgss	java.security.jgss
+package	org/jcp/xml/dsig/internal	java.xml.crypto
+package	org/jcp/xml/dsig/internal/dom	java.xml.crypto
+package	org/w3c/dom	java.xml
+package	org/w3c/dom/bootstrap	java.xml
+package	org/w3c/dom/css	jdk.xml.dom
+package	org/w3c/dom/events	java.xml
+package	org/w3c/dom/html	jdk.xml.dom
+package	org/w3c/dom/ls	java.xml
+package	org/w3c/dom/ranges	java.xml
+package	org/w3c/dom/stylesheets	jdk.xml.dom
+package	org/w3c/dom/traversal	java.xml
+package	org/w3c/dom/views	java.xml
+package	org/w3c/dom/xpath	jdk.xml.dom
+package	org/xml/sax	java.xml
+package	org/xml/sax/ext	java.xml
+package	org/xml/sax/helpers	java.xml
+package	sun/awt	java.desktop
+package	sun/awt/X11	java.desktop
+package	sun/awt/datatransfer	java.desktop
+package	sun/awt/dnd	java.desktop
+package	sun/awt/event	java.desktop
+package	sun/awt/geom	java.desktop
+package	sun/awt/im	java.desktop
+package	sun/awt/image	java.desktop
+package	sun/awt/resources	java.desktop
+package	sun/awt/resources/cursors	java.desktop
+package	sun/awt/screencast	java.desktop
+package	sun/awt/shell	java.desktop
+package	sun/awt/util	java.desktop
+package	sun/awt/www/content	java.desktop
+package	sun/awt/www/content/audio	java.desktop
+package	sun/awt/www/content/image	java.desktop
+package	sun/datatransfer	java.datatransfer
+package	sun/datatransfer/resources	java.datatransfer
+package	sun/font	java.desktop
+package	sun/font/lookup	java.desktop
+package	sun/instrument	java.instrument
+package	sun/invoke/empty	java.base
+package	sun/invoke/util	java.base
+package	sun/java2d	java.desktop
+package	sun/java2d/cmm	java.desktop
+package	sun/java2d/cmm/lcms	java.desktop
+package	sun/java2d/cmm/profiles	java.desktop
+package	sun/java2d/loops	java.desktop
+package	sun/java2d/marlin	java.desktop
+package	sun/java2d/marlin/stats	java.desktop
+package	sun/java2d/opengl	java.desktop
+package	sun/java2d/pipe	java.desktop
+package	sun/java2d/pipe/hw	java.desktop
+package	sun/java2d/x11	java.desktop
+package	sun/java2d/xr	java.desktop
+package	sun/jvm/hotspot	jdk.hotspot.agent
+package	sun/jvm/hotspot/asm	jdk.hotspot.agent
+package	sun/jvm/hotspot/classfile	jdk.hotspot.agent
+package	sun/jvm/hotspot/code	jdk.hotspot.agent
+package	sun/jvm/hotspot/compiler	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/bsd	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/bsd/aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/bsd/amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/bsd/x86	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/cdbg	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/cdbg/basic	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/dummy	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/linux	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/linux/aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/linux/amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/linux/ppc64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/linux/riscv64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/linux/x86	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/posix	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/posix/elf	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/ppc64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/remote	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/remote/aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/remote/amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/remote/ppc64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/remote/riscv64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/remote/x86	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/riscv64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/win32/coff	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/windbg	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/windbg/aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/windbg/amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/windows/amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/debugger/x86	jdk.hotspot.agent
+package	sun/jvm/hotspot/gc/epsilon	jdk.hotspot.agent
+package	sun/jvm/hotspot/gc/g1	jdk.hotspot.agent
+package	sun/jvm/hotspot/gc/parallel	jdk.hotspot.agent
+package	sun/jvm/hotspot/gc/serial	jdk.hotspot.agent
+package	sun/jvm/hotspot/gc/shared	jdk.hotspot.agent
+package	sun/jvm/hotspot/gc/shenandoah	jdk.hotspot.agent
+package	sun/jvm/hotspot/gc/z	jdk.hotspot.agent
+package	sun/jvm/hotspot/interpreter	jdk.hotspot.agent
+package	sun/jvm/hotspot/memory	jdk.hotspot.agent
+package	sun/jvm/hotspot/oops	jdk.hotspot.agent
+package	sun/jvm/hotspot/prims	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/bsd	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/bsd_aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/bsd_amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/bsd_x86	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/linux	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/linux_aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/linux_amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/linux_ppc64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/linux_riscv64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/linux_x86	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/posix	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/ppc64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/riscv64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/win32_aarch64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/win32_amd64	jdk.hotspot.agent
+package	sun/jvm/hotspot/runtime/x86	jdk.hotspot.agent
+package	sun/jvm/hotspot/tools	jdk.hotspot.agent
+package	sun/jvm/hotspot/tools/jcore	jdk.hotspot.agent
+package	sun/jvm/hotspot/types	jdk.hotspot.agent
+package	sun/jvm/hotspot/types/basic	jdk.hotspot.agent
+package	sun/jvm/hotspot/ui	jdk.hotspot.agent
+package	sun/jvm/hotspot/ui/action	jdk.hotspot.agent
+package	sun/jvm/hotspot/ui/classbrowser	jdk.hotspot.agent
+package	sun/jvm/hotspot/ui/resources	jdk.hotspot.agent
+package	sun/jvm/hotspot/ui/table	jdk.hotspot.agent
+package	sun/jvm/hotspot/ui/tree	jdk.hotspot.agent
+package	sun/jvm/hotspot/ui/treetable	jdk.hotspot.agent
+package	sun/jvm/hotspot/utilities	jdk.hotspot.agent
+package	sun/jvm/hotspot/utilities/memo	jdk.hotspot.agent
+package	sun/jvmstat	jdk.internal.jvmstat
+package	sun/jvmstat/monitor	jdk.internal.jvmstat
+package	sun/jvmstat/monitor/event	jdk.internal.jvmstat
+package	sun/jvmstat/monitor/remote	jdk.jstatd
+package	sun/jvmstat/perfdata/monitor	jdk.internal.jvmstat
+package	sun/jvmstat/perfdata/monitor/protocol/file	jdk.internal.jvmstat
+package	sun/jvmstat/perfdata/monitor/protocol/local	jdk.internal.jvmstat
+package	sun/jvmstat/perfdata/monitor/protocol/rmi	jdk.jstatd
+package	sun/jvmstat/perfdata/monitor/v1_0	jdk.internal.jvmstat
+package	sun/jvmstat/perfdata/monitor/v2_0	jdk.internal.jvmstat
+package	sun/jvmstat/perfdata/resources	jdk.internal.jvmstat
+package	sun/launcher	java.base
+package	sun/launcher/resources	java.base
+package	sun/management	java.management
+package	sun/management/counter	java.management
+package	sun/management/counter/perf	java.management
+package	sun/management/jdp	jdk.management.agent
+package	sun/management/jmxremote	jdk.management.agent
+package	sun/management/spi	java.management
+package	sun/misc	jdk.unsupported
+package	sun/net	java.base
+package	sun/net/dns	java.base
+package	sun/net/ext	java.base
+package	sun/net/ftp	java.base
+package	sun/net/ftp/impl	java.base
+package	sun/net/httpserver	jdk.httpserver
+package	sun/net/httpserver/simpleserver	jdk.httpserver
+package	sun/net/httpserver/simpleserver/resources	jdk.httpserver
+package	sun/net/idn	java.base
+package	sun/net/sdp	java.base
+package	sun/net/smtp	java.base
+package	sun/net/spi	java.base
+package	sun/net/util	java.base
+package	sun/net/www	java.base
+package	sun/net/www/content/text	java.base
+package	sun/net/www/http	java.base
+package	sun/net/www/protocol/file	java.base
+package	sun/net/www/protocol/ftp	java.base
+package	sun/net/www/protocol/http	java.base
+package	sun/net/www/protocol/http/logging	java.logging
+package	sun/net/www/protocol/http/ntlm	java.base
+package	sun/net/www/protocol/http/spnego	java.security.jgss
+package	sun/net/www/protocol/https	java.base
+package	sun/net/www/protocol/jar	java.base
+package	sun/net/www/protocol/jmod	java.base
+package	sun/net/www/protocol/jrt	java.base
+package	sun/net/www/protocol/mailto	java.base
+package	sun/nio	java.base
+package	sun/nio/ch	java.base
+package	sun/nio/ch/sctp	jdk.sctp
+package	sun/nio/cs	java.base
+package	sun/nio/cs/ext	jdk.charsets
+package	sun/nio/fs	java.base
+package	sun/print	java.desktop
+package	sun/print/resources	java.desktop
+package	sun/reflect	jdk.unsupported
+package	sun/reflect/annotation	java.base
+package	sun/reflect/generics/factory	java.base
+package	sun/reflect/generics/parser	java.base
+package	sun/reflect/generics/reflectiveObjects	java.base
+package	sun/reflect/generics/repository	java.base
+package	sun/reflect/generics/scope	java.base
+package	sun/reflect/generics/tree	java.base
+package	sun/reflect/generics/visitor	java.base
+package	sun/reflect/misc	java.base
+package	sun/rmi/log	java.rmi
+package	sun/rmi/registry	java.rmi
+package	sun/rmi/registry/resources	java.rmi
+package	sun/rmi/runtime	java.rmi
+package	sun/rmi/server	java.rmi
+package	sun/rmi/transport	java.rmi
+package	sun/rmi/transport/tcp	java.rmi
+package	sun/security/ec	java.base
+package	sun/security/ec/ed	java.base
+package	sun/security/ec/point	java.base
+package	sun/security/internal/interfaces	java.base
+package	sun/security/internal/spec	java.base
+package	sun/security/jca	java.base
+package	sun/security/jgss	java.security.jgss
+package	sun/security/jgss/krb5	java.security.jgss
+package	sun/security/jgss/krb5/internal	java.security.jgss
+package	sun/security/jgss/spi	java.security.jgss
+package	sun/security/jgss/spnego	java.security.jgss
+package	sun/security/jgss/wrapper	java.security.jgss
+package	sun/security/krb5	java.security.jgss
+package	sun/security/krb5/internal	java.security.jgss
+package	sun/security/krb5/internal/ccache	java.security.jgss
+package	sun/security/krb5/internal/crypto	java.security.jgss
+package	sun/security/krb5/internal/crypto/dk	java.security.jgss
+package	sun/security/krb5/internal/ktab	java.security.jgss
+package	sun/security/krb5/internal/rcache	java.security.jgss
+package	sun/security/krb5/internal/util	java.security.jgss
+package	sun/security/pkcs	java.base
+package	sun/security/pkcs10	java.base
+package	sun/security/pkcs11	jdk.crypto.cryptoki
+package	sun/security/pkcs11/wrapper	jdk.crypto.cryptoki
+package	sun/security/pkcs12	java.base
+package	sun/security/provider	java.base
+package	sun/security/provider/certpath	java.base
+package	sun/security/provider/certpath/ldap	java.naming
+package	sun/security/provider/certpath/ssl	java.base
+package	sun/security/rsa	java.base
+package	sun/security/smartcardio	java.smartcardio
+package	sun/security/ssl	java.base
+package	sun/security/timestamp	java.base
+package	sun/security/tools	java.base
+package	sun/security/tools/jarsigner	jdk.jartool
+package	sun/security/tools/jarsigner/resources	jdk.jartool
+package	sun/security/tools/keytool	java.base
+package	sun/security/tools/keytool/resources	java.base
+package	sun/security/util	java.base
+package	sun/security/util/math	java.base
+package	sun/security/util/math/intpoly	java.base
+package	sun/security/util/resources	java.base
+package	sun/security/validator	java.base
+package	sun/security/x509	java.base
+package	sun/swing	java.desktop
+package	sun/swing/icon	java.desktop
+package	sun/swing/plaf	java.desktop
+package	sun/swing/plaf/synth	java.desktop
+package	sun/swing/table	java.desktop
+package	sun/swing/text	java.desktop
+package	sun/swing/text/html	java.desktop
+package	sun/text	java.base
+package	sun/text/resources	java.base
+package	sun/text/resources/cldr	java.base
+package	sun/text/resources/cldr/ext	jdk.localedata
+package	sun/text/resources/ext	jdk.localedata
+package	sun/text/spi	java.base
+package	sun/tools/attach	jdk.attach
+package	sun/tools/common	jdk.jcmd
+package	sun/tools/jar	jdk.jartool
+package	sun/tools/jar/resources	jdk.jartool
+package	sun/tools/jcmd	jdk.jcmd
+package	sun/tools/jconsole	jdk.jconsole
+package	sun/tools/jconsole/inspector	jdk.jconsole
+package	sun/tools/jconsole/resources	jdk.jconsole
+package	sun/tools/jinfo	jdk.jcmd
+package	sun/tools/jmap	jdk.jcmd
+package	sun/tools/jps	jdk.jcmd
+package	sun/tools/jstack	jdk.jcmd
+package	sun/tools/jstat	jdk.jcmd
+package	sun/tools/jstat/resources	jdk.jcmd
+package	sun/tools/jstatd	jdk.jstatd
+package	sun/tools/serialver	jdk.compiler
+package	sun/tools/serialver/resources	jdk.compiler
+package	sun/util	java.base
+package	sun/util/calendar	java.base
+package	sun/util/cldr	java.base
+package	sun/util/locale	java.base
+package	sun/util/locale/provider	java.base
+package	sun/util/logging	java.base
+package	sun/util/logging/internal	java.logging
+package	sun/util/logging/resources	java.logging
+package	sun/util/resources	java.base
+package	sun/util/resources/cldr	java.base
+package	sun/util/resources/cldr/ext	jdk.localedata
+package	sun/util/resources/cldr/provider	jdk.localedata
+package	sun/util/resources/ext	jdk.localedata
+package	sun/util/resources/provider	jdk.localedata
+package	sun/util/spi	java.base
+package	toolbarButtonGraphics/development	jdk.hotspot.agent
+package	toolbarButtonGraphics/general	jdk.hotspot.agent
+package	toolbarButtonGraphics/navigation	jdk.hotspot.agent
+package	toolbarButtonGraphics/text	jdk.hotspot.agent

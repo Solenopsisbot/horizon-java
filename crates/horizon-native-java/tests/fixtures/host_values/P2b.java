@@ -249,6 +249,22 @@ public final class P2b {
         + (StackWalker.getInstance(Set.of(), 5) == d) + (StackWalker.getInstance(Set.of()) == StackWalker.getInstance(Set.of()));
   }
 
+  /** A JDK class is in the module Java 25 puts its package in; an array in its element's. */
+  public static String moduleNames() {
+    Module b = String.class.getModule();
+    Module l = java.util.logging.Logger.class.getModule();
+    return l.getName() + l.isNamed() + l + "|" + (l == b) + (l == java.util.logging.Level.class.getModule()) + l.equals(b) + "|"
+        + java.sql.Connection.class.getModule().getName() + "|" + P2b[].class.getModule().getName() + int[].class.getModule().getName()
+        + (String[].class.getModule() == b) + (P2b[][].class.getModule() == P2b.class.getModule()) + "|"
+        + P2b.class.getModule().getDescriptor() + "|" + l.getLayer().equals(b.getLayer());
+  }
+
+  /** A named module's descriptor is an object the runtime does not model: counted. */
+  public static String moduleDescriptor() { return "" + (String.class.getModule().getDescriptor() != null); }
+
+  /** A module other than java.base: its loader and exports are counted. */
+  public static String moduleExports() { return "" + java.util.logging.Logger.class.getModule().isExported("java.util.logging"); }
+
   /** Unmodelled Thread members are counted, not run stoppers. */
   public static String threadMembers() {
     Thread t = Thread.currentThread();
