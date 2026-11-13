@@ -1234,21 +1234,8 @@ impl StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
-        if let Value::Host(_) = receiver {
-            // What a model does not answer is an unmodelled call: counted
-            // (and refused by a strict host, as a running command's is).
-            return match self.brigadier_handle_call(r, receiver, args) {
-                Some(Err(NativeError::UnknownHostCall(_))) => Some(self.unknown_host_call(r)),
-                answer => answer,
-            };
-        }
-        let text = expect_ref(receiver)?.clone();
         let name = r.name.as_str();
-        // The objects `new` made of permission and exception classes.
-        if name == "<init>" {
-            return self.brigadier_init(r, &text, args);
-        }
-        if text == "game-event/register_commands" {
+        if crate::host_game_event::fired_event(receiver) == Some(GameEvent::RegisterCommands) {
             return match name {
                 "getDispatcher" => Some(Ok(handles::dispatcher())),
                 "getBuildContext" => Some(Ok(handles::build_context())),
@@ -1259,6 +1246,19 @@ impl StdHost {
                 }
                 _ => None,
             };
+        }
+        if let Value::Host(_) = receiver {
+            // What a model does not answer is an unmodelled call: counted
+            // (and refused by a strict host, as a running command's is).
+            return match self.brigadier_handle_call(r, receiver, args) {
+                Some(Err(NativeError::UnknownHostCall(_))) => Some(self.unknown_host_call(r)),
+                answer => answer,
+            };
+        }
+        let text = expect_ref(receiver)?.clone();
+        // The objects `new` made of permission and exception classes.
+        if name == "<init>" {
+            return self.brigadier_init(r, &text, args);
         }
         if let Some(answer) = self.permission_call(r, receiver, args) {
             return Some(answer);

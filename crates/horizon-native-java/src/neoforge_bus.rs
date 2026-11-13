@@ -162,6 +162,12 @@ fn table_facts(class: &str) -> Option<EventFacts> {
     })
 }
 
+/// Whether NeoForge's table says `class` is an `ICancellableEvent` and an `IModBusEvent`
+/// (`isAssignableFrom`, so inherited ones too).
+pub(crate) fn table_interfaces(class: &str) -> Option<(bool, bool)> {
+    table_facts(class).map(|facts| (facts.cancellable, facts.mod_bus))
+}
+
 /// The superclass NeoForge's table names for one of its event classes.
 pub(crate) fn table_superclass(class: &str) -> Option<String> {
     table_facts(class).map(|facts| facts.superclass)

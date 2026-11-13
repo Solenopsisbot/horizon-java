@@ -28,12 +28,8 @@ pub(crate) const STRING_TYPES: &[&str] = &[
 
 /// Runtime markers with no `/`, `#`, `@` or `:` in them, which the shape rule
 /// of [`is_plain_string`] cannot tell from text.
-const SEPARATOR_FREE_MARKERS: &[&str] = &[
-    "method-handles-lookup",
-    "guava-cache-builder",
-    "mixin-environment",
-    "stack-walker",
-];
+const SEPARATOR_FREE_MARKERS: &[&str] =
+    &["guava-cache-builder", "mixin-environment", "stack-walker"];
 
 /// The marker families that moved onto handles (#156): no runtime value is
 /// text with one of these prefixes any more.
@@ -212,6 +208,8 @@ mod tests {
             "true",
             // Spelled like a path once was (#156 P2).
             "path:/horizon/game",
+            // Spelled like a `Lookup` once was (#156 P10b).
+            "method-handles-lookup",
         ] {
             assert!(is_plain_string(text), "{text:?} should be a string");
         }
@@ -223,7 +221,6 @@ mod tests {
             "@indy:demo/Main:0:demo/Main#lambda$0()V:",
             "@cmp:natural",
             "[Ljava/lang/String;",
-            "method-handles-lookup",
             "java/lang/String",
         ] {
             assert!(

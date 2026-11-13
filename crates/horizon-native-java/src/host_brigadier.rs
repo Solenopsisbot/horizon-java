@@ -25,7 +25,8 @@
 //! | [`HostKind::ArgumentType`] | arena id, factory class | the factory's class, an `ArgumentType` | one per id: canonical |
 //! | [`HostKind::CommandPermission`] | what it is, its level | `Permission`/`PermissionCheck`/`PermissionSet`, or the `Predicate` a `requires` takes | never canonical (several constants share a level) |
 //!
-//! Every kind is `ClassRule::Unknown` until #174's class surface: `getClass()`
+//! Every kind is `ClassRule::Unknown` (an exact `getClass()` needs a class
+//! side for these classes, #174's `ClassSide`; not added here): `getClass()`
 //! is counted, `instanceof` is exact for the declared types and their
 //! supertypes; a node, builder, dispatcher or context against brigadier's
 //! classes, and one of brigadier's argument types against the others, is
