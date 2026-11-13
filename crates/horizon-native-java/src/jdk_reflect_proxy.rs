@@ -345,25 +345,66 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
-            // `Lookup` handles (`host_invoke.rs`): the caller of `lookup()`
-            // and the class `in` narrows to are not recorded.
-            ("java/lang/invoke/MethodHandles", "lookup", _)
-            | ("java/lang/invoke/MethodHandles$Lookup", "in", _) => {
-                Ok(Some(host_invoke::lookup(None)))
+            // `Lookup` handles (`host_invoke.rs`): the caller of `lookup()` is
+            // not recorded, nor the modes `in` keeps.
+            ("java/lang/invoke/MethodHandles", "lookup", _) => Ok(Some(host_invoke::lookup(None))),
+            ("java/lang/invoke/MethodHandles$Lookup", "in", _) => {
+                Ok(Some(host_invoke::narrowed_lookup()))
             }
             ("java/lang/invoke/MethodHandles", "publicLookup", _) => {
                 Ok(Some(host_invoke::public_lookup()))
             }
+            // JDK 25's checks in order: a primitive or array target, then a
+            // caller without full privilege, throw; a target the runtime
+            // holds gets its full-privilege lookup; one outside the jars
+            // (the JDK, the game) depends on the launch's modules: counted.
             (
                 "java/lang/invoke/MethodHandles",
                 "privateLookupIn",
                 "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;",
             ) => {
-                let class = args
-                    .first()
-                    .and_then(expect_ref)
-                    .map(|class| class.replace('.', "/"));
-                Ok(Some(host_invoke::lookup(class.as_deref())))
+                let (Some(target), Some(caller)) = (args.first(), args.get(1)) else {
+                    return Ok(None);
+                };
+                // Java 25's helpful messages, the caller read first.
+                if matches!(caller, Value::Ref(None)) {
+                    return Err(npe(Some(
+                        "Cannot read field \"allowedModes\" because \"caller\" is null",
+                    )));
+                }
+                if matches!(target, Value::Ref(None)) {
+                    return Err(npe(Some(
+                        "Cannot invoke \"java.lang.Class.isPrimitive()\" because \"targetClass\" is null",
+                    )));
+                }
+                let Some(class) = expect_ref(target).map(|class| class.replace('.', "/")) else {
+                    return self.host.unknown_operand_call(r).map(Some);
+                };
+                let illegal = |message: String| NativeError::UncaughtException {
+                    class: "java/lang/IllegalArgumentException".into(),
+                    message: Some(message),
+                    frame: None,
+                };
+                if class_is_primitive(&Value::Ref(Some(class.clone()))) {
+                    return Err(illegal(format!("{class} is a primitive class")));
+                }
+                if class.starts_with('[') {
+                    return Err(illegal(format!(
+                        "class {} is an array class",
+                        class.replace('/', ".")
+                    )));
+                }
+                match host_invoke::lookup_mode(caller) {
+                    Some("public") => Err(NativeError::UncaughtException {
+                        class: "java/lang/IllegalAccessException".into(),
+                        message: Some("caller does not have PRIVATE and MODULE lookup mode".into()),
+                        frame: None,
+                    }),
+                    Some("full") if self.class(&class).is_some() => {
+                        Ok(Some(host_invoke::lookup(Some(&class))))
+                    }
+                    _ => self.host.unknown_operand_call(r).map(Some),
+                }
             }
             ("java/lang/invoke/MethodHandles$Lookup", "unreflect" | "unreflectSpecial", _) => {
                 let Some(method) = args.first().filter(|method| **method != Value::Ref(None))
@@ -383,9 +424,23 @@ impl<H: Host> Runtime<'_, H> {
                 else {
                     return Ok(None);
                 };
-                let kind = if r.name == "unreflectSpecial" {
-                    "special"
-                } else if access & 0x0008 != 0 {
+                if r.name == "unreflectSpecial" {
+                    // The receiver is typed as the special caller.
+                    let Some(caller) = args
+                        .get(1)
+                        .and_then(expect_ref)
+                        .map(|caller| caller.replace('.', "/"))
+                    else {
+                        return Err(npe(None));
+                    };
+                    return Ok(Some(method_handles::special_handle(
+                        &class,
+                        &name,
+                        &descriptor,
+                        &caller,
+                    )));
+                }
+                let kind = if access & 0x0008 != 0 {
                     "static"
                 } else {
                     "virtual"
@@ -490,10 +545,25 @@ impl<H: Host> Runtime<'_, H> {
                 if descriptor.ends_with(")Ljava/lang/invoke/MethodType;") =>
             {
                 let mut types = Vec::new();
-                for value in args {
+                let declared = descriptor_arguments(descriptor);
+                for (index, value) in args.iter().enumerate() {
+                    // A null `Class[]` (`methodType(r, p0, (Class[]) null)`).
+                    if matches!(value, Value::Ref(None))
+                        && declared
+                            .get(index)
+                            .is_some_and(|parameter| parameter.starts_with('['))
+                    {
+                        return Err(npe(Some(
+                            "Cannot read the array length because \"ptypes\" is null",
+                        )));
+                    }
                     match value {
                         Value::Ref(Some(marker)) if self.arrays.contains_key(marker) => {
                             types.extend(self.array(value)?.clone());
+                        }
+                        // `methodType(rtype, List<Class<?>>)`: its elements.
+                        value if self.host_collection_kind(value).is_some() => {
+                            types.extend(self.collection_elements(value)?);
                         }
                         // `methodType(rtype, MethodType)` and friends.
                         value if host_invoke::method_type_of(value).is_some() => {
@@ -505,17 +575,36 @@ impl<H: Host> Runtime<'_, H> {
                 let Some((result, parameters)) = types.split_first() else {
                     return Ok(None);
                 };
+                // Java 25 interns the type by its hash first: a null return
+                // type, then a null parameter, then a `void` one.
+                let Some(result) = expect_ref(result) else {
+                    return Err(npe(Some(
+                        "Cannot invoke \"Object.hashCode()\" because \"this.rtype\" is null",
+                    )));
+                };
+                if parameters
+                    .iter()
+                    .any(|parameter| expect_ref(parameter).is_none())
+                {
+                    return Err(npe(Some(
+                        "Cannot invoke \"Object.hashCode()\" because \"ptype\" is null",
+                    )));
+                }
                 let mut descriptor = String::from("(");
                 for parameter in parameters {
                     let Some(name) = expect_ref(parameter) else {
                         return Err(npe(None));
                     };
+                    if name == "void" {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/IllegalArgumentException".into(),
+                            message: Some("parameter type cannot be void".into()),
+                            frame: None,
+                        });
+                    }
                     descriptor.push_str(&class_type_descriptor(name));
                 }
                 descriptor.push(')');
-                let Some(result) = expect_ref(result) else {
-                    return Err(npe(None));
-                };
                 descriptor.push_str(&class_type_descriptor(result));
                 Ok(Some(host_invoke::method_type(&descriptor)))
             }

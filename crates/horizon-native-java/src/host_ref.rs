@@ -212,8 +212,8 @@ pub enum HostKind {
     /// A `java.lang.invoke.MethodHandle`: key its combinator tree as JSON
     /// (`method_handles.rs`).
     MethodHandle,
-    /// The `CallSite` `LambdaMetafactory.metafactory` returns: key its target
-    /// handle's JSON (`method_handles.rs`).
+    /// The `ConstantCallSite` `LambdaMetafactory.metafactory` returns: key its
+    /// target handle's JSON (`method_handles.rs`).
     CallSite,
 }
 
@@ -625,9 +625,10 @@ const KINDS: &[KindInfo] = &[
     KindInfo {
         kind: HostKind::CallSite,
         tag: "csite",
-        class: ClassRule::Unknown {
-            declared: crate::method_handles::call_site_types,
-        },
+        // Java 25's metafactory returns a plain `ConstantCallSite`. `FromKey`
+        // keeps that exact class off `HostKind::of_class`, since a jar may
+        // extend `ConstantCallSite`.
+        class: ClassRule::FromKey(crate::method_handles::call_site_class),
         canonical: never_canonical,
         methods: &crate::method_handles::CALL_SITE_METHODS,
     },

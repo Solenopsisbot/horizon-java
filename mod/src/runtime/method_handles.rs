@@ -544,15 +544,38 @@ pub(super) fn direct_handle(
     )
 }
 
+/// `Lookup.unreflectSpecial(method, specialCaller)`: a special handle on
+/// `owner`'s body whose receiver is typed as `caller` (Java 25:
+/// `MethodHandle(Impl)String` for an interface default unreflected for
+/// `Impl`). The receiver passes through unchanged, so a reference `asType`
+/// over the direct handle is exactly that.
+pub(super) fn special_handle(owner: &str, name: &str, descriptor: &str, caller: &str) -> Value {
+    let direct = Handle::Direct {
+        kind: Kind::Special,
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+        descriptor: descriptor.to_owned(),
+    };
+    if caller == owner {
+        return direct.value();
+    }
+    let mut parameters = vec![field_descriptor(caller)];
+    parameters.extend(descriptor_arguments(descriptor));
+    Handle::AsType {
+        target: Box::new(direct),
+        descriptor: method_descriptor(&parameters, return_desc(descriptor)),
+    }
+    .value()
+}
+
 /// The types a `MethodHandle` surely is.
 pub(crate) fn handle_types(_: &str) -> &'static [&'static str] {
     &[HANDLE_CLASS]
 }
 
-/// The types a metafactory call site surely is (Java 25 builds a
-/// `ConstantCallSite`; its exact class is not claimed).
-pub(crate) fn call_site_types(_: &str) -> &'static [&'static str] {
-    &["java/lang/invoke/ConstantCallSite"]
+/// A metafactory call site's class: Java 25 builds a plain `ConstantCallSite`.
+pub(crate) fn call_site_class(_: &str) -> &str {
+    "java/lang/invoke/ConstantCallSite"
 }
 
 /// `Object.equals` on an object without its own: identity, known for the
@@ -774,6 +797,10 @@ impl<H: Host> Runtime<'_, H> {
                         message: Some(format!("bad argument count {position}")),
                         frame: None,
                     })?;
+                // Nothing to drop: Java answers the target itself.
+                if types.is_empty() {
+                    return Ok(args.first().cloned());
+                }
                 Handle::Drop {
                     target: Box::new(target),
                     position,
@@ -803,6 +830,10 @@ impl<H: Host> Runtime<'_, H> {
                         message: Some("too many values to insert".into()),
                         frame: None,
                     })?;
+                // Nothing to insert: Java answers the target itself.
+                if values.is_empty() {
+                    return Ok(args.first().cloned());
+                }
                 Handle::Insert {
                     target: Box::new(target),
                     position,
@@ -957,7 +988,7 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 if arg_count(&wanted) != arg_count(&descriptor) {
                     return Err(wrong_method_type(format!(
-                        "cannot convert {} to {}",
+                        "cannot convert MethodHandle{} to {}",
                         method_type_text(&descriptor),
                         method_type_text(&wanted)
                     )));
@@ -1032,7 +1063,7 @@ impl<H: Host> Runtime<'_, H> {
         let to = descriptor_arguments(&descriptor);
         if from.len() != to.len() || args.len() != to.len() {
             return Err(wrong_method_type(format!(
-                "cannot convert {} to {}",
+                "cannot convert MethodHandle{} to {}",
                 method_type_text(&descriptor),
                 method_type_text(call_site)
             )));

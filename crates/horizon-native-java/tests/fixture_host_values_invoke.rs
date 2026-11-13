@@ -25,6 +25,8 @@ enum Outcome {
     /// kinds do not own (a proxy's `checkcast`).
     ExactCounting(&'static str, &'static [&'static str]),
     Counted,
+    /// Java throws this (class, message) out of the method.
+    Throws(&'static str, &'static str),
 }
 use Outcome::*;
 
@@ -100,6 +102,61 @@ const CASES: &[(&str, Outcome)] = &[
         ),
     ),
     ("metafactory", Exact("hi|()Supplier|true")),
+    // Separately made handles, lookups and call sites with equal keys are
+    // two objects to every collection (Java: 2, false, false-1, 2, 2, 2, 2).
+    // Identity `equals` cannot tell them from one, so each is counted, never
+    // merged by key (#175 review M1).
+    ("handleSet", Counted),
+    ("handleMapKey", Counted),
+    ("handleListContains", Counted),
+    ("handleSetOf", Counted),
+    ("handleMapOf", Counted),
+    ("lookupSet", Counted),
+    ("siteSet", Counted),
+    // `unreflectSpecial` types the receiver as the special caller (M2).
+    (
+        "specialCaller",
+        Exact("MethodHandle(TopImpl)String|(TopImpl)String|dflt|MethodHandle()String|dflt"),
+    ),
+    // `privateLookupIn`: a primitive or array target, or a caller without
+    // full privilege, throws Java's exception; a jar class is its lookup (M3).
+    (
+        "privateLookups",
+        Exact(concat!(
+            "java.lang.IllegalArgumentException:int is a primitive class",
+            "|java.lang.IllegalArgumentException:class [Ljava.lang.String; is an array class",
+            "|java.lang.IllegalAccessException:caller does not have PRIVATE and MODULE lookup mode",
+            "|java.lang.IllegalArgumentException:int is a primitive class|demo.TopImpl"
+        )),
+    ),
+    // A JDK class: the launch's modules decide (Java: `IllegalAccessException:
+    // module java.base does not open java.lang to unnamed module @…`); counted.
+    ("privateLookupJdk", Counted),
+    // Nothing to drop or insert: the very same handle.
+    ("noOpCombinators", Exact("truetruetruetrue")),
+    // `methodType(Class, List)` reads the list; a `void` parameter throws.
+    (
+        "typeFromList",
+        Exact("(int)String|true|java.lang.IllegalArgumentException:parameter type cannot be void"),
+    ),
+    (
+        "wrongArity",
+        Throws(
+            "java/lang/invoke/WrongMethodTypeException",
+            "cannot convert MethodHandle(int)String to (Object,Object)Object",
+        ),
+    ),
+    ("siteClass", Exact("java.lang.invoke.ConstantCallSite")),
+    // Java 25's helpful messages for null arguments.
+    (
+        "nullArguments",
+        Exact(concat!(
+            "java.lang.NullPointerException:Cannot invoke \"java.lang.Class.isPrimitive()\" because \"targetClass\" is null",
+            "|java.lang.NullPointerException:Cannot read field \"allowedModes\" because \"caller\" is null",
+            "|java.lang.NullPointerException:Cannot invoke \"Object.hashCode()\" because \"this.rtype\" is null",
+            "|java.lang.NullPointerException:Cannot read the array length because \"ptypes\" is null"
+        )),
+    ),
 ];
 
 #[test]
@@ -135,12 +192,21 @@ fn invoke_handles_answer_as_java_25_or_count() {
                         .all(|(call, _)| calls.contains(&call.as_str()))
             }
             Counted => !unknown.is_empty(),
+            Throws(class, message) => matches!(
+                &answer,
+                Err(horizon_native_java::NativeError::UncaughtException {
+                    class: thrown,
+                    message: Some(text),
+                    ..
+                }) if thrown == class && text == message
+            ),
         };
         if !ok {
             let expected = match outcome {
                 Exact(text) => format!("exact {text}"),
                 ExactCounting(text, calls) => format!("exact {text}, counting only {calls:?}"),
                 Counted => "counted".to_owned(),
+                Throws(class, message) => format!("throws {class}: {message}"),
             };
             failures.push(format!(
                 "{method}\n  want:    {expected}\n  native:  {answer:?}\n  unknown: {unknown:?}"

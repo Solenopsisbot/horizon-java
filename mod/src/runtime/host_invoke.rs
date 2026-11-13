@@ -16,8 +16,10 @@
 //! * `Lookup`: key `[mode, class]` in the nested-key encoding. `"public"` is
 //!   `MethodHandles.publicLookup()`, one object on Java 25 (canonical);
 //!   `"full"` with a class is `privateLookupIn(class, ..)`'s full-privilege
-//!   lookup; `"full"` without one is a lookup whose class the runtime does not
-//!   know (`MethodHandles.lookup()`'s caller), whose `toString` is counted.
+//!   lookup; `"full"` without one is `MethodHandles.lookup()`, whose class (its
+//!   caller) the runtime does not record, so its `toString` is counted;
+//!   `"narrowed"` is `Lookup.in(..)`, whose access modes are not known.
+//!   `Lookup` keeps `Object.equals` and `hashCode`: identity.
 
 use crate::runtime::host_ref::{HostKind, HostRef, Methods, instance_of_class};
 use crate::runtime::{Value, descriptor_arguments, return_desc};
@@ -111,6 +113,30 @@ pub(crate) fn lookup(class: Option<&str>) -> Value {
     ))
 }
 
+/// `Lookup.in(..)`: a lookup whose class and modes the runtime does not know.
+pub(crate) fn narrowed_lookup() -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::MethodHandlesLookup,
+        &[Value::Ref(Some("narrowed".into())), Value::Ref(None)],
+    ))
+}
+
+/// A `Lookup` handle's mode: `public`, `full` or `narrowed`.
+pub(crate) fn lookup_mode(value: &Value) -> Option<&'static str> {
+    let Value::Host(handle) = value else {
+        return None;
+    };
+    if handle.kind() != HostKind::MethodHandlesLookup {
+        return None;
+    }
+    match handle.values()?.first() {
+        Some(Value::Ref(Some(mode))) => ["public", "full", "narrowed"]
+            .into_iter()
+            .find(|known| known == mode),
+        _ => None,
+    }
+}
+
 /// The publicLookup singleton is one object; any other lookup is a new one.
 pub(crate) fn lookup_canonical(key: &str) -> bool {
     key == PUBLIC_LOOKUP_KEY
@@ -146,17 +172,14 @@ pub(crate) const METHOD_TYPE_METHODS: Methods = Methods {
 
 pub(crate) const LOOKUP_METHODS: Methods = Methods {
     to_string: |handle, _| Ok(lookup_text(handle)),
-    // `Lookup.hashCode` mixes the lookup class's identity hash.
+    // `Object.hashCode`: an identity hash.
     hash_code: |_, _| Ok(None),
-    // `Lookup.equals` compares lookup class and modes: known for the one
-    // object and for the public singleton; otherwise counted.
+    // `Lookup` keeps `Object.equals` (Java 25: two `privateLookupIn(C, ..)`
+    // are not equal): identity, known for the same object, the public
+    // singleton, and different keys; counted for two equal keys made twice.
     equals: |handle, other, _| {
         Ok(match other {
-            Value::Host(other) if other.kind() == HostKind::MethodHandlesLookup => {
-                (handle.same_object(other) == Some(true)
-                    || (handle.key() == PUBLIC_LOOKUP_KEY && other.key() == PUBLIC_LOOKUP_KEY))
-                    .then_some(true)
-            }
+            Value::Host(other) => handle.same_object(other),
             _ => Some(false),
         })
     },

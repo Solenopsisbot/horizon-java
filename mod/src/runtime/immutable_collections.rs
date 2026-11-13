@@ -89,7 +89,9 @@ impl<H: Host> Runtime<'_, H> {
             for (slot, stored) in table.slots.iter().enumerate() {
                 let Some(stored) = stored else { continue };
                 let stored = parse_collection_value(stored)?;
-                if stored == *key || (pure && self.java_equals(key, &stored)?) {
+                if object_methods::identical(&stored, key)
+                    || (pure && self.java_equals(key, &stored)?)
+                {
                     return Ok(Probe::Found(slot));
                 }
             }
@@ -133,7 +135,38 @@ impl<H: Host> Runtime<'_, H> {
                 Probe::Empty(slot) => table.slots[slot] = Some(collection_item_marker(key)),
                 Probe::Unknown => {
                     // An identity-hashed element: kept, at a slot no run can
-                    // name.
+                    // name. A handle beside an equal-keyed one is a duplicate
+                    // only as the proved same object; maybe one object, maybe
+                    // two, is counted (never merged by key).
+                    if let Value::Host(handle) = key {
+                        let marker = collection_item_marker(key);
+                        for stored in table.slots.iter().flatten() {
+                            if *stored != marker {
+                                continue;
+                            }
+                            let Value::Host(other) = parse_collection_value(stored)? else {
+                                continue;
+                            };
+                            match handle.same_object(&other) {
+                                Some(true) => {
+                                    let text =
+                                        self.value_of_text(key, "Ljava/lang/Object;", "", "of")?;
+                                    return Err(thrown(
+                                        "java/lang/IllegalArgumentException",
+                                        Some(format!("duplicate {what}: {text}")),
+                                    ));
+                                }
+                                Some(false) => {}
+                                None => {
+                                    self.host.unknown_operand_call(&MethodRef {
+                                        owner: "java/lang/Object".into(),
+                                        name: "equals".into(),
+                                        descriptor: "(Ljava/lang/Object;)Z".into(),
+                                    })?;
+                                }
+                            }
+                        }
+                    }
                     table.unknown = true;
                     if let Some(free) = table.slots.iter().position(Option::is_none) {
                         table.slots[free] = Some(collection_item_marker(key));

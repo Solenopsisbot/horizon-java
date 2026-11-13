@@ -168,11 +168,114 @@ public class Invoke {
     return supplier.get() + "|" + site.getTarget().type() + "|" + (site instanceof CallSite);
   }
 
+  static String ex(Throwable e) {
+    return e.getClass().getName() + ":" + e.getMessage();
+  }
+
+  static CallSite site() throws Throwable {
+    MethodHandles.Lookup l = MethodHandles.lookup();
+    return LambdaMetafactory.metafactory(l, "get", MethodType.methodType(Supplier.class),
+        MethodType.methodType(Object.class), l.findStatic(Invoke.class, "hello", MethodType.methodType(String.class)),
+        MethodType.methodType(String.class));
+  }
+
+  /** Two lookups' handles in a HashSet: Java keeps both; never merged by key (counted). */
+  public static String handleSet() throws Exception { return "" + new HashSet<>(List.of(handle(), handle())).size(); }
+
+  /** ... a HashMap key looked up with another lookup's handle (Java: false; counted). */
+  public static String handleMapKey() throws Exception {
+    Map<Object, Integer> m = new HashMap<>();
+    m.put(handle(), 1);
+    return "" + m.containsKey(handle());
+  }
+
+  /** ... List.contains/indexOf (Java: false, -1; counted). */
+  public static String handleListContains() throws Exception {
+    return "" + new ArrayList<>(List.of(handle())).contains(handle()) + List.of(handle()).indexOf(handle());
+  }
+
+  /** ... Set.of/Map.of keep both (Java: 2, 2; counted, never "duplicate"). */
+  public static String handleSetOf() throws Exception { return "" + Set.of(handle(), handle()).size(); }
+
+  public static String handleMapOf() throws Exception { return "" + Map.of(handle(), 1, handle(), 2).size(); }
+
+  /** Two privateLookupIn lookups and two call sites are distinct objects too (Java: 2, 2; counted). */
+  public static String lookupSet() throws Exception {
+    return "" + new HashSet<>(List.of(MethodHandles.privateLookupIn(Invoke.class, MethodHandles.lookup()),
+        MethodHandles.privateLookupIn(Invoke.class, MethodHandles.lookup()))).size();
+  }
+
+  public static String siteSet() throws Throwable { return "" + new HashSet<>(List.of(site(), site())).size(); }
+
+  /** unreflectSpecial types the receiver as the special caller. */
+  public static String specialCaller() throws Throwable {
+    MethodHandle h = MethodHandles.privateLookupIn(TopImpl.class, MethodHandles.lookup())
+        .unreflectSpecial(TopD.class.getMethod("d"), TopImpl.class);
+    return h + "|" + h.type() + "|" + h.invoke(new TopImpl()) + "|" + h.bindTo(new TopImpl()) + "|" + h.bindTo(new TopImpl()).invoke();
+  }
+
+  static String privateIn(Class<?> c, MethodHandles.Lookup caller) {
+    try { return "" + MethodHandles.privateLookupIn(c, caller); } catch (Throwable e) { return ex(e); }
+  }
+
+  /** privateLookupIn throws for a primitive, an array, a caller without full privilege. */
+  public static String privateLookups() {
+    return privateIn(int.class, MethodHandles.lookup()) + "|" + privateIn(String[].class, MethodHandles.lookup()) + "|"
+        + privateIn(Invoke.class, MethodHandles.publicLookup()) + "|" + privateIn(int.class, MethodHandles.publicLookup())
+        + "|" + privateIn(TopImpl.class, MethodHandles.lookup());
+  }
+
+  /** ... and on a JDK class it depends on the launch's modules: counted (Java: IllegalAccessException). */
+  public static String privateLookupJdk() { return privateIn(Object.class, MethodHandles.lookup()).replaceAll("@[0-9a-f]+", "@H"); }
+
+  /** Nothing to drop or insert: the same handle. */
+  public static String noOpCombinators() throws Exception {
+    MethodHandle h = handle();
+    MethodHandle d = MethodHandles.dropArguments(h, 0);
+    MethodHandle i = MethodHandles.insertArguments(h, 0);
+    return "" + (d == h) + d.equals(h) + (i == h) + i.equals(h);
+  }
+
+  /** methodType(Class, List) reads the list; a void parameter throws. */
+  public static String typeFromList() {
+    MethodType t = MethodType.methodType(String.class, List.of(int.class));
+    String v;
+    try { v = "" + MethodType.methodType(String.class, void.class); } catch (Throwable e) { v = ex(e); }
+    return t + "|" + (t == type()) + "|" + v;
+  }
+
+  /** A wrong arity for invokeWithArguments: Java's message names the handle. */
+  public static String wrongArity() throws Throwable { return "" + handle().invokeWithArguments(1, 2); }
+
+  /** Null arguments throw Java 25's helpful NullPointerExceptions. */
+  public static String nullArguments() {
+    String out = privateIn(null, MethodHandles.lookup()) + "|" + privateIn(Invoke.class, null);
+    try { out += "|" + MethodType.methodType(null, int.class); } catch (Throwable e) { out += "|" + ex(e); }
+    try { out += "|" + MethodType.methodType(String.class, int.class, null); } catch (Throwable e) { out += "|" + ex(e); }
+    return out;
+  }
+
+  /** The metafactory's call site is a ConstantCallSite. */
+  public static String siteClass() throws Throwable { return site().getClass().getName(); }
+
   public static void main(String[] args) throws Throwable {
     for (String name : new String[] {"spelled", "types", "handles", "lookups", "sameHandle", "twoHandles", "twoHandlesEqual", "twoLookups",
-        "handleClass", "typeHash", "callerLookup", "generic", "typeSet", "proxies", "metafactory"}) {
+        "handleClass", "typeHash", "callerLookup", "generic", "typeSet", "proxies", "metafactory", "handleSet", "handleMapKey",
+        "handleListContains", "handleSetOf", "handleMapOf", "lookupSet", "siteSet", "specialCaller", "privateLookups",
+        "privateLookupJdk", "noOpCombinators", "typeFromList", "wrongArity", "siteClass", "nullArguments"}) {
       System.out.println("== " + name);
-      System.out.println(Invoke.class.getMethod(name).invoke(null));
+      try {
+        System.out.println(Invoke.class.getMethod(name).invoke(null));
+      } catch (java.lang.reflect.InvocationTargetException e) {
+        System.out.println("EX " + ex(e.getCause()));
+      }
     }
   }
+}
+
+interface TopD {
+  default String d() { return "dflt"; }
+}
+
+class TopImpl implements TopD {
 }
