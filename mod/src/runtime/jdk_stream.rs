@@ -1,16 +1,16 @@
-//! `java.util.Comparator` values and the stream stages config and service
-//! code reaches beyond `map`/`filter`/`collect`.
+//! `java.util.Comparator` values and the stream sources and value-list
+//! terminals config and service code reaches beyond `map`/`filter`/`collect`.
 //!
-//! The runtime's streams are eager: a stream marker owns the list of its
-//! elements (`Runtime::streams`), and every stage answers a new marker. This
-//! module adds the sources and stages real jars stopped on:
+//! A stream source owns the list of its elements (`Runtime::streams`); the
+//! stages and the per-element terminals run lazily over it
+//! (`stream_pipeline.rs`). This module adds the sources and terminals real
+//! jars stopped on:
 //!
-//! * `IntStream.range`/`rangeClosed`/`of` and the `LongStream` ranges, with
-//!   `mapToObj`, `mapToInt`/`Long`/`Double`, `boxed` and `sum` (Xaero's
-//!   config options enumerate their indices with
+//! * `IntStream.range`/`rangeClosed`/`of` and the `LongStream` ranges, and
+//!   `sum` (Xaero's config options enumerate their indices with
 //!   `IntStream.rangeClosed(min, max).mapToObj(...)`).
-//! * `sorted`, `max`, `min`, `findFirst`, `findAny` and `reduce` (rrls picks
-//!   its highest-priority service with `stream.max(COMPARATOR)`).
+//! * The comparators `sorted`, `max` and `min` take (rrls picks its
+//!   highest-priority service with `stream.max(COMPARATOR)`).
 //!
 //! A comparator is a marker in the runtime's string vocabulary, built by the
 //! host from `Comparator`'s factories and combinators and evaluated here,
@@ -285,26 +285,6 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         }
     }
 
-    /// Run a `Consumer` on one element: a jar callback, else the host's
-    /// `Consumer.accept`.
-    fn apply_consumer(&mut self, consumer: &Value, value: &Value) -> Result<(), NativeError> {
-        if self
-            .invoke_callback(consumer, std::slice::from_ref(value))?
-            .is_none()
-        {
-            self.host.invoke_instance(
-                &MethodRef {
-                    owner: "java/util/function/Consumer".into(),
-                    name: "accept".into(),
-                    descriptor: "(Ljava/lang/Object;)V".into(),
-                },
-                consumer,
-                std::slice::from_ref(value),
-            )?;
-        }
-        Ok(())
-    }
-
     /// `Comparator.compare(a, b)` called by jar code on a modelled marker.
     pub(crate) fn invoke_modelled_comparator(
         &mut self,
@@ -466,95 +446,15 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         Ok(Some(self.new_stream(class, method, values)))
     }
 
-    /// The stream stages beyond the interpreter's core set, applied to the
-    /// receiver stream's `values`.
+    /// The value-list terminals beyond the interpreter's core set, applied to
+    /// the receiver stream's output `values` (the stages and per-element
+    /// terminals are `stream_pipeline.rs`'s).
     pub(crate) fn more_stream_stages(
         &mut self,
         r: &MethodRef,
         values: &[Value],
-        args: &[Value],
-        class: &str,
-        method: &str,
     ) -> Result<Option<Value>, NativeError> {
-        let argument = || args.first().cloned().unwrap_or(Value::Ref(None));
-        let returns = r.descriptor.rsplit_once(')').map_or("", |(_, ret)| ret);
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
-            ("sorted", "()Ljava/util/stream/Stream;") => {
-                let sorted = self.sort_values(values.to_vec(), &Value::Ref(None))?;
-                self.new_stream(class, method, sorted)
-            }
-            ("sorted", "(Ljava/util/Comparator;)Ljava/util/stream/Stream;") => {
-                let sorted = self.sort_values(values.to_vec(), &argument())?;
-                self.new_stream(class, method, sorted)
-            }
-            ("sorted", "()Ljava/util/stream/IntStream;" | "()Ljava/util/stream/LongStream;") => {
-                let sorted = self.sort_values(values.to_vec(), &Value::Ref(None))?;
-                self.new_stream(class, method, sorted)
-            }
-            // `BinaryOperator.maxBy`/`minBy`: the first of equal extremes wins.
-            ("max" | "min", "(Ljava/util/Comparator;)Ljava/util/Optional;") => {
-                let comparator = argument();
-                let mut best: Option<Value> = None;
-                for value in values {
-                    best = Some(match best {
-                        None => value.clone(),
-                        Some(current) => {
-                            let order = self.compare_with(&comparator, &current, value)?;
-                            let keep = if r.name == "max" {
-                                order >= 0
-                            } else {
-                                order <= 0
-                            };
-                            if keep { current } else { value.clone() }
-                        }
-                    });
-                }
-                best.map_or_else(super::empty_optional, super::optional_wrap)
-            }
-            ("findFirst" | "findAny", "()Ljava/util/Optional;") => values
-                .first()
-                .cloned()
-                .map_or_else(super::empty_optional, super::optional_wrap),
-            ("reduce", "(Ljava/util/function/BinaryOperator;)Ljava/util/Optional;") => {
-                let operator = argument();
-                let mut acc: Option<Value> = None;
-                for value in values {
-                    acc = Some(match acc {
-                        None => value.clone(),
-                        Some(current) => {
-                            self.apply_callback(&operator, &[current, value.clone()])?
-                        }
-                    });
-                }
-                acc.map_or_else(super::empty_optional, super::optional_wrap)
-            }
-            (
-                "reduce",
-                "(Ljava/lang/Object;Ljava/util/function/BinaryOperator;)Ljava/lang/Object;",
-            ) => {
-                let operator = args.get(1).cloned().unwrap_or(Value::Ref(None));
-                let mut acc = argument();
-                for value in values {
-                    acc = self.apply_callback(&operator, &[acc, value.clone()])?;
-                }
-                acc
-            }
-            (
-                "mapToObj" | "mapToInt" | "mapToLong" | "mapToDouble" | "boxed" | "asLongStream",
-                _,
-            ) if returns.starts_with("Ljava/util/stream/") => {
-                let mapped = if r.name == "boxed" || r.name == "asLongStream" {
-                    values.to_vec()
-                } else {
-                    let function = argument();
-                    let mut mapped = Vec::with_capacity(values.len());
-                    for value in values {
-                        mapped.push(self.apply_callback(&function, std::slice::from_ref(value))?);
-                    }
-                    mapped
-                };
-                self.new_stream(class, method, mapped)
-            }
             // The stream's elements through the host's iterator table, the
             // same iterator a `List.iterator()` over them answers.
             ("iterator", "()Ljava/util/Iterator;") => self.host.invoke_instance(
@@ -566,13 +466,6 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 &super::collection_value("list", values),
                 &[],
             )?,
-            ("forEachOrdered", "(Ljava/util/function/Consumer;)V") => {
-                let consumer = argument();
-                for value in values {
-                    self.apply_consumer(&consumer, value)?;
-                }
-                Value::Void
-            }
             ("sum", "()I") => Value::Int(
                 values
                     .iter()

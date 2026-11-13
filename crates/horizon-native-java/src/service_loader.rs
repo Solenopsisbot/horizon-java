@@ -195,11 +195,10 @@ impl<H: Host> Runtime<'_, H> {
                     .into_iter()
                     .map(|provider| Value::Ref(Some(format!("{PROVIDER}{service};{provider}"))))
                     .collect();
-                Ok(Some(self.new_stream(
-                    "java/util/ServiceLoader",
-                    "stream",
-                    providers,
-                )))
+                // `ProviderSpliterator` is not `SIZED`.
+                let stream = self.new_stream("java/util/ServiceLoader", "stream", providers);
+                self.mark_unsized_stream(&stream);
+                Ok(Some(stream))
             }
             ("reload", "()V") => {
                 let reloads = self.int_slot(loader, "reloads");

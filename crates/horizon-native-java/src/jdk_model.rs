@@ -1317,7 +1317,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 .into_iter()
                 .map(|entry| Value::Ref(Some(format!("path:{entry}")))),
         );
-        Ok(self.new_stream(class, method, values))
+        // `spliteratorUnknownSize` over the directory iterator: not `SIZED`.
+        let stream = self.new_stream(class, method, values);
+        self.mark_unsized_stream(&stream);
+        Ok(stream)
     }
 
     /// `accept(value)` on the consumer [`Self::stream_support_stream`] passes

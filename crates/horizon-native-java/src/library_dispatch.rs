@@ -1250,7 +1250,10 @@ impl<H: Host> Runtime<'_, H> {
                     values.push(path_value(&full(rest)));
                 }
                 values.extend(found.iter().map(|relative| path_value(&full(relative))));
-                self.new_stream(class, method, values)
+                // `spliteratorUnknownSize` over the directory iterator: not `SIZED`.
+                let stream = self.new_stream(class, method, values);
+                self.mark_unsized_stream(&stream);
+                stream
             }
             _ => return Ok(None),
         }))

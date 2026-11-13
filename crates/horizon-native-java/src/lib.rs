@@ -108,6 +108,7 @@ mod registry_contents;
 mod sequenced;
 mod service_loader;
 mod stack_walk;
+mod stream_pipeline;
 mod type_switch;
 mod value_class;
 mod vanilla_registries;
@@ -15651,6 +15652,7 @@ impl NativeJar {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -15812,6 +15814,7 @@ impl NativeJar {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -15957,6 +15960,7 @@ impl NativeJar {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -18379,6 +18383,8 @@ struct Runtime<'a, H> {
     next_object: usize,
     streams: BTreeMap<String, Vec<Value>>,
     next_stream: usize,
+    /// Lazy stream stages and builders (`stream_pipeline.rs`).
+    pipelines: stream_pipeline::Pipelines,
     /// Enum constants this invocation's `<clinit>` built, keyed by the object's
     /// marker: the declared name and ordinal its `java.lang.Enum` constructor
     /// received.
@@ -19285,6 +19291,9 @@ impl<H: Host> Runtime<'_, H> {
         };
         if marker.starts_with(jdk_model::COLLECTING_CONSUMER_PREFIX) {
             return self.collecting_consumer_accept(marker, args);
+        }
+        if marker.starts_with(stream_pipeline::BUILDER_PREFIX) {
+            return self.stream_callback(marker, args);
         }
         // A composition marker closes over the two callbacks it joined. Running
         // it means running both, in the order the combinator defines — not
@@ -22467,15 +22476,6 @@ impl<H: Host> Runtime<'_, H> {
         Value::Ref(Some(marker))
     }
 
-    fn stream(&self, value: &Value) -> Result<&Vec<Value>, NativeError> {
-        let marker = expect_ref(value)
-            .filter(|marker| marker.starts_with("stream/"))
-            .ok_or_else(|| NativeError::Metadata("expected a native stream marker".into()))?;
-        self.streams
-            .get(marker)
-            .ok_or_else(|| NativeError::Metadata("stream is not owned by this invocation".into()))
-    }
-
     fn invoke_stream(
         &mut self,
         r: &MethodRef,
@@ -22484,6 +22484,11 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        // Stages, `concat`, builders and the per-element terminals run
+        // lazily (`stream_pipeline.rs`).
+        if let Some(value) = self.invoke_lazy_stream(r, receiver, args, class, method)? {
+            return Ok(Some(value));
+        }
         if let Some(value) = self.stream_support_stream(r, args, class, method)? {
             return Ok(Some(value));
         }
@@ -22503,7 +22508,7 @@ impl<H: Host> Runtime<'_, H> {
                 .collect();
             return Ok(Some(self.new_stream(class, method, values)));
         }
-        if r.name == "stream"
+        if (r.name == "stream" || r.name == "parallelStream")
             && r.descriptor == "()Ljava/util/stream/Stream;"
             && is_collection_owner(&r.owner)
             && !is_map_owner(&r.owner)
@@ -22513,7 +22518,11 @@ impl<H: Host> Runtime<'_, H> {
                 .into_iter()
                 .map(|value| parse_collection_value(&value))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            if r.name == "parallelStream" {
+                self.mark_parallel_stream(&stream);
+            }
+            return Ok(Some(stream));
         }
         // `Arrays.stream` is the array counterpart of `Collection.stream`,
         // and config/bootstrap code uses it for enum and constant tables.
@@ -22544,209 +22553,20 @@ impl<H: Host> Runtime<'_, H> {
             };
             return Ok(Some(self.new_stream(class, method, values)));
         }
-        // `Stream.concat(first, second)` is the two-source shape a constant
-        // table builder uses; both sides are streams this runtime owns.
-        if r.owner == "java/util/stream/Stream"
-            && r.name == "concat"
-            && r.descriptor
-                == "(Ljava/util/stream/Stream;Ljava/util/stream/Stream;)Ljava/util/stream/Stream;"
-        {
-            let mut values = self
-                .stream(args.first().ok_or_else(|| {
-                    NativeError::Metadata("Stream.concat needs a first stream".into())
-                })?)?
-                .clone();
-            values.extend(
-                self.stream(args.get(1).ok_or_else(|| {
-                    NativeError::Metadata("Stream.concat needs a second stream".into())
-                })?)?
-                .clone(),
-            );
-            return Ok(Some(self.new_stream(class, method, values)));
-        }
         if !r.owner.starts_with("java/util/stream/") {
             return Ok(None);
         }
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        let values = self.stream(receiver)?.clone();
+        // A terminal that runs on the stream's whole output: a source's
+        // list, or a lazy pipeline's output from one push. Anything else
+        // (`close`, `onClose`, `Object`'s members) must not run the pipeline.
+        if !stream_pipeline::takes_output(&r.name) {
+            return Ok(None);
+        }
+        let values = self.stream_values(receiver)?;
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
-            ("map", "(Ljava/util/function/Function;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut mapped = Vec::with_capacity(values.len());
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Function".into(),
-                                    name: "apply".into(),
-                                    descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".into(),
-                                },
-                                callback,
-                                &[value],
-                            )?,
-                        };
-                    mapped.push(result);
-                }
-                self.new_stream(class, method, mapped)
-            }
-            ("filter", "(Ljava/util/function/Predicate;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut filtered = Vec::with_capacity(values.len());
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if matches!(result, Value::Int(flag) if flag != 0) {
-                        filtered.push(value);
-                    }
-                }
-                self.new_stream(class, method, filtered)
-            }
-            ("flatMap", "(Ljava/util/function/Function;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut flattened = Vec::new();
-                for value in &values {
-                    let mapped =
-                        match self.invoke_callback(callback, std::slice::from_ref(value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Function".into(),
-                                    name: "apply".into(),
-                                    descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(value),
-                            )?,
-                        };
-                    flattened.extend(self.stream(&mapped)?.clone());
-                }
-                self.new_stream(class, method, flattened)
-            }
-            ("distinct", "()Ljava/util/stream/Stream;") => {
-                let mut distinct = Vec::with_capacity(values.len());
-                for value in values {
-                    if !distinct.contains(&value) {
-                        distinct.push(value);
-                    }
-                }
-                self.new_stream(class, method, distinct)
-            }
-            // Both take a `long` (`ldc2_w 2L`), not an `int`.
-            ("limit", "(J)Ljava/util/stream/Stream;") => {
-                let limit = usize::try_from(expect_long(r, StdHost::argument(r, args, 0)?)?.max(0))
-                    .unwrap_or(usize::MAX);
-                self.new_stream(class, method, values.into_iter().take(limit).collect())
-            }
-            ("skip", "(J)Ljava/util/stream/Stream;") => {
-                let skip = usize::try_from(expect_long(r, StdHost::argument(r, args, 0)?)?.max(0))
-                    .unwrap_or(usize::MAX);
-                self.new_stream(class, method, values.into_iter().skip(skip).collect())
-            }
-            ("anyMatch", "(Ljava/util/function/Predicate;)Z") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut matched = false;
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if matches!(result, Value::Int(flag) if flag != 0) {
-                        matched = true;
-                        break;
-                    }
-                }
-                Value::Int(matched as i32)
-            }
-            ("allMatch", "(Ljava/util/function/Predicate;)Z") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut matched = true;
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if !matches!(result, Value::Int(flag) if flag != 0) {
-                        matched = false;
-                        break;
-                    }
-                }
-                Value::Int(matched as i32)
-            }
-            ("noneMatch", "(Ljava/util/function/Predicate;)Z") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut matched = true;
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if matches!(result, Value::Int(flag) if flag != 0) {
-                        matched = false;
-                        break;
-                    }
-                }
-                Value::Int(matched as i32)
-            }
-            // Execution mode does not change the bounded value sequence;
-            // returning the same stream keeps a `parallel` in the chain from
-            // falling out to a null host answer. `sorted` reorders, so it is a
-            // real stage (`jdk_stream::more_stream_stages`).
-            ("parallel", _) | ("sequential", _) | ("unordered", _) => {
-                self.new_stream(class, method, values)
-            }
-            ("peek", "(Ljava/util/function/Consumer;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                for value in &values {
-                    self.invoke_callback(callback, std::slice::from_ref(value))?;
-                }
-                self.new_stream(class, method, values)
-            }
-            ("findFirst" | "findAny", "()Ljava/util/Optional;") => {
-                optional_wrap(values.into_iter().next().unwrap_or(Value::Ref(None)))
-            }
-            ("count", "()J") => Value::Int(values.len() as i32),
             ("toList", "()Ljava/util/List;") => collection_value("list", &values),
             ("toArray", "()[Ljava/lang/Object;") => {
                 let marker = self.new_array(class, method);
@@ -22788,25 +22608,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
             }
             ("isEmpty", "()Z") => Value::Int(values.is_empty() as i32),
-            ("forEach", "(Ljava/util/function/Consumer;)V") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                for value in values {
-                    let result = self.invoke_callback(callback, std::slice::from_ref(&value))?;
-                    if result.is_none() {
-                        self.host.invoke_instance(
-                            &MethodRef {
-                                owner: "java/util/function/Consumer".into(),
-                                name: "accept".into(),
-                                descriptor: "(Ljava/lang/Object;)V".into(),
-                            },
-                            callback,
-                            &[value],
-                        )?;
-                    }
-                }
-                Value::Void
-            }
-            _ => return self.more_stream_stages(r, &values, args, class, method),
+            _ => return self.more_stream_stages(r, &values),
         };
         Ok(Some(result))
     }
@@ -28674,6 +28476,7 @@ mod tests {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -28733,6 +28536,7 @@ mod tests {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -35655,6 +35459,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -35809,6 +35614,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -36016,6 +35822,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -36060,7 +35867,7 @@ mandatory = true
                     "probe",
                 )
                 .unwrap(),
-            Some(Value::Int(3))
+            Some(Value::Long(3))
         );
         assert_eq!(
             runtime
@@ -36106,7 +35913,7 @@ mandatory = true
                     "probe",
                 )
                 .unwrap(),
-            Some(Value::Int(1))
+            Some(Value::Long(1))
         );
         let empty_stream = runtime
             .invoke_stream(
@@ -36136,7 +35943,7 @@ mandatory = true
                     "probe",
                 )
                 .unwrap(),
-            Some(Value::Int(0))
+            Some(Value::Long(0))
         );
         assert_eq!(
             runtime
@@ -36327,6 +36134,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -36599,6 +36407,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -41738,6 +41547,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -41784,6 +41594,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
