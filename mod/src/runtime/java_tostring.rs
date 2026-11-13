@@ -3,7 +3,7 @@
 //! javac (19 and later) lowers every non-`String` concat operand to
 //! `String.valueOf(operand)`; older javac passes the object to the concat
 //! site; `StringBuilder.append(Object)` is `String.valueOf` too. All three
-//! printed the internal marker (`identifier/a:x`, `list/a`). [`owner`] names
+//! printed the internal marker (`uuid/…`, `list/a`). [`owner`] names
 //! the class whose modelled `toString` the host answers for a marker, so
 //! `"" + x` is the text `x.toString()` gives. A plain string, a box, a builder
 //! and a jar object keep their callers' existing paths.
@@ -28,11 +28,9 @@ pub(crate) fn owner(marker: &str) -> Option<String> {
     }
     // Prefix families the host models before any class marker.
     let prefix = [
-        ("identifier/", "net/minecraft/resources/Identifier"),
         ("uuid/", "java/util/UUID"),
         ("path:", "java/nio/file/Path"),
         ("duration/", "java/time/Duration"),
-        ("tag-key/", "net/minecraft/tags/TagKey"),
         ("regex-pattern/", "java/util/regex/Pattern"),
         ("watch-kind/", "java/nio/file/WatchEvent$Kind"),
         ("charset/", "java/nio/charset/Charset"),

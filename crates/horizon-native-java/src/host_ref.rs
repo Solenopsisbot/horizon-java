@@ -151,6 +151,16 @@ pub enum HostKind {
     /// `java.util.OptionalDouble`: key `""` when empty, else the `double`'s
     /// `Double.doubleToLongBits` (every `NaN` one key, `-0.0` not `0.0`).
     OptionalDouble,
+    /// `net.minecraft.resources.Identifier`: key `namespace:path` (`host_ids.rs`).
+    Identifier,
+    /// `net.minecraft.resources.ResourceKey`: key `registry|location`, or
+    /// `?…` when the host cannot name them (`host_ids.rs`).
+    ResourceKey,
+    /// `net.minecraft.tags.TagKey`: key `registry|location`, or `?…`.
+    TagKey,
+    /// `net.minecraft.references.BlockItemId`: key the block and item ids'
+    /// [`HostRef::of_values`].
+    BlockItemId,
 }
 
 /// How a kind's Java class follows from its key.
@@ -186,6 +196,10 @@ pub(crate) type EqualsFn =
 /// `hierarchy` about classes; `None` when the hierarchy cannot tell (the
 /// caller counts the check).
 pub(crate) type InstanceOfFn = fn(&HostRef, &str, &dyn ClassHierarchy) -> Option<bool>;
+/// `((Comparable) handle).compareTo(other)`; `None` when the host cannot
+/// answer (a JVM throws `ClassCastException`, or the order needs what the
+/// host does not hold): the caller counts it.
+pub(crate) type CompareToFn = fn(&HostRef, &Value) -> Option<i32>;
 /// Whether a handle means the same in another jar's runtime (NeoForge IMC):
 /// `crosses` answers for a held value.
 pub(crate) type CrossesFn = fn(&HostRef, &dyn Fn(&Value) -> bool) -> bool;
@@ -217,6 +231,10 @@ pub(crate) struct Methods {
     pub(crate) equals: EqualsFn,
     pub(crate) instance_of: InstanceOfFn,
     pub(crate) crosses_jars: CrossesFn,
+    /// Natural order, for a kind whose class is `Comparable` (`sort(null)`,
+    /// `sorted()`, a `TreeMap` without a comparator); `None` for a kind that
+    /// is not, whose natural order is counted.
+    pub(crate) compare_to: Option<CompareToFn>,
 }
 
 /// One row of the kind table.
@@ -237,13 +255,11 @@ pub(crate) fn canonical_when_empty(key: &str) -> bool {
 }
 
 /// The canonical predicate of a kind with one object per key.
-#[allow(dead_code)] // The first canonical families arrive in P1 (identifiers, enums).
 pub(crate) fn always_canonical(_key: &str) -> bool {
     true
 }
 
 /// The canonical predicate of a kind whose every object is a fresh value.
-#[allow(dead_code)]
 pub(crate) fn never_canonical(_key: &str) -> bool {
     false
 }
@@ -288,6 +304,37 @@ const KINDS: &[KindInfo] = &[
         canonical: canonical_when_empty,
         methods: &crate::host_optional::OPTIONAL_DOUBLE,
     },
+    KindInfo {
+        kind: HostKind::Identifier,
+        tag: "id",
+        class: ClassRule::Fixed(crate::host_ids::IDENTIFIER),
+        // Not interned: two `Identifier.parse("a:x")` are two objects.
+        canonical: never_canonical,
+        methods: &crate::host_ids::IDENTIFIER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ResourceKey,
+        tag: "rk",
+        class: ClassRule::Fixed(crate::host_ids::RESOURCE_KEY),
+        // Interned by `ResourceKey.create` (`host_ids.rs`).
+        canonical: always_canonical,
+        methods: &crate::host_ids::RESOURCE_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::TagKey,
+        tag: "tk",
+        class: ClassRule::Fixed(crate::host_ids::TAG_KEY),
+        // Interned by `TagKey.create`.
+        canonical: always_canonical,
+        methods: &crate::host_ids::TAG_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::BlockItemId,
+        tag: "bii",
+        class: ClassRule::Fixed(crate::host_ids::BLOCK_ITEM_ID),
+        canonical: never_canonical,
+        methods: &crate::host_ids::BLOCK_ITEM_ID_METHODS,
+    },
 ];
 
 impl HostKind {
@@ -303,6 +350,17 @@ impl HostKind {
             .get_or_init(|| KINDS.iter().map(|info| (info.tag, info.kind)).collect())
             .get(tag)
             .copied()
+    }
+
+    /// Whether an object of fixed handle class `class` is a `wanted`
+    /// (`Class.isAssignableFrom`), by the kind's own `instance_of`; `None`
+    /// when `class` is no fixed handle class or the kind cannot tell.
+    pub(crate) fn class_is_instance(
+        class: &str,
+        wanted: &str,
+        hierarchy: &dyn ClassHierarchy,
+    ) -> Option<bool> {
+        HostRef::new(Self::of_class(class)?, "").instance_of(wanted, hierarchy)
     }
 
     /// The kind of a fixed-class kind whose class is `class` (asked on every
@@ -420,6 +478,14 @@ impl HostRef {
     /// `None` when `hierarchy` cannot tell.
     pub(crate) fn instance_of(&self, wanted: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
         (self.methods().instance_of)(self, wanted, hierarchy)
+    }
+
+    /// `compareTo(other)` in natural order; `None` when unknown here (the
+    /// kind is not `Comparable`, or `other` is not one it compares with).
+    pub(crate) fn compare_to(&self, other: &Value) -> Option<i32> {
+        self.methods()
+            .compare_to
+            .and_then(|compare| compare(self, other))
     }
 
     /// Whether this handle means the same in another jar's runtime, with

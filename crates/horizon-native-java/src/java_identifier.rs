@@ -1,7 +1,8 @@
 //! `net.minecraft.resources.Identifier` (26.3), and `ResourceLocation`, its
 //! name before the 1.21 rename, answered from the class's own rules.
 //!
-//! An id is the marker `identifier/<namespace>:<path>`. The factories run
+//! An id is an `Identifier` handle keyed `<namespace>:<path>` (`host_ids.rs`).
+//! The factories run
 //! vanilla's checks (`javap -c` of 26.3's `Identifier`): a namespace is
 //! `[a-z0-9_.-]*` and not `..`, a path `[a-z0-9/._-]*`. `bySeparator` (and
 //! `parse`, which is `bySeparator(s, ':')`) splits at the first separator; no
@@ -88,20 +89,27 @@ fn split(identifier: &str, separator: char) -> (&str, &str) {
     }
 }
 
-/// The `(namespace, path)` an `identifier/` marker names.
-pub(crate) fn parts(marker: &str) -> Option<(&str, &str)> {
-    marker.strip_prefix("identifier/")?.split_once(':')
+/// The `namespace:path` an id value names: an `Identifier` handle, or an
+/// object `new ResourceLocation(..)` built (its id kept by the host).
+pub(crate) fn id_text(host: &StdHost, value: &Value) -> Option<String> {
+    crate::host_ids::identifier_key(value)
+        .or_else(|| {
+            host.identifier_objects
+                .get(expect_ref(value)?)
+                .map(String::as_str)
+        })
+        .map(str::to_owned)
 }
 
-/// The id a value names: an id marker, or an object a constructor built.
+/// [`id_text`] split into `(namespace, path)`.
 fn id_parts(host: &StdHost, value: &Value) -> Option<(String, String)> {
-    let marker = expect_ref(value)?;
-    let marker = host.identifier_objects.get(marker).unwrap_or(marker);
-    parts(marker).map(|(namespace, path)| (namespace.to_owned(), path.to_owned()))
+    let id = id_text(host, value)?;
+    let (namespace, path) = id.split_once(':')?;
+    Some((namespace.to_owned(), path.to_owned()))
 }
 
 /// Java's `String.compareTo`: UTF-16 code units, then length.
-fn java_compare(left: &str, right: &str) -> i32 {
+pub(crate) fn java_compare(left: &str, right: &str) -> i32 {
     let (mut left, mut right) = (left.encode_utf16(), right.encode_utf16());
     loop {
         match (left.next(), right.next()) {
@@ -195,8 +203,9 @@ pub(crate) fn invoke_instance(
             _ => return Some(host.unknown_host_call(r)),
         };
         return Some(built.map(|id| {
-            host.identifier_objects
-                .insert(marker, expect_string(&id).to_owned());
+            if let Some(id) = crate::host_ids::identifier_key(&id) {
+                host.identifier_objects.insert(marker, id.to_owned());
+            }
             Value::Void
         }));
     }
@@ -297,7 +306,9 @@ impl<H: Host> Runtime<'_, H> {
         let (Some(receiver), Some(modifier)) = (receiver, args.first()) else {
             return Ok(None);
         };
-        let Some((_, path)) = expect_ref(receiver).and_then(|marker| parts(marker)) else {
+        let Some((_, path)) =
+            crate::host_ids::identifier_key(receiver).and_then(|id| id.split_once(':'))
+        else {
             return Ok(None);
         };
         let new_path = self.apply_callback(modifier, &[Value::Ref(Some(path.to_owned()))])?;

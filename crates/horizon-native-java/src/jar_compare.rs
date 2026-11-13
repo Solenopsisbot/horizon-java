@@ -25,6 +25,14 @@ impl<H: Host> Runtime<'_, H> {
                 // `ClassCastException` or runs code the host does not hold.
                 return self.count_compare_to();
             }
+            // A handle's natural order is its kind's row (`host_ref.rs`);
+            // one the row cannot answer is counted.
+            if let Value::Host(handle) = a {
+                return match handle.compare_to(b) {
+                    Some(order) => Ok(order),
+                    None => self.count_compare_to(),
+                };
+            }
             return jdk_stream::natural_compare(a, b);
         };
         if let Some((owner, true)) = self.member_owner(&class, "compareTo", COMPARE_TO)
