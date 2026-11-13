@@ -284,17 +284,11 @@ pub(crate) fn player_member(
     }
 }
 
-/// The id a registry key argument names: `registry/<id>` (a `Registries`
-/// static) or a `ResourceKey` in `minecraft:root`.
+/// The id a registry key argument names: a `ResourceKey` in
+/// `minecraft:root` (`Registries.X`).
 fn registry_key(value: &Value) -> Option<String> {
-    if let Some((registry, id)) = crate::runtime::host_ids::resource_key_parts(value)
-        && registry == "minecraft:root"
-    {
-        return Some(id);
-    }
-    expect_ref(value)?
-        .strip_prefix("registry/")
-        .map(str::to_owned)
+    let (registry, id) = crate::runtime::host_ids::resource_key_parts(value)?;
+    (registry == "minecraft:root").then_some(id)
 }
 
 /// The `namespace:path` an `Identifier` argument names.
@@ -750,7 +744,7 @@ mod tests {
             &facts,
             &access,
             &lookup,
-            &[marker("registry/minecraft:block")],
+            &[crate::runtime::host_ids::registry_key_of("minecraft:block")],
         )
         .unwrap();
         let blocks = expect_ref(&blocks).unwrap().clone();
@@ -787,7 +781,7 @@ mod tests {
                 &facts,
                 &access,
                 &lookup,
-                &[marker("registry/minecraft:worldgen/biome")]
+                &[crate::runtime::host_ids::registry_key_of("minecraft:worldgen/biome")]
             )
             .is_err()
         );

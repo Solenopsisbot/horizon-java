@@ -28,8 +28,8 @@
 //!
 //! # The event objects
 //!
-//! An event is a marker (`neoforge-lifecycle|<class>|<container>`). The host answers what the
-//! loader's classes answer:
+//! An event is a host handle of its class and container (`host_game_event.rs`). The host answers
+//! what the loader's classes answer:
 //!
 //! * `ModLifecycleEvent#getContainer`: the container the event was built for, the same
 //!   `neoforge-mod-container/<id>/<version>` the `@Mod` constructor received;
@@ -82,7 +82,6 @@ const PROCESS_IMC: &str = "net/neoforged/fml/event/lifecycle/InterModProcessEven
 const LOAD_COMPLETE: &str = "net/neoforged/fml/event/lifecycle/FMLLoadCompleteEvent";
 const PAYLOAD_HANDLERS: &str = "net/neoforged/neoforge/network/event/RegisterPayloadHandlersEvent";
 const NEOFORGE_CLIENT: &str = "net/neoforged/neoforge/client/";
-const EVENT_MARKER: &str = "neoforge-lifecycle|";
 
 /// One step of NeoForge's loading after the constructors, in the order it runs them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,41 +154,6 @@ pub(crate) fn delivered(class: &str, server: bool) -> bool {
     }
 }
 
-/// The event marker of `class`, built for `container` (none for `RegisterPayloadHandlersEvent`).
-fn event_marker(class: &str, container: Option<&str>) -> Value {
-    Value::Ref(Some(format!(
-        "{EVENT_MARKER}{class}|{}",
-        container.unwrap_or_default()
-    )))
-}
-
-/// `(class, container)` of an event marker.
-fn parse_event(marker: &str) -> Option<(&str, &str)> {
-    marker.strip_prefix(EVENT_MARKER)?.split_once('|')
-}
-
-/// `instanceof` on an event marker: its class, every superclass in NeoForge's table, and
-/// `IModBusEvent` (every lifecycle event is one).
-pub(crate) fn instance_of(marker: &str, wanted: &str) -> bool {
-    let Some((class, _)) = parse_event(marker) else {
-        return false;
-    };
-    if wanted == "java/lang/Object" || wanted == "net/neoforged/fml/event/IModBusEvent" {
-        return true;
-    }
-    let mut at = class.to_owned();
-    for _ in 0..16 {
-        if at == wanted {
-            return true;
-        }
-        match crate::neoforge_bus::table_superclass(&at) {
-            Some(parent) => at = parent,
-            None => return false,
-        }
-    }
-    false
-}
-
 /// One piece of work `enqueueWork` queued.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DeferredTask {
@@ -209,10 +173,11 @@ impl StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Option<Value> {
-        let (class, container) = parse_event(expect_ref(receiver)?)?;
+        let (class, container) = crate::host_game_event::lifecycle_parts(receiver)?;
+        let container = container.unwrap_or_default();
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("getContainer", "()Lnet/neoforged/fml/ModContainer;") if !container.is_empty() => {
-                Some(Value::Ref(Some(container.to_owned())))
+                Some(Value::Ref(Some(container)))
             }
             (
                 "enqueueWork",
@@ -222,7 +187,7 @@ impl StdHost {
                 let work = args.first()?.clone();
                 let tasks = &mut self.neoforge_bus.deferred;
                 tasks.push(DeferredTask {
-                    container: container.to_owned(),
+                    container,
                     work,
                     supplier: r.descriptor.contains("Supplier"),
                 });
@@ -266,13 +231,18 @@ impl NativeJar {
         host: &mut StdHost,
         budget: &ExecutionBudget,
     ) -> Vec<String> {
+        // Every `RegisterEvent` fires between construction and common setup: from here on a
+        // holder is bound (`host_registry::Binding`).
+        if stage != LoadingStage::Construct {
+            host.holders_bound();
+        }
         let server = host.environment_type == "SERVER";
         let class = stage.event(server);
         let containers = self.neoforge_container_ids();
         let mut failures = Vec::new();
         if stage == LoadingStage::NetworkSetup {
             // `ModLoader.postEvent`: one event, phase by phase, every container within a phase.
-            let event = event_marker(class, None);
+            let event = crate::host_game_event::lifecycle_event(class, None);
             for priority in 0..5u8 {
                 for id in &containers {
                     let listeners = self.posted_listeners(host, class, id, Some(priority));
@@ -285,7 +255,8 @@ impl NativeJar {
             return failures;
         }
         for id in &containers {
-            let event = event_marker(class, Some(&self.container_marker(id)));
+            let event =
+                crate::host_game_event::lifecycle_event(class, Some(&self.container_marker(id)));
             let listeners = self.posted_listeners(host, class, id, None);
             if let Err(failure) = self.post(stage, id, &listeners, &event, host, budget) {
                 failures.push(failure);

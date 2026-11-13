@@ -72,12 +72,15 @@ mod host_array;
 mod host_entry;
 mod host_events;
 mod host_fabric_loader;
+mod host_game_event;
 mod host_ids;
+mod host_invoke;
 mod host_list_iterator;
 mod host_optional;
 mod host_path;
 mod host_ref;
 mod host_reflect;
+mod host_registry;
 mod host_watch;
 mod immutable_collections;
 mod iteration_guard;
@@ -136,6 +139,7 @@ mod null_checks;
 mod object_methods;
 mod open_options;
 mod optionull;
+mod owned_class;
 mod parked_threads;
 pub use parked_threads::ParkedThread;
 mod priority_queue;
@@ -2793,9 +2797,6 @@ pub struct StdHost {
     /// namespace), by the register's marker; `None` when two registers share
     /// the marker or the namespace was not text (`host_ids.rs`).
     deferred_registers: BTreeMap<String, Option<(Value, String)>>,
-    /// The registry key and validated id each `DeferredRegister.register`
-    /// holder names, by the holder's text; `None` when two share the text.
-    holder_ids: BTreeMap<String, Option<(Value, String)>>,
     /// The id each `new LevelResource(id)` a jar built carries
     /// (`facade_server.rs`), by the object's marker.
     level_resources: BTreeMap<String, String>,
@@ -2805,7 +2806,12 @@ pub struct StdHost {
     neoforge_attachments: neoforge_attachments::AttachmentState,
     /// The listeners a jar added to NeoForge's buses (`neoforge_bus.rs`).
     neoforge_bus: neoforge_bus::BusState,
-    holders: BTreeMap<String, Value>,
+    holders: BTreeMap<usize, Value>,
+    /// What each `DeferredRegister.register` recorded, by registration
+    /// serial: a holder handle's key names its row (`host_registry.rs`).
+    holder_rows: Vec<host_registry::HolderRow>,
+    /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
+    holder_binding: host_registry::Binding,
     mutable_collections: BTreeMap<String, Vec<Value>>,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
@@ -2974,12 +2980,13 @@ impl StdHost {
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
             deferred_registers: BTreeMap::new(),
-            holder_ids: BTreeMap::new(),
             level_resources: BTreeMap::new(),
             saved_data: facade_saved_data::SavedDataState::default(),
             neoforge_attachments: neoforge_attachments::AttachmentState::default(),
             neoforge_bus: neoforge_bus::BusState::default(),
             holders: BTreeMap::new(),
+            holder_rows: Vec::new(),
+            holder_binding: host_registry::Binding::Construct,
             mutable_collections: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
@@ -3993,10 +4000,9 @@ impl StdHost {
         let registry = receiver
             .into_iter()
             .chain(args.iter())
-            .find_map(|value| match value {
-                Value::Ref(Some(marker)) => marker.strip_prefix("registry/"),
-                _ => None,
-            })?;
+            .find_map(host_registry::registry_id)?
+            .to_owned();
+        let registry = registry.as_str();
         let id = args.iter().find_map(|value| {
             if let Some(id) = host_ids::identifier_key(value) {
                 let (namespace, path) = id.split_once(':')?;
@@ -4624,9 +4630,7 @@ impl Host for StdHost {
     /// The command façade's markers (a source, a node, a builder) answer
     /// `instanceof` for their Brigadier and vanilla types.
     fn host_instance_of(&self, marker: &str, wanted: &str) -> bool {
-        self.brigadier_instance_of(marker, wanted)
-            || self.mod_container_instance_of(marker, wanted)
-            || neoforge_lifecycle::instance_of(marker, wanted)
+        self.brigadier_instance_of(marker, wanted) || self.mod_container_instance_of(marker, wanted)
     }
 
     /// Read back what the bounded `Throwable.<init>` surface recorded, so an
@@ -4686,10 +4690,17 @@ impl Host for StdHost {
         if let Some(value) = gson_model::static_field(r).or_else(|| gson_tree::static_field(r)) {
             return Ok(value);
         }
-        // Registry statics get a stable marker instead of a null constant so
-        // registration calls downstream can name their target registry.
+        // Registry statics are handles instead of a null constant so
+        // registration calls downstream can name their target registry. The
+        // field's own type says which object it is: `Registries.X` is the
+        // registry's key (`ResourceKey[minecraft:root / X]`),
+        // `BuiltInRegistries.X` the registry (`host_registry.rs`).
         if let Some(id) = registry_static_id(&r.owner, &r.name) {
-            return Ok(Value::Ref(Some(format!("registry/{id}"))));
+            return Ok(if r.descriptor == "Lnet/minecraft/resources/ResourceKey;" {
+                host_ids::registry_key_of(id)
+            } else {
+                host_registry::registry(id)
+            });
         }
         // A modelled game enum's constant is its `enum/<class>/<NAME>` marker,
         // the same value `values()` lists.
@@ -4972,10 +4983,13 @@ impl Host for StdHost {
                 "create",
                 descriptor,
             ) if descriptor.ends_with(&format!("L{owner};")) => {
-                // The registry's key (`Registries.X`, `registry/<id>` text), or
-                // its id as an `Identifier`/`ResourceKey` handle.
+                // The registry's key (`Registries.X`) or its id (an
+                // `Identifier`). The register's own marker (the
+                // `deferred-register/` family) spells it `registry/<id>`.
+                // `create(Registry, ns)` is `create(registry.key(), ns)`.
                 let named = args.first().and_then(|registry| {
                     host_ids::identifier_key(registry)
+                        .or_else(|| host_registry::registry_id(registry))
                         .map(str::to_owned)
                         .or_else(|| host_ids::resource_key_parts(registry).map(|(_, id)| id))
                 });
@@ -4994,10 +5008,12 @@ impl Host for StdHost {
                 // key `Registries.X` is.
                 let registry_key = match args.first() {
                     Some(id) if host_ids::identifier_key(id).is_some() => {
-                        Value::Ref(Some(format!(
-                            "registry/{}",
-                            host_ids::identifier_key(id).unwrap_or_default()
-                        )))
+                        host_ids::registry_key_of(host_ids::identifier_key(id).unwrap_or_default())
+                    }
+                    Some(registry) if host_registry::registry_id(registry).is_some() => {
+                        host_ids::registry_key_of(
+                            host_registry::registry_id(registry).unwrap_or_default(),
+                        )
                     }
                     Some(key) => key.clone(),
                     None => Value::Ref(None),
@@ -5628,6 +5644,15 @@ impl Host for StdHost {
                         method: r.name.clone(),
                     })
             }
+            ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;")
+                if Self::argument(r, args, 0)
+                    .ok()
+                    .and_then(expect_ref)
+                    .is_some_and(|text| owned_class::owned_class_name(text)) =>
+            {
+                // A `Class` of a family kind, or a String spelled like it (`owned_class.rs`).
+                self.unknown_host_call(r)
+            }
             ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;") => {
                 // A model object prints its own `toString`, not its marker.
                 let value = Self::argument(r, args, 0)?;
@@ -6053,7 +6078,10 @@ impl Host for StdHost {
         if let Some(value) = dfu_pair::instance_call(r, receiver, args) {
             return value;
         }
-        if let Some(value) = fabric_registry::instance_call(r, receiver) {
+        if let Some(value) = self.holder_call(r, receiver) {
+            return value;
+        }
+        if let Some(value) = fabric_registry::instance_call(self, r, receiver) {
             return value;
         }
         if let Some(value) = self.block_item_id_instance(r, receiver) {
@@ -8445,6 +8473,13 @@ impl Host for StdHost {
                     None => self.unknown_host_call(r),
                 }
             }
+            // `Object::toString` on a `Class` of a family kind, or a String spelled like it
+            // (`owned_class.rs`).
+            ("java/lang/Object", "toString", "()Ljava/lang/String;")
+                if expect_ref(receiver).is_some_and(|text| owned_class::owned_class_name(text)) =>
+            {
+                self.unknown_host_call(r)
+            }
             ("java/lang/String", "toString", "()Ljava/lang/String;")
             | ("java/lang/Object", "toString", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some(match receiver {
@@ -8793,12 +8828,9 @@ impl Host for StdHost {
                 expect_ref(receiver).is_some_and(|marker| predicate_marker_value(marker)) as i32,
             )),
             ("java/util/function/Supplier", "get", "()Ljava/lang/Object;") => Ok(Value::Ref(None)),
-            // A `registry/<id>` marker is both a registry (`BuiltInRegistries.X`)
-            // and its key (`Registries.X`), so `registry.key()` is the marker
-            // itself and the key's identifier is the registry id. Libraries
-            // index their registry wrappers by `registry.key().identifier()`;
-            // the neutral null made every wrapper `minecraft:` and the second
-            // one a duplicate.
+            // `registry.key()`: the registry's key, `ResourceKey[minecraft:root /
+            // <id>]`, the same interned key `Registries.X` is. Libraries index
+            // their registry wrappers by `registry.key().identifier()`.
             (
                 "net/minecraft/core/Registry"
                 | "net/minecraft/core/DefaultedRegistry"
@@ -8807,44 +8839,25 @@ impl Host for StdHost {
                 | "net/minecraft/core/DefaultedMappedRegistry",
                 "key",
                 "()Lnet/minecraft/resources/ResourceKey;",
-            ) if expect_string(receiver).starts_with("registry/") => Ok(receiver.clone()),
+            ) if host_registry::registry_id(receiver).is_some() => Ok(host_ids::registry_key_of(
+                host_registry::registry_id(receiver).unwrap_or_default(),
+            )),
             // `Registry.iterator()` walks the values registered in the
             // registry. The host holds the entries the jar registered
             // (`registry_contents`), not the game's own: the game's entries
             // have no objects to hand out.
             (owner, "iterator", "()Ljava/util/Iterator;")
                 if registry_contents::is_registry_owner(owner)
-                    && expect_string(receiver).starts_with("registry/") =>
+                    && host_registry::registry_id(receiver).is_some() =>
             {
-                let values = registry_contents::values(self, expect_string(receiver));
+                let id = host_registry::registry_id(receiver)
+                    .unwrap_or_default()
+                    .to_owned();
+                let values = registry_contents::values(self, &id);
                 let marker = format!("iterator/{}", self.next_iterator);
                 self.next_iterator = self.next_iterator.saturating_add(1);
                 self.iterators.insert(marker.clone(), (values, 0));
                 Ok(Value::Ref(Some(marker)))
-            }
-            // A `registry/<id>` value is also its registry key (`Registries.X`,
-            // `ResourceKey[minecraft:root / <id>]`) until the registry family
-            // moves to handles (#156 P4's second half).
-            ("net/minecraft/resources/ResourceKey", name, descriptor)
-                if expect_string(receiver).starts_with("registry/") =>
-            {
-                let id = expect_string(receiver).trim_start_matches("registry/");
-                match (name, descriptor) {
-                    (
-                        "identifier" | "location",
-                        "()Lnet/minecraft/resources/Identifier;"
-                        | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(host_ids::identifier_of_text(id)),
-                    (
-                        "registry",
-                        "()Lnet/minecraft/resources/Identifier;"
-                        | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(identifier_value("minecraft", "root")),
-                    ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(format!(
-                        "ResourceKey[minecraft:root / {id}]"
-                    )))),
-                    _ => self.unknown_host_call(r),
-                }
             }
             // A `ResourceKey` or `TagKey` handle (`host_ids.rs`); `toString`/
             // `equals`/`hashCode` are its kind's row. An unnamed key answers
@@ -9222,26 +9235,21 @@ impl Host for StdHost {
                     .and_then(expect_ref)
                     .map_or("entry", String::as_str);
                 let register = expect_ref(receiver)
-                    .map_or("deferred-register/registry/default", String::as_str);
+                    .map_or("deferred-register/registry/default", String::as_str)
+                    .to_owned();
                 // `Identifier.fromNamespaceAndPath(namespace, name)` (Forge:
                 // `new ResourceLocation(modid, name)`): bad text throws here.
                 let forge = r.owner.starts_with("net/minecraftforge/");
-                let made = self.deferred_register_id(forge, register, id)?;
-                let key = format!("{register}/{id}");
-                if let Some((registry_key, entry_id)) = made {
-                    self.record_holder_id(&key, registry_key, &entry_id);
-                }
-                let value = Value::Ref(Some(format!("registered/{key}")));
+                let made = self.deferred_register_id(forge, &register, id)?;
+                // One holder object per `register` call (`host_registry.rs`).
+                let (holder, value) = self.new_holder(&register, forge, made);
                 self.registrations.push(RegistryEntry {
-                    registry: expect_ref(receiver)
-                        .map_or("deferred-register/registry/default", String::as_str)
-                        .to_owned(),
+                    registry: register,
                     id: id.to_owned(),
-                    value: value.clone(),
+                    value,
                     declaration: None,
                 });
-                self.holders.insert(key.clone(), value.clone());
-                Ok(Value::Ref(Some(format!("holder/{key}"))))
+                Ok(holder)
             }
             (
                 "net/neoforged/neoforge/registries/DeferredRegister"
@@ -9249,109 +9257,33 @@ impl Host for StdHost {
                 "getEntries",
                 "()Ljava/util/Collection;",
             ) => {
-                let registry = expect_ref(receiver).map_or("", String::as_str);
-                let entries = self
-                    .registrations
-                    .iter()
-                    .filter(|entry| entry.registry == registry)
-                    .map(|entry| {
-                        Value::Ref(Some(format!("holder/{}/{}", entry.registry, entry.id)))
-                    })
-                    .collect::<Vec<_>>();
-                Ok(collection_value("list", &entries))
+                let register = expect_ref(receiver).map_or("", String::as_str);
+                Ok(collection_value("list", &self.register_holders(register)))
             }
-            ("net/neoforged/neoforge/registries/DeferredHolder", "get", "()Ljava/lang/Object;")
-            | (
-                "net/neoforged/neoforge/registries/DeferredHolder",
-                "value",
-                "()Ljava/lang/Object;",
-            ) => {
-                let key = expect_ref(receiver)
-                    .and_then(|value| value.strip_prefix("holder/"))
-                    .unwrap_or("deferred-register/registry/default/entry");
-                Ok(self
-                    .holders
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| Value::Ref(Some(format!("registered/{key}")))))
-            }
+            // A holder's `get`/`value`/`isBound`/... are `holder_call`'s
+            // (`host_registry.rs`).
             (
-                "net/neoforged/neoforge/registries/DeferredHolder",
-                "getOptional",
-                "()Ljava/util/Optional;",
-            ) => {
-                let key = expect_ref(receiver)
-                    .and_then(|value| value.strip_prefix("holder/"))
-                    .unwrap_or("deferred-register/registry/default/entry");
-                Ok(optional_wrap(Value::Ref(Some(format!("registered/{key}")))))
-            }
-            (
-                "net/neoforged/neoforge/registries/DeferredHolder",
+                "net/neoforged/neoforge/registries/DeferredHolder"
+                | "net/minecraftforge/registries/RegistryObject",
                 "getKey",
                 "()Lnet/minecraft/resources/ResourceKey;",
-            ) => self.holder_key(r, receiver, "holder/"),
+            ) => self.holder_key(r, receiver),
             (
                 "net/neoforged/neoforge/registries/DeferredHolder",
                 "getId",
                 "()Lnet/minecraft/resources/Identifier;"
                 | "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => self.holder_id(r, receiver, "holder/"),
-            ("net/neoforged/neoforge/registries/DeferredHolder", "isPresent", "()Z") => {
-                Ok(Value::Int(1))
-            }
-            ("net/minecraftforge/registries/RegistryObject", "get", "()Ljava/lang/Object;")
-            | (
-                "net/minecraftforge/registries/RegistryObject",
-                "orElse",
-                "(Ljava/lang/Object;)Ljava/lang/Object;",
             )
             | (
                 "net/minecraftforge/registries/RegistryObject",
-                "orElseGet",
-                "(Ljava/util/function/Supplier;)Ljava/lang/Object;",
-            ) => {
-                let key = expect_ref(receiver)
-                    .and_then(|value| value.strip_prefix("holder/"))
-                    .unwrap_or("deferred-register/registry/default/entry");
-                Ok(self
-                    .holders
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| Value::Ref(Some(format!("registered/{key}")))))
-            }
-            ("net/minecraftforge/registries/RegistryObject", "isPresent", "()Z") => {
-                Ok(Value::Int(1))
-            }
-            (
-                "net/minecraftforge/registries/RegistryObject",
-                "getId",
+                "getId" | "getRegistryName",
                 "()Lnet/minecraft/resources/ResourceLocation;",
             )
             | (
-                "net/minecraftforge/registries/RegistryObject",
-                "getRegistryName",
-                "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => self.holder_id(r, receiver, "holder/"),
-            (
-                "net/minecraftforge/registries/RegistryObject",
-                "getKey",
-                "()Lnet/minecraft/resources/ResourceKey;",
-            ) => self.holder_key(r, receiver, "holder/"),
-            (
-                "net/minecraftforge/registries/RegistryObject",
-                "getOptional",
-                "()Ljava/util/Optional;",
-            ) => Ok(optional_wrap(Value::Ref(Some(format!(
-                "registered/{}",
-                expect_ref(receiver)
-                    .and_then(|value| value.strip_prefix("holder/"))
-                    .unwrap_or("deferred-register/registry/default/entry")
-            ))))),
-            (
                 "net/minecraftforge/registries/IForgeRegistryEntry",
                 "getRegistryName",
                 "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => self.holder_id(r, receiver, "registered/"),
+            ) => self.holder_id(r, receiver),
             (
                 "net/minecraftforge/registries/IForgeRegistryEntry",
                 "setRegistryName",
@@ -9359,25 +9291,11 @@ impl Host for StdHost {
             ) if descriptor.ends_with("Lnet/minecraftforge/registries/IForgeRegistryEntry;") => {
                 Ok(receiver.clone())
             }
-            ("net/minecraft/core/Holder", "value", "()Ljava/lang/Object;")
-            | ("net/minecraft/core/Holder$Reference", "value", "()Ljava/lang/Object;") => {
-                let key = expect_ref(receiver)
-                    .and_then(|value| value.strip_prefix("holder/"))
-                    .unwrap_or("deferred-register/registry/default/entry");
-                Ok(self
-                    .holders
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| Value::Ref(Some(format!("registered/{key}")))))
-            }
-            ("net/minecraft/core/Holder", "isBound", "()Z")
-            | ("net/minecraft/core/Holder$Reference", "isBound", "()Z") => Ok(Value::Int(
-                expect_ref(receiver).is_some_and(|value| value.starts_with("holder/")) as i32,
-            )),
-            ("net/minecraft/core/Holder", "unwrapKey", "()Ljava/util/Optional;")
-            | ("net/minecraft/core/Holder$Reference", "unwrapKey", "()Ljava/util/Optional;") => {
-                self.holder_key(r, receiver, "holder/").map(optional_wrap)
-            }
+            (
+                "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference",
+                "unwrapKey",
+                "()Ljava/util/Optional;",
+            ) => self.holder_key(r, receiver).map(optional_wrap),
             (
                 "net/neoforged/neoforge/registries/DeferredRegister"
                 | "net/neoforged/neoforge/registries/DeferredRegister$DataComponents",
@@ -11644,6 +11562,11 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
                 host_text(value)
             }
         },
+        // A `Class` of a family kind, or a String spelled like it (`owned_class.rs`): counted.
+        Value::Ref(Some(marker)) if owned_class::owned_class_name(marker) => {
+            let _ = host.unknown_host_call(&jar_text::object_to_string());
+            marker.clone()
+        }
         Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
             // An object no model prints (a jar object, an identity hash)
             // is counted; the element keeps its marker in the text.
@@ -20449,6 +20372,13 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Ok(Value::Ref(Some(internal)));
         }
+        // A class a family kind owns (an event's `getClass().getName()`): the run's loader may
+        // provide it (NeoForge) or not (Java's `ClassNotFoundException` on Fabric), which is not
+        // known here. Counted; the class is the answer a caller can go on with.
+        if owned_class::owned_class_name(&internal) {
+            self.host.unknown_operand_call(r)?;
+            return Ok(Value::Ref(Some(internal)));
+        }
         // The JVM throws for an absent class, and a platform probe relies on
         // its `catch (ClassNotFoundException)` to try the next loader. A null
         // answer would turn the probe's `getConstructor` into an NPE.
@@ -20591,7 +20521,7 @@ impl<H: Host> Runtime<'_, H> {
             .map(|marker| marker.replace('.', "/"))?;
         // A host kind's class: its row knows its supertypes, not which are
         // declared directly. Left to the host, which counts it.
-        if HostKind::of_class(&name).is_some() {
+        if self.class(&name).is_none() && HostKind::owning_class(&name).is_some() {
             return None;
         }
         let interfaces = self
@@ -20993,8 +20923,11 @@ impl<H: Host> Runtime<'_, H> {
         {
             let target = reflection_class_name(receiver, r)?.replace('.', "/");
             let source = reflection_class_name(args.first(), r)?.replace('.', "/");
-            // A host kind's class (`getClass()` of a handle): its row.
-            if let Some(answer) = HostKind::class_instance_of(&source, &target, self) {
+            // A host kind's class (`getClass()` of a handle): its row, unless
+            // the run holds that class file (a jar's own copy wins).
+            if self.class(&source).is_none()
+                && let Some(answer) = HostKind::class_instance_of(&source, &target, self)
+            {
                 return match answer {
                     Some(answer) => Ok(Some(Value::Int(i32::from(answer)))),
                     None => self.host.unknown_operand_call(r).map(Some),
@@ -21036,7 +20969,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             // A host kind's class: its row knows its supertypes, not which
             // one is the direct superclass. Counted.
-            if HostKind::of_class(&class).is_some() {
+            if self.class(&class).is_none() && HostKind::owning_class(&class).is_some() {
                 return self.host.unknown_operand_call(r).map(Some);
             }
             let parent = self
@@ -25089,6 +25022,11 @@ impl<H: Host> Runtime<'_, H> {
                         // anything is dispatched. An `@Redirect` or a cancelling
                         // hook above replaced the call, so it never ran.
                         invoke_or_catch!(at, Err(null_checks::invoke_on_null(&r)))
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_owned_class(&r, receiver.as_ref()))
+                    {
+                        // A `Class` call on a name a family kind owns (`owned_class.rs`).
+                        value
                     } else if let Some(owner) =
                         invoke_or_catch!(at, self.jvm_selected_jar_body(&r, op, receiver.as_ref()))
                     {
@@ -25651,6 +25589,16 @@ impl<H: Host> Runtime<'_, H> {
                         for (value, argument) in captured.iter_mut().zip(&arguments) {
                             if argument != "Ljava/lang/String;"
                                 && let Some(text) = self.host.modelled_to_string(value)
+                            {
+                                *value = Value::Ref(Some(text));
+                            }
+                        }
+                        // A `Class` operand naming a class a family kind owns prints
+                        // `Class.toString` or is counted (`owned_class.rs`).
+                        for (value, argument) in captured.iter_mut().zip(&arguments) {
+                            if argument == "Ljava/lang/Class;"
+                                && let Some(text) =
+                                    invoke_or_catch!(at, self.owned_class_text(value))
                             {
                                 *value = Value::Ref(Some(text));
                             }
@@ -36389,8 +36337,9 @@ mandatory = true
             name: "register".into(),
             descriptor: "(Ljava/lang/String;Ljava/util/function/Supplier;)Lnet/neoforged/neoforge/registries/DeferredHolder;".into(),
         };
-        assert_eq!(
-            host.invoke_instance(
+        // A holder handle (`host_registry.rs`), and the value it registered.
+        let demo_holder = host
+            .invoke_instance(
                 &holder,
                 &register,
                 &[
@@ -36398,9 +36347,12 @@ mandatory = true
                     Value::Ref(Some("@indy:supplier".into())),
                 ],
             )
-            .unwrap(),
-            Value::Ref(Some("holder/deferred-register/registry/demo/entry".into()))
+            .unwrap();
+        assert!(
+            host_registry::holder_serial(&demo_holder).is_some(),
+            "{demo_holder:?}"
         );
+        let registered = host.registrations()[0].value.clone();
         let entries = host
             .invoke_instance(
                 &MethodRef {
@@ -36425,21 +36377,17 @@ mandatory = true
             .unwrap(),
             Value::Int(1)
         );
+        // Read after NeoForge's registry step (`host_registry::Binding`).
+        host.holders_bound();
         let holder_get = MethodRef {
             owner: "net/neoforged/neoforge/registries/DeferredHolder".into(),
             name: "get".into(),
             descriptor: "()Ljava/lang/Object;".into(),
         };
         assert_eq!(
-            host.invoke_instance(
-                &holder_get,
-                &Value::Ref(Some("holder/deferred-register/registry/demo/entry".into())),
-                &[],
-            )
-            .unwrap(),
-            Value::Ref(Some(
-                "registered/deferred-register/registry/demo/entry".into(),
-            ))
+            host.invoke_instance(&holder_get, &demo_holder, &[],)
+                .unwrap(),
+            registered.clone()
         );
         for name in ["value", "getOptional", "getKey", "getId"] {
             let descriptor = match name {
@@ -36454,13 +36402,7 @@ mandatory = true
                 name: name.into(),
                 descriptor: descriptor.into(),
             };
-            let value = host
-                .invoke_instance(
-                    &method,
-                    &Value::Ref(Some("holder/deferred-register/registry/demo/entry".into())),
-                    &[],
-                )
-                .unwrap();
+            let value = host.invoke_instance(&method, &demo_holder, &[]).unwrap();
             // `getOptional` answers an `Optional` (a host object).
             assert!(
                 matches!(value, Value::Ref(Some(_)) | Value::Host(_)),
@@ -36474,16 +36416,11 @@ mandatory = true
                     name: "value".into(),
                     descriptor: "()Ljava/lang/Object;".into(),
                 },
-                &Value::Ref(Some("holder/deferred-register/registry/demo/entry".into())),
+                &demo_holder,
                 &[],
             )
             .unwrap();
-        assert_eq!(
-            holder_value,
-            Value::Ref(Some(
-                "registered/deferred-register/registry/demo/entry".into()
-            ))
-        );
+        assert_eq!(holder_value, registered.clone());
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -36491,7 +36428,7 @@ mandatory = true
                     name: "isBound".into(),
                     descriptor: "()Z".into(),
                 },
-                &Value::Ref(Some("holder/deferred-register/registry/demo/entry".into())),
+                &demo_holder,
                 &[],
             )
             .unwrap(),
@@ -36504,7 +36441,7 @@ mandatory = true
                     name: "unwrapKey".into(),
                     descriptor: "()Ljava/util/Optional;".into(),
                 },
-                &Value::Ref(Some("holder/deferred-register/registry/demo/entry".into())),
+                &demo_holder,
                 &[],
             )
             .unwrap();
@@ -36522,7 +36459,7 @@ mandatory = true
                     name: "getId".into(),
                     descriptor: "()Lnet/minecraft/resources/ResourceLocation;".into(),
                 },
-                &Value::Ref(Some("holder/deferred-register/registry/demo/entry".into())),
+                &demo_holder,
                 &[],
             )
             .unwrap();
@@ -36535,7 +36472,7 @@ mandatory = true
                     name: "getOptional".into(),
                     descriptor: "()Ljava/util/Optional;".into(),
                 },
-                &Value::Ref(Some("holder/deferred-register/registry/demo/entry".into())),
+                &demo_holder,
                 &[],
             )
             .unwrap();
@@ -36550,9 +36487,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Ref(Some(
-                "registered/deferred-register/registry/demo/entry".into(),
-            ))
+            registered.clone()
         );
         assert_eq!(host.registrations().len(), 1);
         assert_eq!(host.invocations().len(), 18);
@@ -36643,12 +36578,13 @@ mandatory = true
                 &[Value::Ref(Some("entry".into())), Value::Ref(Some("@indy:supplier".into()))],
             )
             .unwrap();
-        assert_eq!(
-            object,
-            Value::Ref(Some(
-                "holder/deferred-register/registry/legacy/entry".into()
-            ))
+        // A Forge `RegistryObject` handle (`host_registry.rs`).
+        assert!(
+            host_registry::holder_serial(&object).is_some(),
+            "{object:?}"
         );
+        // Read after the registry step (`host_registry::Binding`).
+        host.holders_bound();
         let value = host
             .invoke_instance(
                 &MethodRef {
@@ -36660,12 +36596,8 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(
-            value,
-            Value::Ref(Some(
-                "registered/deferred-register/registry/legacy/entry".into()
-            ))
-        );
+        // The value it registered, the registration row's.
+        assert_eq!(value, host.registrations()[0].value);
         let name = host
             .invoke_instance(
                 &MethodRef {
@@ -40167,7 +40099,7 @@ mandatory = true
     fn resource_keys_name_the_registration_id_they_carry() {
         let id = identifier_value("beautify", "hanging_pot");
         let key = host_ids::resource_key(
-            &Value::Ref(Some("registry/minecraft:item".into())),
+            &host_ids::registry_key_of("minecraft:item"),
             &id,
             Some("beautify:hanging_pot".into()),
         );
@@ -42624,23 +42556,25 @@ mandatory = true
     #[test]
     fn standard_host_resolves_registry_statics() {
         let mut host = StdHost::new();
+        // `Registries.ITEM`: the registry's key.
         let item = MethodRef {
             owner: "net/minecraft/core/registries/Registries".into(),
             name: "ITEM".into(),
-            descriptor: "Lnet/minecraft/core/Registry;".into(),
+            descriptor: "Lnet/minecraft/resources/ResourceKey;".into(),
         };
         assert_eq!(
             Host::get_static(&mut host, &item).unwrap(),
-            Value::Ref(Some("registry/minecraft:item".into()))
+            host_ids::registry_key_of("minecraft:item")
         );
+        // `BuiltInRegistries.BLOCK`: the registry.
         let block = MethodRef {
             owner: "net/minecraft/core/registries/BuiltInRegistries".into(),
             name: "BLOCK".into(),
-            descriptor: "Lnet/minecraft/core/Registry;".into(),
+            descriptor: "Lnet/minecraft/core/DefaultedRegistry;".into(),
         };
         assert_eq!(
             Host::get_static(&mut host, &block).unwrap(),
-            Value::Ref(Some("registry/minecraft:block".into()))
+            host_registry::registry("minecraft:block")
         );
         let unknown = MethodRef {
             owner: "net/minecraft/core/registries/Registries".into(),
@@ -42664,9 +42598,9 @@ mandatory = true
         let registry = Host::get_static(
             &mut host,
             &MethodRef {
-                owner: "net/minecraft/core/registries/Registries".into(),
+                owner: "net/minecraft/core/registries/BuiltInRegistries".into(),
                 name: "ITEM".into(),
-                descriptor: "Lnet/minecraft/core/Registry;".into(),
+                descriptor: "Lnet/minecraft/core/DefaultedRegistry;".into(),
             },
         )
         .unwrap();

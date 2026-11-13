@@ -970,19 +970,6 @@ impl<H: Host> GameHookHost<'_, H> {
                 }),
             );
         }
-        // `BuiltInRegistries.ITEM.getKey(item)` for an item the firing names.
-        if text == "registry/minecraft:item"
-            && r.name == "getKey"
-            && r.descriptor == "(Ljava/lang/Object;)Lnet/minecraft/resources/Identifier;"
-        {
-            let id = args
-                .first()
-                .and_then(Self::is_game_object)
-                .and_then(|item| self.context.object(item))
-                .filter(|item| item.kind == GameObjectKind::Item)
-                .and_then(|item| item.type_id.clone())?;
-            return Some(Ok(identifier_parse(&id)));
-        }
         let address = text.strip_prefix(SOCKET_ADDRESS)?;
         Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(address.to_owned()))),
@@ -1092,6 +1079,19 @@ impl<H: Host> Host for GameHookHost<'_, H> {
             && let Some(answer) = self.answer_value(&text, r, args)
         {
             return answer;
+        }
+        // `BuiltInRegistries.ITEM.getKey(item)` for an item the firing names.
+        if crate::runtime::host_registry::registry_id(receiver) == Some("minecraft:item")
+            && r.name == "getKey"
+            && r.descriptor == "(Ljava/lang/Object;)Lnet/minecraft/resources/Identifier;"
+            && let Some(id) = args
+                .first()
+                .and_then(Self::is_game_object)
+                .and_then(|item| self.context.object(item))
+                .filter(|item| item.kind == GameObjectKind::Item)
+                .and_then(|item| item.type_id.clone())
+        {
+            return Ok(identifier_parse(&id));
         }
         if let Some(marker) = Self::is_game_object(receiver) {
             let marker = marker.to_owned();
