@@ -595,10 +595,10 @@ fn argument_factory(r: &MethodRef, args: &[Value]) -> Option<ArgumentKind> {
         },
         ("HexColorArgument", "hexColor") => ArgumentKind::HexColor,
         ("ResourceArgument" | "ResourceOrTagArgument", "resource" | "resourceOrTag") => {
-            // The key is `Registries.X`, a `registry/<id>` marker.
-            let registry = expect_ref(args.get(1)?)?
-                .strip_prefix("registry/")?
-                .to_owned();
+            // The key is `Registries.X`, `ResourceKey[minecraft:root / <id>]`.
+            let registry = crate::host_ids::named_id(args.get(1)?).filter(|_| {
+                crate::host_ids::is_resource_key(args.get(1).unwrap_or(&Value::Ref(None)))
+            })?;
             ArgumentKind::Resource {
                 registry,
                 tag: r.name == "resourceOrTag",

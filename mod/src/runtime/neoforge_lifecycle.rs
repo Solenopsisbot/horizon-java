@@ -231,6 +231,11 @@ impl NativeJar {
         host: &mut StdHost,
         budget: &ExecutionBudget,
     ) -> Vec<String> {
+        // Every `RegisterEvent` fires between construction and common setup: from here on a
+        // holder is bound (`host_registry::Binding`).
+        if stage != LoadingStage::Construct {
+            host.holders_bound();
+        }
         let server = host.environment_type == "SERVER";
         let class = stage.event(server);
         let containers = self.neoforge_container_ids();

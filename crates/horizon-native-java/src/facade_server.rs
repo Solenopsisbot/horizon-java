@@ -106,9 +106,6 @@ const REGISTRY: &str = "game/registry/";
 const LAYERED: &str = "game/registries/layered";
 /// `MinecraftServer.getCommands()`.
 const COMMANDS: &str = "game/commands";
-/// The marker `Thread.currentThread()` answers: callbacks run on the server
-/// thread, so it is also the server's running thread.
-const THREAD: &str = "thread/main";
 const GAME_RULE: &str = "game-rule/";
 const LEVEL_RESOURCE: &str = "level-resource/";
 
@@ -240,7 +237,9 @@ pub(crate) fn server_member(
         ("getDataStorage", "()Lnet/minecraft/world/level/storage/SavedDataStorage;") => {
             Ok(marker(crate::facade_saved_data::STORAGE))
         }
-        ("getRunningThread", "()Ljava/lang/Thread;") => Ok(marker(THREAD)),
+        // `Thread.currentThread()`: callbacks run on the server thread, so it
+        // is also the server's running thread.
+        ("getRunningThread", "()Ljava/lang/Thread;") => Ok(crate::host_jdk::main_thread()),
         // The server's folder: the one the world folder sits in, as a
         // dedicated server's `<level-name>` sits in its working directory.
         ("getServerDirectory", "()Ljava/nio/file/Path;") => {
@@ -284,17 +283,11 @@ pub(crate) fn player_member(
     }
 }
 
-/// The id a registry key argument names: `registry/<id>` (a `Registries`
-/// static) or a `ResourceKey` in `minecraft:root`.
+/// The id a registry key argument names: a `ResourceKey` in
+/// `minecraft:root` (`Registries.X`).
 fn registry_key(value: &Value) -> Option<String> {
-    if let Some((registry, id)) = crate::host_ids::resource_key_parts(value)
-        && registry == "minecraft:root"
-    {
-        return Some(id);
-    }
-    expect_ref(value)?
-        .strip_prefix("registry/")
-        .map(str::to_owned)
+    let (registry, id) = crate::host_ids::resource_key_parts(value)?;
+    (registry == "minecraft:root").then_some(id)
 }
 
 /// The `namespace:path` an `Identifier` argument names.
@@ -750,7 +743,7 @@ mod tests {
             &facts,
             &access,
             &lookup,
-            &[marker("registry/minecraft:block")],
+            &[crate::host_ids::registry_key_of("minecraft:block")],
         )
         .unwrap();
         let blocks = expect_ref(&blocks).unwrap().clone();
@@ -787,7 +780,7 @@ mod tests {
                 &facts,
                 &access,
                 &lookup,
-                &[marker("registry/minecraft:worldgen/biome")]
+                &[crate::host_ids::registry_key_of("minecraft:worldgen/biome")]
             )
             .is_err()
         );

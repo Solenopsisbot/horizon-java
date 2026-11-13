@@ -226,6 +226,17 @@ pub enum HostKind {
     /// declared result is an array: key `<declared class>#empty`
     /// (`host_array.rs`). Its runtime class is unknown.
     UnknownArray,
+    /// A `Registry` (`BuiltInRegistries.X`, a jar's built registry): key its
+    /// id (`host_registry.rs`).
+    Registry,
+    /// A NeoForge `DeferredHolder` or Forge `RegistryObject`: key the loader,
+    /// the registration's serial and the entry's key.
+    Holder,
+    /// The value a holder's registration registered: key the serial.
+    Registered,
+    /// A Fabric `FabricRegistryBuilder`: key the [`HostRef::of_values`] of
+    /// the registry its `buildAndRegister()` answers (`fabric_registry.rs`).
+    RegistryBuilder,
     /// The event a NeoForge/Forge game-event listener receives: key its class
     /// (`host_game_event.rs`).
     GameEvent,
@@ -251,6 +262,18 @@ pub enum HostKind {
     MixinEnvironment,
     /// A `MixinEnvironment.Side` constant: key its name.
     MixinSide,
+    /// The thread callbacks run on (`host_jdk.rs`): key `main`.
+    Thread,
+    /// A logger: key `of_values([api, name])`.
+    Logger,
+    /// A `StackWalker`: key `""` for `getInstance()`'s, `options` otherwise.
+    StackWalker,
+    /// A `StackWalker.StackFrame` / `StackTraceElement` of a jar frame: key
+    /// `of_values([class, method])`.
+    StackFrame,
+    StackTraceElement,
+    /// A `java.lang.Module`: key `unnamed` or `java.base`.
+    Module,
 }
 
 /// How a kind's Java class follows from its key.
@@ -736,6 +759,47 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::host_array::ARRAY,
     },
     KindInfo {
+        kind: HostKind::Registry,
+        tag: "reg",
+        // An implementation of the interface: `MappedRegistry`,
+        // `DefaultedMappedRegistry`, a loader's own.
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::registry_types,
+        },
+        // One registry per registry key.
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTRY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Holder,
+        tag: "hold",
+        // `DeferredHolder` has subclasses (`DeferredItem`, `DeferredBlock`).
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::holder_types,
+        },
+        // One holder per `register` call: the serial names one allocation.
+        canonical: always_canonical,
+        methods: &crate::host_registry::HOLDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Registered,
+        tag: "rgd",
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::no_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTERED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::RegistryBuilder,
+        tag: "frb",
+        // A final class (fabric-registry-sync 8.0.4).
+        class: ClassRule::Fixed(crate::fabric_registry::BUILDER),
+        // `create(key)` twice is two builders for one registry.
+        canonical: never_canonical,
+        methods: &crate::host_registry::BUILDER_METHODS,
+    },
+    KindInfo {
         kind: HostKind::GameEvent,
         tag: "gev",
         class: ClassRule::FromKey(crate::host_game_event::game_event_class),
@@ -845,6 +909,50 @@ const KINDS: &[KindInfo] = &[
         // An enum constant.
         canonical: always_canonical,
         methods: &crate::host_mixin::SIDE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Thread,
+        tag: "thr",
+        class: ClassRule::FromKey(|_| "java/lang/Thread"),
+        canonical: always_canonical,
+        methods: &crate::host_jdk::THREAD,
+    },
+    KindInfo {
+        kind: HostKind::Logger,
+        tag: "log",
+        class: ClassRule::Unknown {
+            declared: crate::host_jdk::logger_declared,
+        },
+        canonical: crate::host_jdk::logger_canonical,
+        methods: &crate::host_jdk::LOGGER,
+    },
+    KindInfo {
+        kind: HostKind::StackWalker,
+        tag: "walker",
+        class: ClassRule::Fixed("java/lang/StackWalker"),
+        canonical: canonical_when_empty,
+        methods: &crate::host_jdk::STACK_WALKER,
+    },
+    KindInfo {
+        kind: HostKind::StackFrame,
+        tag: "frame",
+        class: ClassRule::Fixed("java/lang/StackFrameInfo"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk::STACK_FRAME,
+    },
+    KindInfo {
+        kind: HostKind::StackTraceElement,
+        tag: "ste",
+        class: ClassRule::FromKey(|_| "java/lang/StackTraceElement"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk::STACK_TRACE_ELEMENT,
+    },
+    KindInfo {
+        kind: HostKind::Module,
+        tag: "module",
+        class: ClassRule::Fixed("java/lang/Module"),
+        canonical: always_canonical,
+        methods: &crate::host_jdk::MODULE,
     },
 ];
 

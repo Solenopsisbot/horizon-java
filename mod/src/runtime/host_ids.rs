@@ -35,10 +35,9 @@
 //! all three `hashCode`s are counted, never answered (Java 25 prints a
 //! different number per JVM).
 //!
-//! A registry key (`Registries.ITEM`) is still the `registry/<id>` text the
-//! registry family uses (#156 P4's second half moves `registry/`,
-//! `registered/` and `holder/`), so `ResourceKey.registryKey()` and
-//! `TagKey.registry()` answer that text, the same value `Registries.ITEM` is.
+//! A registry key (`Registries.ITEM`) is the named `ResourceKey` in
+//! `minecraft:root` ([`registry_key_of`]); the registry itself
+//! (`BuiltInRegistries.ITEM`) is a `Registry` handle (`host_registry.rs`).
 
 use crate::runtime::Value;
 use crate::runtime::host_ref::{HostKind, HostRef, Methods};
@@ -75,26 +74,27 @@ pub(crate) fn identifier_key(value: &Value) -> Option<&str> {
 }
 
 /// The `namespace:path` of an id value: an `Identifier` handle, or a
-/// `registry/<id>` text (a registry key names its registry's id).
+/// registry key (`Registries.X`, a key in `minecraft:root`) naming its
+/// registry's id.
 pub(crate) fn named_id(value: &Value) -> Option<String> {
     identifier_key(value).map(str::to_owned).or_else(|| {
-        crate::runtime::expect_ref(value)?
-            .strip_prefix("registry/")
-            .map(str::to_owned)
+        let (registry, location) = resource_key_parts(value)?;
+        (registry == ROOT).then_some(location)
     })
 }
 
+/// `Registries.X`/`ResourceKey.createRegistryKey(id)`: the registry key
+/// `ResourceKey[minecraft:root / id]`, interned like every key.
+pub(crate) fn registry_key_of(id: &str) -> Value {
+    resource_key_named(ROOT, id)
+}
+
 /// The identity of a registry key argument, what `ResourceKey.equals`
-/// (identity, on interned keys) compares: its registry's id and its location.
-/// `registry/<id>` text (`Registries.X`, still text until #156 P4's second
-/// half) is `(minecraft:root, id)`; a named `ResourceKey` handle is its own
-/// parts; anything else is unknown.
+/// (identity, on interned keys) compares: a named `ResourceKey` handle's
+/// registry id and location (`Registries.X` is `(minecraft:root, X)`);
+/// anything else is unknown.
 fn registry_key_identity(value: &Value) -> Option<(String, String)> {
-    if let Some(parts) = resource_key_parts(value) {
-        return Some(parts);
-    }
-    let id = crate::runtime::expect_ref(value)?.strip_prefix("registry/")?;
-    Some((ROOT.to_owned(), id.to_owned()))
+    resource_key_parts(value)
 }
 
 /// The registry every registry key is in.
@@ -105,14 +105,6 @@ const ROOT: &str = "minecraft:root";
 /// that key is in).
 pub(crate) fn registry_name(value: &Value) -> Option<String> {
     registry_key_identity(value).map(|(_, location)| location)
-}
-
-/// Whether a value that is still text is an object of handle class `target`:
-/// a `registry/<id>` value is also its registry key (`Registries.X` is a
-/// `ResourceKey`) until #156 P4's second half makes registries handles.
-pub(crate) fn text_is_a(value: &Value, target: &str) -> bool {
-    target == RESOURCE_KEY
-        && crate::runtime::expect_ref(value).is_some_and(|text| text.starts_with("registry/"))
 }
 
 /// The two forms of a `ResourceKey`/`TagKey` key, each written with the one
@@ -228,15 +220,10 @@ pub(crate) fn key_location(value: &Value) -> Option<Value> {
     }
 }
 
-/// The registry key value of a registry key's identity: `registry/<id>`
-/// text for a key in `minecraft:root` (what `Registries.X` is), else a
-/// `ResourceKey` handle.
+/// The registry key of a registry key's identity: the interned
+/// `ResourceKey` (`Registries.X` for one in `minecraft:root`).
 fn registry_key_value(registry: &str, location: &str) -> Value {
-    if registry == ROOT {
-        Value::Ref(Some(format!("registry/{location}")))
-    } else {
-        resource_key_named(registry, location)
-    }
+    resource_key_named(registry, location)
 }
 
 /// `ResourceKey.registryKey()` (`createRegistryKey(registryName)`) or
@@ -493,44 +480,6 @@ pub(crate) const BLOCK_ITEM_ID_METHODS: Methods = Methods {
 };
 
 impl crate::runtime::StdHost {
-    /// The registry key and id `DeferredRegister.register` recorded for a
-    /// NeoForge/Forge holder (`holder/<key>`) or its registered value
-    /// (`registered/<key>`), keyed by the holder's text. `None` when no
-    /// register made it, or two registrations share the text.
-    fn holder_entry(&self, receiver: &Value, prefix: &str) -> Option<(Value, String)> {
-        let key = crate::runtime::expect_ref(receiver)?.strip_prefix(prefix)?;
-        self.holder_ids.get(key)?.clone()
-    }
-
-    /// `DeferredHolder.getId()`/`RegistryObject.getId()`: the entry's
-    /// `Identifier`; counted when the host does not know it.
-    pub(crate) fn holder_id(
-        &mut self,
-        r: &crate::runtime::MethodRef,
-        receiver: &Value,
-        prefix: &str,
-    ) -> Result<Value, crate::runtime::NativeError> {
-        match self.holder_entry(receiver, prefix) {
-            Some((_, id)) => Ok(identifier_of_text(&id)),
-            None => self.unknown_host_call(r),
-        }
-    }
-
-    /// `Holder.unwrapKey()`/`DeferredHolder.getKey()`: the entry's
-    /// `ResourceKey.create(registryKey, id)`, unnamed when the register's
-    /// registry key is one the host cannot name.
-    pub(crate) fn holder_key(
-        &mut self,
-        r: &crate::runtime::MethodRef,
-        receiver: &Value,
-        prefix: &str,
-    ) -> Result<Value, crate::runtime::NativeError> {
-        match self.holder_entry(receiver, prefix) {
-            Some((registry, id)) => Ok(resource_key(&registry, &identifier_of_text(&id), Some(id))),
-            None => self.unknown_host_call(r),
-        }
-    }
-
     /// `DeferredRegister.create(registryKey, namespace)`: remember what the
     /// register was made from under its marker; a second register with the
     /// same marker but other arguments makes the marker ambiguous.
@@ -571,20 +520,6 @@ impl crate::runtime::StdHost {
         let id = crate::runtime::java_identifier::checked(owner, &namespace, name)?;
         Ok(Some((registry, id)))
     }
-
-    /// Record the id a holder names, under the holder's text.
-    pub(crate) fn record_holder_id(&mut self, holder: &str, registry: Value, id: &Value) {
-        let made = identifier_key(id).map(|id| (registry, id.to_owned()));
-        match self.holder_ids.get(holder) {
-            Some(known) if *known != made => {
-                self.holder_ids.insert(holder.to_owned(), None);
-            }
-            Some(_) => {}
-            None => {
-                self.holder_ids.insert(holder.to_owned(), made);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -614,7 +549,7 @@ mod tests {
                 Some((registry.clone(), location.clone())),
                 "{registry:?} {location:?}"
             );
-            let registry_key = Value::Ref(Some(format!("registry/{registry}")));
+            let registry_key = registry_key_of(registry);
             let tag = tag_key(&registry_key, &Value::Ref(None), Some(location.clone()));
             assert_eq!(key_location(&tag), Some(identifier_of_text(location)));
             assert_eq!(key_registry(&tag), Some(registry_key));

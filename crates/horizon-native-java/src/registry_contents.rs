@@ -1,8 +1,7 @@
 //! What a registry marker iterates over.
 //!
-//! The host models a game registry as one `registry/<id>` marker (the key and
-//! the registry are the same value, see `vanilla_registries`), and records the
-//! entries a jar registers into it. A real `MappedRegistry.iterator()` yields
+//! The host models a game registry as a `Registry` handle keyed by its id
+//! (`host_registry.rs`), and records the entries a jar registers into it. A real `MappedRegistry.iterator()` yields
 //! every value registered in that registry; the only entries this runtime has
 //! values for are the ones the jar registered, so that is what the iterator
 //! yields, in registration order.
@@ -19,9 +18,8 @@
 
 use crate::StdHost;
 
-/// The values registered into one registry marker, in registration order.
-pub(crate) fn values(host: &StdHost, registry_marker: &str) -> Vec<crate::Value> {
-    let id = registry_marker.trim_start_matches("registry/");
+/// The values registered into registry `id`, in registration order.
+pub(crate) fn values(host: &StdHost, id: &str) -> Vec<crate::Value> {
     host.registrations
         .iter()
         .filter(|entry| entry.registry == id)
