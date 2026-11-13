@@ -16247,6 +16247,7 @@ impl NativeJar {
             host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -16410,6 +16411,7 @@ impl NativeJar {
         let mut callback_infos = CallbackInfos::new();
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -16557,6 +16559,7 @@ impl NativeJar {
         let class_name = class.replace('.', "/");
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -18985,6 +18988,14 @@ fn gson_json_kind(json: &serde_json::Value) -> &'static str {
 
 struct Runtime<'a, H> {
     classes: &'a BTreeMap<String, ClassFile>,
+    /// Each class a jar `@Mixin` targets, with the mixin classes naming it,
+    /// built once on first use from `classes` (which this runtime only
+    /// borrows, so it cannot change underneath the index). Type checks on jar
+    /// objects ask "does a mixin add this interface to that class?" at every
+    /// step of a superclass walk; without the index each question scanned
+    /// every class of the jar (#166's re-check measured a 10M-store loop at
+    /// 1.3 s → 114 s) (`checkcast.rs`).
+    mixin_index: std::cell::OnceCell<BTreeMap<String, Vec<String>>>,
     /// Sibling-jar tables this execution may link, snapshotted from the host
     /// so a frame that keeps a class reference does not borrow the host.
     linked: Arc<LinkedClassTable>,
@@ -29637,6 +29648,7 @@ mod tests {
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &BTreeMap::new(),
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -29691,6 +29703,7 @@ mod tests {
         let mut host = StdHost::new();
         let mut runtime = Runtime {
             classes: &BTreeMap::new(),
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -36737,6 +36750,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -36893,6 +36907,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -37102,6 +37117,7 @@ mandatory = true
             .unwrap();
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -37407,6 +37423,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -37710,6 +37727,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -42843,6 +42861,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -42891,6 +42910,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,

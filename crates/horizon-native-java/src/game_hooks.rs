@@ -1413,6 +1413,7 @@ impl NativeJar {
         let mut initialized = state.initialized.clone();
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked,
             host: &mut wrapped,
             calls: 0,
