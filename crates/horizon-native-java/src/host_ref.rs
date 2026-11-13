@@ -226,6 +226,17 @@ pub enum HostKind {
     /// declared result is an array: key `<declared class>#empty`
     /// (`host_array.rs`). Its runtime class is unknown.
     UnknownArray,
+    /// A `Registry` (`BuiltInRegistries.X`, a jar's built registry): key its
+    /// id (`host_registry.rs`).
+    Registry,
+    /// A NeoForge `DeferredHolder` or Forge `RegistryObject`: key the loader,
+    /// the registration's serial and the entry's key.
+    Holder,
+    /// The value a holder's registration registered: key the serial.
+    Registered,
+    /// A Fabric `FabricRegistryBuilder`: key the [`HostRef::of_values`] of
+    /// the registry its `buildAndRegister()` answers (`fabric_registry.rs`).
+    RegistryBuilder,
     /// The event a NeoForge/Forge game-event listener receives: key its class
     /// (`host_game_event.rs`).
     GameEvent,
@@ -734,6 +745,47 @@ const KINDS: &[KindInfo] = &[
         // One key stands for every array such a call returned.
         canonical: never_canonical,
         methods: &crate::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::Registry,
+        tag: "reg",
+        // An implementation of the interface: `MappedRegistry`,
+        // `DefaultedMappedRegistry`, a loader's own.
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::registry_types,
+        },
+        // One registry per registry key.
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTRY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Holder,
+        tag: "hold",
+        // `DeferredHolder` has subclasses (`DeferredItem`, `DeferredBlock`).
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::holder_types,
+        },
+        // One holder per `register` call: the serial names one allocation.
+        canonical: always_canonical,
+        methods: &crate::host_registry::HOLDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Registered,
+        tag: "rgd",
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::no_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTERED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::RegistryBuilder,
+        tag: "frb",
+        // A final class (fabric-registry-sync 8.0.4).
+        class: ClassRule::Fixed(crate::fabric_registry::BUILDER),
+        // `create(key)` twice is two builders for one registry.
+        canonical: never_canonical,
+        methods: &crate::host_registry::BUILDER_METHODS,
     },
     KindInfo {
         kind: HostKind::GameEvent,

@@ -125,10 +125,12 @@ impl<H: Host> Runtime<'_, H> {
             ) => {
                 let marker = expect_ref(receiver?)?.clone();
                 // The default id comes first in `DefaultedMappedRegistry`.
+                // Its registry key (`ResourceKey[minecraft:root / <id>]`).
                 let key = args
                     .iter()
                     .find(|value| {
-                        expect_ref(value).is_some_and(|key| key.starts_with("registry/"))
+                        crate::runtime::host_ids::named_id(value).is_some()
+                            && crate::runtime::host_ids::is_resource_key(value)
                     })?
                     .clone();
                 self.fields.insert(format!("{marker}{KEY_FIELD}"), key);
@@ -136,13 +138,14 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("net/fabricmc/fabric/api/event/registry/FabricRegistryBuilder", "from") => {
                 let registry = expect_ref(args.first()?)?;
-                let Some(Value::Ref(Some(key))) =
-                    self.fields.get(&format!("{registry}{KEY_FIELD}"))
-                else {
-                    return None;
-                };
-                let id = key.strip_prefix("registry/")?;
-                Some(Value::Ref(Some(format!("fabric-registry-builder/{id}"))))
+                let key = self.fields.get(&format!("{registry}{KEY_FIELD}"))?;
+                let id = crate::runtime::host_ids::named_id(key)?;
+                // A `MappedRegistry` (or its defaulted subclass) the jar built:
+                // `buildAndRegister` answers the registry handle for its id
+                // (not the jar's own object: #177 review P4, filed).
+                Some(crate::runtime::fabric_registry::builder(
+                    crate::runtime::host_registry::built_registry(crate::runtime::host_registry::MAPPED, &id),
+                ))
             }
             _ => None,
         }

@@ -428,6 +428,13 @@ const BUILT_IN_REGISTRIES: &[(&str, &str)] = &[
     ("VILLAGER_TYPE", "minecraft:villager_type"),
 ];
 
+/// Whether `id` is a registry `BuiltInRegistries` holds (a `MappedRegistry`).
+pub(crate) fn is_built_in(id: &str) -> bool {
+    BUILT_IN_REGISTRIES
+        .iter()
+        .any(|(_, built_in)| *built_in == id)
+}
+
 /// The vanilla registry id one of the two registry classes' fields names.
 pub(crate) fn registry_id(owner: &str, field: &str) -> Option<&'static str> {
     let table = match owner {
