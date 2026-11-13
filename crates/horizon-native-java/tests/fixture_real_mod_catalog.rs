@@ -14,7 +14,9 @@
 #[path = "support/scratch.rs"]
 mod scratch;
 
-use horizon_native_java::{HostInvocation, NativeError, NativeJar, StdHost, Value};
+use horizon_native_java::{
+    Host, HostInvocation, MethodRef, NativeError, NativeJar, StdHost, Value,
+};
 use std::{
     collections::BTreeMap,
     fs,
@@ -145,6 +147,18 @@ macro_rules! assert_called {
     }};
 }
 
+/// The `Identifier` `Identifier.parse(text)` answers (a host handle).
+fn parsed_id(text: &str) -> Value {
+    let parse = MethodRef {
+        owner: "net/minecraft/resources/Identifier".into(),
+        name: "parse".into(),
+        descriptor: "(Ljava/lang/String;)Lnet/minecraft/resources/Identifier;".into(),
+    };
+    StdHost::new()
+        .invoke(&parse, &[Value::Ref(Some(text.into()))])
+        .unwrap()
+}
+
 #[test]
 fn fabric_catalog_mod_initializes_items_blocks_and_loader_queries() {
     let stubs = sources! {
@@ -243,14 +257,8 @@ public final class FabricCatalogMod implements ModInitializer {
     // by the host yet, so only the id and value slots are meaningful today.
     let registers = calls_to(&host, MC_REGISTRY, "register");
     assert_eq!(registers.len(), 2);
-    assert_eq!(
-        registers[0].args[1],
-        Value::Ref(Some("identifier/catalog:ruby".into()))
-    );
-    assert_eq!(
-        registers[1].args[1],
-        Value::Ref(Some("identifier/catalog:ruby_lamp".into()))
-    );
+    assert_eq!(registers[0].args[1], parsed_id("catalog:ruby"));
+    assert_eq!(registers[1].args[1], parsed_id("catalog:ruby_lamp"));
     for (register, expected) in registers.iter().zip(["Item#", "Block#"]) {
         assert!(
             matches!(register.args.get(2), Some(Value::Ref(Some(marker))) if marker.contains(expected)),

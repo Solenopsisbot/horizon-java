@@ -1183,7 +1183,7 @@ impl StdHost {
                     .or_else(|| a.strip_prefix(items::BLOCK))
             })
         {
-            return Some(Ok(marker(format!("identifier/{id}"))));
+            return Some(Ok(crate::runtime::host_ids::identifier_of_text(id)));
         }
         // A stack the frame built answers as its slot marker does.
         if !text.starts_with("client/")
@@ -1231,10 +1231,7 @@ impl StdHost {
         }
         if let Some(id) = text.strip_prefix(CATEGORY) {
             return Some(match (r.name.as_str(), return_desc(&r.descriptor)) {
-                ("id", _) => {
-                    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-                    Ok(marker(format!("identifier/{namespace}:{path}")))
-                }
+                ("id", _) => Ok(crate::runtime::host_ids::identifier_of_text(id)),
                 ("label", _) => Ok(component_value(
                     "translatable",
                     &format!("key.category.{}", id.replacen(':', ".", 1)),
@@ -1582,10 +1579,10 @@ impl StdHost {
                     ("getDayTime" | "getOverworldClockTime", "J") => {
                         Some(Value::Long(level.day_time))
                     }
-                    ("dimension", _) => Some(marker(format!(
-                        "resource-key/dimension/{}",
-                        level.dimension
-                    ))),
+                    ("dimension", _) => Some(crate::runtime::host_ids::resource_key_named(
+                        "minecraft:dimension",
+                        &level.dimension,
+                    )),
                     ("isClientSide", "Z") => Some(flag(true)),
                     ("getMinY", "I") => int(level.min_y),
                     ("getHeight", "I") => int(level.height),
