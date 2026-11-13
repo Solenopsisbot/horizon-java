@@ -26,6 +26,8 @@ const PROBE: &str = r#"package demo;
 import java.util.AbstractCollection;
 import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.AbstractSet;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
@@ -152,6 +154,53 @@ public final class Probe {
             return true;
         }
     }
+
+    /// A jar collection whose iterator is a host list's.
+    static final class HBag extends AbstractCollection<Integer> {
+        final List<Integer> items;
+        HBag(Integer... items) { this.items = new ArrayList<>(Arrays.asList(items)); }
+        @Override public int size() { log("size"); return items.size(); }
+        @Override public Iterator<Integer> iterator() { log("iter"); return items.iterator(); }
+    }
+
+    /// A jar set whose iterator is `Arrays.asList(...).iterator()`.
+    static final class ASet extends AbstractSet<Integer> {
+        @Override public int size() { return 2; }
+        @Override public Iterator<Integer> iterator() { return Arrays.asList(1, 2).iterator(); }
+    }
+
+    /// A jar Iterable over `List.of`.
+    static final class HostWalk implements Iterable<String> {
+        @Override public Iterator<String> iterator() { log("giter"); return List.of("x", "y").iterator(); }
+    }
+
+    public static String hostIteratorToList() { return take(new HBag(1, 2, 3).stream().toList()); }
+
+    public static String hostIteratorForEach() {
+        new HBag(1, 2).stream().forEach(x -> log("e" + x));
+        return take("done");
+    }
+
+    public static String arraysAsListSet() { return take(new ASet().stream().toList()); }
+
+    public static String sizedHostIterator() {
+        return take(StreamSupport.stream(Spliterators.spliterator(List.of(1, 2).iterator(), 2, Spliterator.ORDERED), false).toList());
+    }
+
+    public static String unknownSizeForEach() {
+        Spliterators.spliteratorUnknownSize(List.of(1, 2).iterator(), 0).forEachRemaining(x -> log("e" + x));
+        return take("done");
+    }
+
+    public static String iterableOverListOf() {
+        HostWalk it = new HostWalk();
+        Spliterator<String> sp = it.spliterator();
+        log("made");
+        log("c" + sp.characteristics());
+        log("e" + sp.estimateSize());
+        return take(StreamSupport.stream(sp, false).toList());
+    }
+
 
     public static String concatOfJarSpliterator() {
         return take(Stream.concat(StreamSupport.stream(new Split(Spliterator.ORDERED, "a"), false), Stream.of("b")).toList());
@@ -442,4 +491,22 @@ fn concat_over_a_jar_spliterator_is_counted() {
         "{:?}",
         host.unknown_host_calls()
     );
+}
+
+/// A jar collection or iterable whose iterator is a host collection's: the
+/// spliterator hands the action to the host iterator's `forEachRemaining`,
+/// which runs it (#141). Review of #132 found each streaming nothing.
+#[test]
+fn host_iterators_under_jar_spliterators_stream_as_jdk_25_does() {
+    check(&[
+        ("arraysAsListSet", " => [1, 2]"),
+        ("hostIteratorForEach", "iter size e1 e2 => done"),
+        ("hostIteratorToList", "iter size => [1, 2, 3]"),
+        (
+            "iterableOverListOf",
+            "giter made c0 e9223372036854775807 => [x, y]",
+        ),
+        ("sizedHostIterator", " => [1, 2]"),
+        ("unknownSizeForEach", "e1 e2 => done"),
+    ]);
 }
