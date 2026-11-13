@@ -292,4 +292,12 @@ public final class P2b {
     Thread t = Thread.currentThread();
     return "" + t.isAlive() + t.getPriority() + t.getState() + t.isInterrupted() + t.isVirtual();
   }
+
+  /** log4j's getLogger(null name) is the caller's logger. */
+  public static String log4jNullName() { return LogManager.getLogger((String) null).getName(); }
+
+  /** A MessageFactory overload: one logger per name and factory, counted (the logger still answers). */
+  public static String log4jFactory() {
+    return LogManager.getLogger("x", new org.apache.logging.log4j.message.ParameterizedMessageFactory()).getName();
+  }
 }

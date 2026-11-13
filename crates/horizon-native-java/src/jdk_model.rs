@@ -1370,12 +1370,14 @@ pub(crate) fn java_string_hash(text: &str) -> i32 {
 }
 
 impl<H: crate::Host> crate::Runtime<'_, H> {
-    /// The logger factories whose name depends on a class, which only the
+    /// The logger factories whose name may depend on a class, which only the
     /// runtime knows: log4j's `LogManager.getLogger`/`getFormatterLogger`
     /// with no argument (the caller's class, `StackLocatorUtil.getCallerClass`),
-    /// a `Class` (`null`: the caller's) or an `Object` (its class; `null`: the
-    /// caller's), each named by `Class.getCanonicalName()` (else `getName()`)
-    /// as log4j-api 2.26's `LoggerContext.getLogger(Class)` does; and Mojang's
+    /// a `String` (`null`: the caller's), a `Class` (`null`: the caller's) or
+    /// an `Object` (its class; `null`: the caller's), a class named by
+    /// `Class.getCanonicalName()` (else `getName()`) as log4j-api 2.26's
+    /// `LoggerContext.getLogger(Class)` does, each with an optional
+    /// `MessageFactory` (counted, see below); and Mojang's
     /// `LogUtils.getLogger()`, slf4j's logger of the caller's class, named by
     /// `getName()`. A name the runtime cannot tell (a class it does not hold
     /// with a `$`, a value of unknown class, no caller frame) is counted and
@@ -1410,18 +1412,36 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             ("org/apache/logging/log4j/LogManager", "getFormatterLogger") => "log4j-formatter",
             _ => return Ok(None),
         };
-        let class = match (r.descriptor.as_str(), args.first()) {
-            ("()Lorg/apache/logging/log4j/Logger;", _)
+        if !r.descriptor.ends_with(")Lorg/apache/logging/log4j/Logger;") {
+            return Ok(None);
+        }
+        // An overload taking a `MessageFactory` caches one logger per name
+        // and factory, which the runtime cannot compare: answered (a mod
+        // logs through it) but counted, under a key no other logger shares.
+        let parameters = crate::descriptor_arguments(&r.descriptor);
+        let (api, first) = match parameters.as_slice() {
+            [] => (api, None),
+            [first] => (api, Some(first.as_str())),
+            [first, factory] if factory == "Lorg/apache/logging/log4j/message/MessageFactory;" => {
+                self.host.unknown_operand_call(r)?;
+                ("log4j-factory", Some(first.as_str()))
+            }
+            _ => return Ok(None),
+        };
+        let class = match (first, args.first()) {
+            (None, _)
             | (
-                "(Ljava/lang/Class;)Lorg/apache/logging/log4j/Logger;"
-                | "(Ljava/lang/Object;)Lorg/apache/logging/log4j/Logger;",
+                Some("Ljava/lang/String;" | "Ljava/lang/Class;" | "Ljava/lang/Object;"),
                 Some(Value::Ref(None)),
             ) => caller(),
-            (
-                "(Ljava/lang/Class;)Lorg/apache/logging/log4j/Logger;",
-                Some(Value::Ref(Some(class))),
-            ) => Some(class.replace('.', "/")),
-            ("(Ljava/lang/Object;)Lorg/apache/logging/log4j/Logger;", Some(value)) => {
+            // A name is the logger's name as it is.
+            (Some("Ljava/lang/String;"), Some(Value::Ref(Some(name)))) => {
+                return Ok(Some(logger_value(api, name)));
+            }
+            (Some("Ljava/lang/Class;"), Some(Value::Ref(Some(class)))) => {
+                Some(class.replace('.', "/"))
+            }
+            (Some("Ljava/lang/Object;"), Some(value)) => {
                 crate::class_of_value(value).or_else(|| {
                     expect_ref(value)
                         .filter(|text| crate::value_class::is_plain_string(text))

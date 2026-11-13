@@ -36,7 +36,8 @@
 //! `getClass()` is counted and `instanceof` answers from the declared type.
 //! The APIs also decide whether one name is one object: log4j's
 //! `LogManager.getLogger` (per message factory, so `getFormatterLogger` is a
-//! separate API), slf4j's `LoggerFactory.getLogger` and
+//! separate API, and an overload taking a `MessageFactory` one more, never
+//! canonical and counted), slf4j's `LoggerFactory.getLogger` and
 //! `java.util.logging.Logger.getLogger` cache one logger per name;
 //! `LogUtils.getLogger()` names its caller (unknown here),
 //! `Logger.getAnonymousLogger()` and `System.getLogger` hand out new objects.
@@ -116,7 +117,7 @@ fn logger_api(key: &str) -> Option<String> {
 pub(crate) fn logger_declared(key: &str) -> &'static [&'static str] {
     match logger_api(key).as_deref() {
         // `ExtendedLogger` extends `Logger`; the runtime holds neither.
-        Some("log4j" | "log4j-formatter") => &[
+        Some("log4j" | "log4j-formatter" | "log4j-factory") => &[
             "org/apache/logging/log4j/spi/ExtendedLogger",
             "org/apache/logging/log4j/Logger",
         ],

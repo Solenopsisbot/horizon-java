@@ -45,6 +45,9 @@ const CASES: &[(&str, Outcome)] = &[
     ("genThreadSet", Exact(r#"true"#)),
     // As `genOrder`, through a TreeSet.
     ("genTreeSet", Counted),
+    // A `MessageFactory` overload: one logger per name and factory, counted
+    // (Java 25: `x`); the logger still answers.
+    ("log4jFactory", Counted),
     // log4j's `getLogger()` is the caller class's logger; `Class`/`Object` overloads name it by the canonical name (#173 review).
     (
         "log4jNames",
@@ -52,6 +55,8 @@ const CASES: &[(&str, Outcome)] = &[
             r#"demo.P2b|truefalse|demo.P2b.Innertruefalse|demo.P2b|demo.P2b$1|java.lang.Stringdemo.P2b.Innerfalse|demo.P2bfalse"#,
         ),
     ),
+    // log4j's `getLogger((String) null)` is the caller class's logger.
+    ("log4jNullName", Exact(r#"demo.P2b"#)),
     // Mojang's `LogUtils.getLogger()` is slf4j's logger of the caller class (`getName`).
     ("logUtilsName", Exact(r#"demo.P2btruedemo.P2b$Inner"#)),
     // Java 25: `org.apache.logging.log4j.core.Logger`; the backend's class is unknown (`ClassRule::Unknown`).
@@ -149,8 +154,20 @@ public final class LogManager {
   public static Logger getLogger() { return null; }
   public static Logger getFormatterLogger() { return null; }
   public static Logger getRootLogger() { return null; }
+  public static Logger getLogger(String name, org.apache.logging.log4j.message.MessageFactory factory) { return null; }
 }
 "#;
+
+const MESSAGE_FACTORY_STUBS: [(&str, &str); 2] = [
+    (
+        "org/apache/logging/log4j/message/MessageFactory.java",
+        "package org.apache.logging.log4j.message;\npublic interface MessageFactory {}\n",
+    ),
+    (
+        "org/apache/logging/log4j/message/ParameterizedMessageFactory.java",
+        "package org.apache.logging.log4j.message;\npublic class ParameterizedMessageFactory implements MessageFactory {}\n",
+    ),
+];
 
 const SLF4J_STUBS: [(&str, &str); 3] = [
     (
@@ -186,6 +203,8 @@ fn p2b_handles_answer_as_java_25_or_count() {
             SLF4J_STUBS[0],
             SLF4J_STUBS[1],
             SLF4J_STUBS[2],
+            MESSAGE_FACTORY_STUBS[0],
+            MESSAGE_FACTORY_STUBS[1],
         ],
     );
     let mut failures = Vec::new();
