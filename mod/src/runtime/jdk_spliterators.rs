@@ -72,7 +72,7 @@ pub(crate) const JDK_SPLITERATOR: Methods = Methods {
     instance_of: |handle, wanted, _| {
         Some(
             matches!(wanted, "java/lang/Object" | "java/util/Spliterator")
-                || wanted == handle.class()
+                || handle.class() == Some(wanted)
                 || (wanted == ITERATOR_SPLITERATOR && handle.key().starts_with("sorted:")),
         )
     },

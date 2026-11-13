@@ -148,12 +148,12 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Err(class_cast_exception(&runtime_class, target));
         }
-        // A `stream/...` text that is no live stream is a jar `String`
-        // spelled like one (`stream_pipeline::stream_marker`): never a stream.
+        // A plain `String`, or a `stream/...` text that is no live stream (a
+        // jar `String` spelled like one), is never a stream: Java's CCE.
         if crate::stream_pipeline::is_stream_interface(target)
             && let Value::Ref(Some(text)) = value
-            && text.starts_with("stream/")
-            && !self.is_live_stream(text)
+            && (crate::value_class::is_plain_string(text)
+                || (text.starts_with("stream/") && !self.is_live_stream(text)))
         {
             return Err(class_cast_exception("java/lang/String", target));
         }
@@ -167,6 +167,11 @@ impl<H: Host> Runtime<'_, H> {
         let (verdict, runtime_class) = self.cast_verdict(value, target, target_is_interface);
         match verdict {
             Verdict::Yes => Ok(()),
+            // A stream's class is a pipeline stage's own, which the
+            // exception's message would name: counted, its marker never shown.
+            Verdict::No if expect_ref(value).is_some_and(|marker| self.is_live_stream(marker)) => {
+                self.count_cast(value, target)
+            }
             Verdict::No => Err(class_cast_exception(
                 runtime_class.as_deref().unwrap_or("java/lang/Object"),
                 target,
@@ -198,9 +203,8 @@ impl<H: Host> Runtime<'_, H> {
         if let Value::Host(handle) = value {
             return Some(match handle.instance_of(target, self) {
                 Some(true) => HostCast::Fits,
-                // The message names the exact class: counted when it is
-                // not known.
-                Some(false) => match handle.exact_class() {
+                // The exception names the exact class: unknown, counted.
+                Some(false) => match handle.class() {
                     Some(class) => HostCast::Throws(class.to_owned()),
                     None => HostCast::Unknown,
                 },
@@ -364,7 +368,7 @@ impl<H: Host> Runtime<'_, H> {
                     Some(false) => Verdict::No,
                     None => Verdict::Unknown,
                 };
-                return (verdict, handle.exact_class().map(str::to_owned));
+                return (verdict, handle.class().map(str::to_owned));
             }
             // A boxed number is a JDK object, never a jar type.
             Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {
@@ -463,7 +467,27 @@ impl<H: Host> Runtime<'_, H> {
                 return Verdict::Yes;
             }
             let Some(file) = self.class(&current) else {
-                if current.starts_with("java/") || target_is_interface == Some(false) {
+                // A JDK class's supertypes all come from system-module
+                // packages (`jdk_closure.rs`): it is never a jar's or a game's
+                // type. Against a JDK-module type only the JDK's own answer
+                // stands (`AbstractList` is a `Collection`, `IIOMetadataNode`
+                // an `org.w3c.dom.Element`), unknown where none is known. A
+                // game class never extends a held jar class.
+                if current.starts_with("java/") {
+                    if !crate::jdk_closure::in_jdk_package(target) {
+                        return Verdict::No;
+                    }
+                    return match host_ref::ClassHierarchy::is_instance(
+                        &host_ref::JdkHierarchy,
+                        &current,
+                        target,
+                    ) {
+                        Some(true) => Verdict::Yes,
+                        Some(false) => Verdict::No,
+                        None => Verdict::Unknown,
+                    };
+                }
+                if target_is_interface == Some(false) {
                     return Verdict::No;
                 }
                 return Verdict::Unknown;
@@ -475,12 +499,58 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Verdict::Yes;
             }
+            // An interface the runtime does not hold may extend an interface
+            // target (another jar's interface over this one's, or over a JDK
+            // or platform interface): not a "no". A platform interface never
+            // extends a jar type.
+            if target_is_interface != Some(false)
+                && file
+                    .interface_names()
+                    .iter()
+                    .any(|interface| self.interface_leaves_held(interface, target))
+            {
+                return Verdict::Unknown;
+            }
             if file.super_name.is_empty() || file.super_name == current {
                 return Verdict::No;
             }
             current = file.super_name.clone();
         }
         Verdict::Unknown
+    }
+
+    /// Whether `interface`'s superinterfaces reach one the runtime does not
+    /// hold that could still extend `target`: one outside the JDK and the
+    /// platforms (an absent jar's), or any unheld one when `target` is
+    /// itself not held.
+    fn interface_leaves_held(&self, interface: &str, target: &str) -> bool {
+        const PLATFORM: &[&str] = &[
+            "java/",
+            "javax/",
+            "jdk/",
+            "net/minecraft/",
+            "com/mojang/",
+            "net/fabricmc/",
+            "net/neoforged/",
+            "net/minecraftforge/",
+        ];
+        let held_target = self.class(target).is_some();
+        let mut queue = std::collections::VecDeque::from([interface.to_owned()]);
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(current) = queue.pop_front() {
+            if seen.len() >= MAX_SUPERCLASS_WALK || !seen.insert(current.clone()) {
+                continue;
+            }
+            match self.class(&current) {
+                Some(file) => queue.extend(file.interface_names()),
+                None if !held_target => return true,
+                None if !PLATFORM.iter().any(|prefix| current.starts_with(prefix)) => {
+                    return true;
+                }
+                None => {}
+            }
+        }
+        false
     }
 
     /// Whether one of the jar's `@Mixin`s gives `class` the interface `target`
@@ -516,17 +586,35 @@ impl<H: Host> host_ref::ClassHierarchy for Runtime<'_, H> {
         if wanted == "java/lang/Object" || class == wanted {
             return Some(true);
         }
+        // A loaded Mixin plan that adds `wanted` to `class` (a Fabric API
+        // class too, `ArrayBackedEvent`): the woven class implements it.
+        if self.mixin_adds_interface(class, wanted) {
+            return Some(true);
+        }
         if self.class(class).is_none() {
             return host_ref::JdkHierarchy.is_instance(class, wanted);
+        }
+        if host_ref::exact_class_rules_out(class, wanted) {
+            return Some(false);
         }
         let wanted_is_interface = self
             .class(wanted)
             .and_then(class_access)
             .map(|access| access & ACC_INTERFACE != 0);
+        // A "no" is not a proof for a jar class: another jar's Mixin, or an
+        // interface this runtime does not hold, can make it a `wanted`
+        // (`host_ref::proves_not_instance`).
         match self.hierarchy_verdict(class, wanted, wanted_is_interface) {
             Verdict::Yes => Some(true),
-            Verdict::No => Some(false),
-            Verdict::Unknown => None,
+            Verdict::No | Verdict::Unknown => None,
+        }
+    }
+
+    /// A held class's own `ACC_INTERFACE`; Java 25's table for a JDK class.
+    fn is_interface(&self, class: &str) -> Option<bool> {
+        match self.class(class) {
+            Some(file) => class_access(file).map(|access| access & ACC_INTERFACE != 0),
+            None => host_ref::JdkHierarchy.is_interface(class),
         }
     }
 }

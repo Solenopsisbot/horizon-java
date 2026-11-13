@@ -109,27 +109,11 @@ pub(crate) const STREAM_BUILDER: Methods = Methods {
     compare_to: None,
 };
 
-/// The `Sink` a push hands a jar spliterator (`HostKind::StreamSink`). Its
-/// `accept(value)` is the sink's `accept` at one stage of one running push.
-/// `Object`'s members as for a builder; it is a `Sink`, so a `Consumer`.
-pub(crate) const STREAM_SINK: Methods = Methods {
-    to_string: |_, _| Ok(None),
-    hash_code: |_, _| Ok(None),
-    equals: |handle, other, _| {
-        Ok(match other {
-            Value::Host(other) => handle.same_object(other),
-            _ => Some(false),
-        })
-    },
-    instance_of: |_, wanted, _| {
-        Some(matches!(
-            wanted,
-            "java/lang/Object" | "java/util/stream/Sink" | "java/util/function/Consumer"
-        ))
-    },
-    crosses_jars: |_, _| false,
-    compare_to: None,
-};
+/// The types the `Sink` a push hands a jar spliterator surely is
+/// (`HostKind::StreamSink`, `ClassRule::Unknown`): its class is a stage's own.
+pub(crate) fn sink_types(_: &str) -> &'static [&'static str] {
+    &["java/util/stream/Sink", "java/util/function/Consumer"]
+}
 
 /// `Collector.of`'s object (`HostKind::Collector`): JDK 25's
 /// `Collectors.CollectorImpl`, a record of the five functions. Its
@@ -402,6 +386,22 @@ pub(crate) fn stream_marker(class: &str, method: &str, n: usize) -> String {
     });
     format!("stream/{class}/{method}/{n}~{tag:016x}")
 }
+
+/// Whether `text` has a stream marker's shape (`stream/...~<16 hex>`). A
+/// path that cannot ask the runtime whether a stream is live (the host's
+/// collection text) treats such a text as a stream: it is never printed,
+/// since a printed marker is a forgeable capability.
+pub(crate) fn is_stream_marker(text: &str) -> bool {
+    text.starts_with("stream/")
+        && text.rsplit_once('~').is_some_and(|(_, tag)| {
+            tag.len() == 16 && tag.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+/// What a stream prints where its text is counted: Java's is the stage
+/// class and identity hash (`ReferencePipeline$Head@1b6d3586`), which no run
+/// reproduces; never the marker.
+pub(crate) const STREAM_TEXT: &str = "null";
 
 /// The stream interfaces a `String` never is.
 pub(crate) fn is_stream_interface(class: &str) -> bool {

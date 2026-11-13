@@ -393,12 +393,14 @@ public final class Probe {
 
     public static String sinkSwitch() {
         Object s = sink();
+        // `String` is final and no sink type: provably not; `Consumer` is
+        // declared. (`Runnable` is neither: counted.)
         String kind = switch (s) {
-            case Runnable r -> "runnable";
+            case String x -> "string";
             case Consumer<?> c -> "consumer";
             default -> "other";
         };
-        return take(kind + "," + (s instanceof Runnable));
+        return take(kind + "," + (s instanceof String));
     }
 
     public static String sinkClass() {
