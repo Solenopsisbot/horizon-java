@@ -1105,6 +1105,9 @@ pub struct EventFiring {
     /// The first non-`PASS` `InteractionResult` a Fabric listener returned
     /// (`SUCCESS`, `FAIL`...).
     pub interaction: Option<String>,
+    /// The event objects this firing handed its NeoForge/Forge listeners, one
+    /// per event class: every listener of one firing gets the same object.
+    objects: Vec<(String, Value)>,
 }
 
 impl EventFiring {
@@ -1115,7 +1118,19 @@ impl EventFiring {
             context,
             cancelled: false,
             interaction: None,
+            objects: Vec::new(),
         }
+    }
+
+    /// This firing's event object of `class` (`host_game_event.rs`), made by
+    /// its first listener on that class and handed to every later one.
+    pub(crate) fn event_object(&mut self, class: &str) -> Value {
+        if let Some((_, object)) = self.objects.iter().find(|(known, _)| known == class) {
+            return object.clone();
+        }
+        let object = crate::runtime::host_game_event::game_event(class);
+        self.objects.push((class.to_owned(), object.clone()));
+        object
     }
 }
 
@@ -2424,7 +2439,7 @@ impl NativeJar {
         }
         let event_args = match listener.shape {
             Some(shape) => fabric_arguments(shape, firing)?,
-            None => vec![crate::runtime::host_game_event::game_event(&listener.source)],
+            None => vec![firing.event_object(&listener.source)],
         };
         let marks = host.call_log_marks();
         host.note_firing_levels(firing);

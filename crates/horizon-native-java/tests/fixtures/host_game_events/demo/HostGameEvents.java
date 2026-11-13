@@ -82,6 +82,51 @@ public final class HostGameEvents {
     return "" + (a == b) + a.equals(b) + identities(a, b);
   }
 
+  /** Equality on the generic paths: Object's (identity), through HashSet, List and HashMap. */
+  public static String equality(Object a, Object b) {
+    Map<Object, Integer> m = new HashMap<>();
+    m.put(a, 1);
+    m.put(b, 2);
+    return "" + Objects.equals(a, b) + new HashSet<>(List.of(a)).contains(b) + List.of(a).indexOf(b) + m.size();
+  }
+
+  /** The Class surface the event table answers: the superclass walk, class or interface, its text. */
+  public static String classExact(Object e) {
+    Class<?> c = e.getClass();
+    StringBuilder walk = new StringBuilder();
+    for (Class<?> at = c; at != null; at = at.getSuperclass()) walk.append(at.getName()).append('>');
+    return c.getSuperclass().getName() + "|" + c.isInterface() + "|" + c.toString() + "|" + walk;
+  }
+
+  /** A Class concatenated: javac converts it with String.valueOf(Object) first. */
+  public static String classConcat(Object e) {
+    return "" + e.getClass();
+  }
+
+  public static String classSimple(Object e) {
+    return e.getClass().getSimpleName();
+  }
+
+  public static String classCanonical(Object e) {
+    return e.getClass().getCanonicalName();
+  }
+
+  public static String classMethod(Object e) {
+    try {
+      return e.getClass().getMethod("isCanceled").getName();
+    } catch (NoSuchMethodException x) {
+      return "NSME";
+    }
+  }
+
+  public static String classInterfaces(Object e) {
+    return "" + e.getClass().getInterfaces().length;
+  }
+
+  public static String classModifiers(Object e) {
+    return "" + java.lang.reflect.Modifier.isAbstract(e.getClass().getModifiers());
+  }
+
   /** Object's own text and hash: an identity hash. */
   public static String text(Object e) {
     return e + "," + e.hashCode();

@@ -146,7 +146,8 @@ fn game_and_lifecycle_events_answer_as_java_25_or_count() {
         // here) may be added, so `case ICancellableEvent` is counted; Java's case is `S`.
         ("tickSwitch", vec![tick.clone()], CountedAs("S")),
         ("tickInterfaces", vec![tick.clone()], Counted),
-        // A firing's event is a fresh object: the same handle is one, two made alike are counted.
+        // A firing's event is one object for all its listeners; two firings' events are two (their
+        // keys hold different serials), on the identity paths and on `equals`, which is `Object`'s.
         (
             "identity",
             vec![tick.clone(), tick.clone()],
@@ -155,8 +156,55 @@ fn game_and_lifecycle_events_answer_as_java_25_or_count() {
         (
             "identity",
             vec![game_event(TICK), game_event(TICK)],
-            Counted,
+            Exact("falsefalse2"),
         ),
+        (
+            "equality",
+            vec![tick.clone(), tick.clone()],
+            Exact("truetrue01"),
+        ),
+        (
+            "equality",
+            vec![game_event(TICK), game_event(TICK)],
+            Exact("falsefalse-12"),
+        ),
+        // `getClass()` is exact, so the `Class` surface reaches event classes: the table's
+        // superclass walk, "a class", its text are exact ...
+        (
+            "classExact",
+            vec![tick.clone()],
+            Exact(
+                "net.neoforged.neoforge.event.tick.ServerTickEvent|false|class net.neoforged.neoforge.event.tick.ServerTickEvent$Post|net.neoforged.neoforge.event.tick.ServerTickEvent$Post>net.neoforged.neoforge.event.tick.ServerTickEvent>net.neoforged.bus.api.Event>java.lang.Object>",
+            ),
+        ),
+        (
+            "classExact",
+            vec![setup.clone()],
+            Exact(
+                "net.neoforged.fml.event.lifecycle.ParallelDispatchEvent|false|class net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent|net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent>net.neoforged.fml.event.lifecycle.ParallelDispatchEvent>net.neoforged.fml.event.lifecycle.ModLifecycleEvent>net.neoforged.bus.api.Event>java.lang.Object>",
+            ),
+        ),
+        // ... a top-level class's simple and canonical names follow from its name; a nested one's
+        // (`ServerTickEvent$Post`: Java `Post`, `…ServerTickEvent.Post`) are counted ...
+        // A `Class` concatenated goes through `String.valueOf(Object)`, where a class name is a
+        // `Class` or a `String` spelled like one (Java: `class …ServerTickEvent$Post`): counted.
+        ("classConcat", vec![tick.clone()], Counted),
+        (
+            "classSimple",
+            vec![setup.clone()],
+            Exact("FMLCommonSetupEvent"),
+        ),
+        ("classSimple", vec![tick.clone()], Counted),
+        (
+            "classCanonical",
+            vec![setup.clone()],
+            Exact("net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent"),
+        ),
+        ("classCanonical", vec![tick.clone()], Counted),
+        // ... and what needs the class file is counted (Java: `NSME`, `0`, `false`), never invented.
+        ("classMethod", vec![tick.clone()], Counted),
+        ("classInterfaces", vec![tick.clone()], Counted),
+        ("classModifiers", vec![tick.clone()], Counted),
         // A stage posts one event per container: two handles of it are that one object.
         (
             "identity",
@@ -233,4 +281,95 @@ fn lifecycle_keys_never_alias_jar_text() {
             seen.push(event);
         }
     }
+}
+
+/// Every listener of one firing gets the same event object (Java passes one object down the bus);
+/// another firing makes another.
+#[test]
+fn one_firing_hands_every_listener_one_event() {
+    use crate::runtime::events::{EventContext, EventFacade, EventFiring, GameEvent};
+    let firing = || {
+        EventFiring::new(
+            GameEvent::ServerTickEnd,
+            std::sync::Arc::new(EventFacade::default()),
+            EventContext::default(),
+        )
+    };
+    let mut one = firing();
+    let (Value::Host(a), Value::Host(b)) = (one.event_object(TICK), one.event_object(TICK)) else {
+        panic!("not handles")
+    };
+    assert_eq!(a.same_object(&b), Some(true));
+    let Value::Host(c) = firing().event_object(TICK) else {
+        panic!("not a handle")
+    };
+    assert_eq!(a.same_object(&c), Some(false));
+}
+
+/// The class side (`host_ref::ClassSide`) agrees with the handles: no two rows own one class, and a
+/// class name answers `instanceof` exactly as a handle of that class does.
+#[test]
+fn class_sides_agree_with_the_handles() {
+    use crate::runtime::host_ref::{ClassHierarchy, HostKind, JdkHierarchy};
+    let stage_classes: Vec<&str> = crate::runtime::neoforge_lifecycle::LoadingStage::ALL
+        .iter()
+        .flat_map(|stage| [stage.event(true), stage.event(false)])
+        .collect();
+    let table: Vec<&str> = crate::runtime::neoforge_event_classes::EVENT_CLASSES
+        .iter()
+        .map(|(class, _, _)| *class)
+        .collect();
+    for class in table.iter().chain(&stage_classes) {
+        let owners: Vec<HostKind> = [HostKind::GameEvent, HostKind::LifecycleEvent]
+            .into_iter()
+            .filter(|kind| kind.class_side().is_some_and(|side| (side.owns)(class)))
+            .collect();
+        assert_eq!(owners.len(), 1, "{class}: {owners:?}");
+        assert_eq!(HostKind::owning_class(class), Some(owners[0]), "{class}");
+    }
+    let wanted = [
+        "java/lang/Object",
+        "java/lang/Integer",
+        "java/lang/Runnable",
+        "net/neoforged/bus/api/Event",
+        "net/neoforged/bus/api/ICancellableEvent",
+        "net/neoforged/fml/event/IModBusEvent",
+        "net/neoforged/neoforge/event/tick/ServerTickEvent",
+        SETUP,
+        TICK,
+        PAYLOAD,
+    ];
+    let check = |handle: &Value, class: &str| {
+        let Value::Host(handle) = handle else {
+            panic!("not a handle")
+        };
+        for wanted in wanted {
+            assert_eq!(
+                HostKind::class_instance_of(class, wanted, &JdkHierarchy),
+                Some(handle.instance_of(wanted, &JdkHierarchy)),
+                "{class} instanceof {wanted}"
+            );
+        }
+    };
+    check(&game_event(TICK), TICK);
+    for class in &stage_classes {
+        check(&lifecycle_event(class, Some(CONTAINER)), class);
+    }
+    // A Mixin plan the runtime holds adds an interface to a NeoForge event (the row's branch
+    // through the hierarchy); FML's classes are outside the Mixin layer and never ask.
+    struct Mixed;
+    impl ClassHierarchy for Mixed {
+        fn is_instance(&self, class: &str, wanted: &str) -> Option<bool> {
+            (class == TICK && wanted == "demo/Accessor").then_some(true)
+        }
+    }
+    let Value::Host(tick) = game_event(TICK) else {
+        panic!("not a handle")
+    };
+    assert_eq!(tick.instance_of("demo/Accessor", &Mixed), Some(true));
+    assert_eq!(tick.instance_of("demo/Other", &Mixed), None);
+    let Value::Host(setup) = lifecycle_event(SETUP, Some(CONTAINER)) else {
+        panic!("not a handle")
+    };
+    assert_eq!(setup.instance_of("demo/Accessor", &Mixed), Some(false));
 }

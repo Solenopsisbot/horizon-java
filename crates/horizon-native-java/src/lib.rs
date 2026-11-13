@@ -131,6 +131,7 @@ mod null_checks;
 mod object_methods;
 mod open_options;
 mod optionull;
+mod owned_class;
 mod parked_threads;
 pub use parked_threads::ParkedThread;
 mod priority_queue;
@@ -20560,7 +20561,7 @@ impl<H: Host> Runtime<'_, H> {
             .map(|marker| marker.replace('.', "/"))?;
         // A host kind's class: its row knows its supertypes, not which are
         // declared directly. Left to the host, which counts it.
-        if HostKind::of_class(&name).is_some() {
+        if HostKind::owning_class(&name).is_some() {
             return None;
         }
         let interfaces = self
@@ -20997,7 +20998,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             // A host kind's class: its row knows its supertypes, not which
             // one is the direct superclass. Counted.
-            if HostKind::of_class(&class).is_some() {
+            if HostKind::owning_class(&class).is_some() {
                 return self.host.unknown_operand_call(r).map(Some);
             }
             let parent = self
@@ -25023,6 +25024,11 @@ impl<H: Host> Runtime<'_, H> {
                         // anything is dispatched. An `@Redirect` or a cancelling
                         // hook above replaced the call, so it never ran.
                         invoke_or_catch!(at, Err(null_checks::invoke_on_null(&r)))
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_owned_class(&r, receiver.as_ref()))
+                    {
+                        // A `Class` call on a name a family kind owns (`owned_class.rs`).
+                        value
                     } else if let Some(owner) =
                         invoke_or_catch!(at, self.jvm_selected_jar_body(&r, op, receiver.as_ref()))
                     {
@@ -25587,6 +25593,16 @@ impl<H: Host> Runtime<'_, H> {
                         for (value, argument) in captured.iter_mut().zip(&arguments) {
                             if argument != "Ljava/lang/String;"
                                 && let Some(text) = self.host.modelled_to_string(value)
+                            {
+                                *value = Value::Ref(Some(text));
+                            }
+                        }
+                        // A `Class` operand naming a class a family kind owns prints
+                        // `Class.toString` or is counted (`owned_class.rs`).
+                        for (value, argument) in captured.iter_mut().zip(&arguments) {
+                            if argument == "Ljava/lang/Class;"
+                                && let Some(text) =
+                                    invoke_or_catch!(at, self.owned_class_text(value))
                             {
                                 *value = Value::Ref(Some(text));
                             }

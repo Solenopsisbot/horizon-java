@@ -344,6 +344,39 @@ pub(crate) struct Methods {
     pub(crate) compare_to: Option<CompareToFn>,
 }
 
+/// Facts about a class *name* a family kind answers for (no handle, no key): the class a handle's
+/// `getClass()` returns, an `ldc` of it, or a supertype in its family. A `FromKey` kind whose
+/// class names the reflective `Class` surface can reach has one ([`CLASS_SIDES`]); a `Fixed` kind
+/// is found by [`HostKind::of_class`], an `Unknown` one never (its declared types are not its
+/// class).
+pub(crate) struct ClassSide {
+    /// Whether this kind answers for the class name `class` (its handles' classes and their
+    /// family's supertypes). No two kinds own one class.
+    pub(crate) owns: fn(&str) -> bool,
+    /// `class instanceof wanted` (a subtype check: `Class.isAssignableFrom`, a class walk), the
+    /// row's own rule; `None` = counted.
+    pub(crate) instance_of: InstanceOfClassFn,
+    /// The direct superclass, when known exactly; `None` = counted.
+    pub(crate) superclass: fn(&str) -> Option<String>,
+    /// Whether `class` is an interface, when known; `None` = counted.
+    pub(crate) is_interface: fn(&str) -> Option<bool>,
+}
+
+/// [`ClassSide::instance_of`].
+pub(crate) type InstanceOfClassFn = fn(&str, &str, &dyn ClassHierarchy) -> Option<bool>;
+
+/// The kinds with a [`ClassSide`], in `KINDS` order.
+const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
+    (
+        HostKind::GameEvent,
+        &crate::runtime::host_game_event::EVENT_CLASS_SIDE,
+    ),
+    (
+        HostKind::LifecycleEvent,
+        &crate::runtime::host_game_event::LIFECYCLE_CLASS_SIDE,
+    ),
+];
+
 /// One row of the kind table.
 struct KindInfo {
     kind: HostKind,
@@ -593,8 +626,8 @@ const KINDS: &[KindInfo] = &[
         kind: HostKind::GameEvent,
         tag: "gev",
         class: ClassRule::FromKey(crate::runtime::host_game_event::game_event_class),
-        // Every firing builds a new event object.
-        canonical: never_canonical,
+        // A key holds a serial minted once per firing and class: one object.
+        canonical: always_canonical,
         methods: &crate::runtime::host_game_event::GAME_EVENT,
     },
     KindInfo {
@@ -622,22 +655,43 @@ impl HostKind {
             .copied()
     }
 
-    /// `class instanceof wanted` for the class name of a fixed-class kind (a
-    /// handle's `getClass()` handed to `Class.isAssignableFrom`, a class
-    /// walk): the kind's row, as for a handle of it, since a fixed class's
-    /// supertypes do not depend on the key. A NeoForge event class (a game or
-    /// loading-stage event's `getClass()`, `host_game_event.rs`) answers by
-    /// the event rows' rule. `None` when `class` is no kind's class;
+    /// `class instanceof wanted` for a class name a kind owns
+    /// ([`Self::owning_class`]: a handle's `getClass()` handed to
+    /// `Class.isAssignableFrom`, a class walk): a fixed class's row, as for a
+    /// handle of it (a fixed class's supertypes do not depend on the key), or
+    /// a family's [`ClassSide`]. `None` when no kind owns `class`;
     /// `Some(None)` when the row cannot tell.
     pub(crate) fn class_instance_of(
         class: &str,
         wanted: &str,
         hierarchy: &dyn ClassHierarchy,
     ) -> Option<Option<bool>> {
-        let Some(kind) = Self::of_class(class) else {
-            return crate::runtime::host_game_event::event_class_instance_of(class, wanted, hierarchy);
-        };
-        Some(HostRef::new(kind, "").instance_of(wanted, hierarchy))
+        let kind = Self::owning_class(class)?;
+        Some(match kind.class_side() {
+            Some(side) => (side.instance_of)(class, wanted, hierarchy),
+            None => HostRef::new(kind, "").instance_of(wanted, hierarchy),
+        })
+    }
+
+    /// The kind that answers for the class name `class`: a fixed-class kind
+    /// whose class it is, else the family kind whose [`ClassSide`] owns it.
+    /// Every `Class` call on a name a kind owns answers from the kind or is
+    /// counted; it never falls to "a class the runtime does not hold".
+    pub(crate) fn owning_class(class: &str) -> Option<Self> {
+        Self::of_class(class).or_else(|| {
+            CLASS_SIDES
+                .iter()
+                .find(|(_, side)| (side.owns)(class))
+                .map(|(kind, _)| *kind)
+        })
+    }
+
+    /// The kind's [`ClassSide`], when it has one.
+    pub(crate) fn class_side(self) -> Option<&'static ClassSide> {
+        CLASS_SIDES
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .map(|(_, side)| *side)
     }
 
     /// The kind of a fixed-class kind whose class is `class` (asked on every
