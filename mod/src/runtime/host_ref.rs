@@ -193,6 +193,16 @@ pub enum HostKind {
     /// An event a host caller dispatches or posts: key its cancelled flag and
     /// name.
     PostedEvent,
+    /// `net.minecraft.resources.Identifier`: key `namespace:path` (`host_ids.rs`).
+    Identifier,
+    /// `net.minecraft.resources.ResourceKey`: key `registry|location`, or
+    /// `?…` when the host cannot name them (`host_ids.rs`).
+    ResourceKey,
+    /// `net.minecraft.tags.TagKey`: key `registry|location`, or `?…`.
+    TagKey,
+    /// `net.minecraft.references.BlockItemId`: key the block and item ids'
+    /// [`HostRef::of_values`].
+    BlockItemId,
 }
 
 /// How a kind's Java class follows from its key.
@@ -542,6 +552,37 @@ const KINDS: &[KindInfo] = &[
         },
         canonical: never_canonical,
         methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Identifier,
+        tag: "id",
+        class: ClassRule::Fixed(crate::runtime::host_ids::IDENTIFIER),
+        // Not interned: two `Identifier.parse("a:x")` are two objects.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_ids::IDENTIFIER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ResourceKey,
+        tag: "rk",
+        class: ClassRule::Fixed(crate::runtime::host_ids::RESOURCE_KEY),
+        // Interned by `ResourceKey.create` (`host_ids.rs`).
+        canonical: always_canonical,
+        methods: &crate::runtime::host_ids::RESOURCE_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::TagKey,
+        tag: "tk",
+        class: ClassRule::Fixed(crate::runtime::host_ids::TAG_KEY),
+        // Interned by `TagKey.create`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_ids::TAG_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::BlockItemId,
+        tag: "bii",
+        class: ClassRule::Fixed(crate::runtime::host_ids::BLOCK_ITEM_ID),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_ids::BLOCK_ITEM_ID_METHODS,
     },
 ];
 

@@ -216,8 +216,8 @@ impl<H: Host> Runtime<'_, H> {
         match self.equality_of(value) {
             Equality::Null | Equality::Platform | Equality::Identity => true,
             Equality::Host => {
-                // An identifier compares and hashes by its text.
-                expect_ref(value).is_some_and(|marker| marker.starts_with("identifier/"))
+                // A game id compares and hashes by its key (`host_ids.rs`).
+                crate::host_ids::pure_equality(value)
                     || is_map_entry(value)
                         && map_entry_parts(value).is_ok_and(|(key, entry)| {
                             self.pure_equality_at(&key, depth + 1)
@@ -299,7 +299,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// The hash of a host-modelled value: a list, set or map by the JDK's
-    /// formula over its elements, an identifier by `Identifier.hashCode`.
+    /// formula over its elements, a handle by its kind's row.
     fn host_value_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         // A handle's `hashCode` is its kind's row, a held value's own
         // `hashCode` run here (`host_ref.rs`).
@@ -309,9 +309,6 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
-        if let Some(id) = marker.strip_prefix("identifier/") {
-            return Ok(Some(hash_map_order::identifier_hash(id)));
-        }
         if let Some(path) = self.file_path(value) {
             return Ok(Some(file_hash(path)));
         }

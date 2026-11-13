@@ -69,6 +69,7 @@ mod heap;
 mod hook_shapes;
 mod host_entry;
 mod host_events;
+mod host_ids;
 mod host_list_iterator;
 mod host_optional;
 mod host_path;
@@ -2782,6 +2783,13 @@ pub struct StdHost {
     /// constructors were public before 1.21), by the object's `class#n`
     /// marker. A constructor answers `void`, so this is where the id lives.
     identifier_objects: BTreeMap<String, String>,
+    /// What each `DeferredRegister.create` was made from (registry key,
+    /// namespace), by the register's marker; `None` when two registers share
+    /// the marker or the namespace was not text (`host_ids.rs`).
+    deferred_registers: BTreeMap<String, Option<(Value, String)>>,
+    /// The registry key and validated id each `DeferredRegister.register`
+    /// holder names, by the holder's text; `None` when two share the text.
+    holder_ids: BTreeMap<String, Option<(Value, String)>>,
     /// The id each `new LevelResource(id)` a jar built carries
     /// (`facade_server.rs`), by the object's marker.
     level_resources: BTreeMap<String, String>,
@@ -2959,6 +2967,8 @@ impl StdHost {
             fabric_entrypoint_containers: Vec::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
+            deferred_registers: BTreeMap::new(),
+            holder_ids: BTreeMap::new(),
             level_resources: BTreeMap::new(),
             saved_data: facade_saved_data::SavedDataState::default(),
             neoforge_attachments: neoforge_attachments::AttachmentState::default(),
@@ -3846,7 +3856,7 @@ impl StdHost {
     ///
     /// The registry arrives as a `registry/<id>` marker (either the receiver
     /// of the instance form or an argument of the interface's static form) and
-    /// the entry as an `identifier/<ns>:<path>` marker. Without both markers
+    /// the entry as an `Identifier` (or a `ResourceKey`). Without both
     /// the call stays invocation-only: the host never invents ids.
     /// A Fabric receiver registration: record the channel and its handler so
     /// a received frame can be dispatched to the same method.
@@ -3981,20 +3991,16 @@ impl StdHost {
                 Value::Ref(Some(marker)) => marker.strip_prefix("registry/"),
                 _ => None,
             })?;
-        let id = args.iter().find_map(|value| match value {
-            Value::Ref(Some(marker)) if marker.starts_with("identifier/") => {
-                let (namespace, path) = identifier_parts(value);
-                Some(format!("{namespace}:{path}"))
+        let id = args.iter().find_map(|value| {
+            if let Some(id) = host_ids::identifier_key(value) {
+                let (namespace, path) = id.split_once(':')?;
+                return Some(format!("{namespace}:{path}"));
             }
             // `Registry.register(registry, ResourceKey, value)` names the entry
             // through the key rather than a bare identifier. Without reading
             // the id out of the key the host answers null and the caller's
-            // static field ends up null.
-            Value::Ref(Some(marker)) if marker.starts_with("resource-key/") => {
-                resource_key_identifier(value)
-                    .map(|(namespace, path)| format!("{namespace}:{path}"))
-            }
-            _ => None,
+            // static field ends up null. An unnamed key names no id.
+            resource_key_identifier(value).map(|(namespace, path)| format!("{namespace}:{path}"))
         })?;
         let value = args.last().cloned().unwrap_or(Value::Void);
         let key = format!("{registry}/{id}");
@@ -4002,7 +4008,7 @@ impl StdHost {
         // metadata is the explicit adapter for that row, so inference must not
         // compete with it.
         //
-        // An id the host could not name (an `identifier/` marker with an empty
+        // An id the host could not name (an `Identifier` with an empty
         // namespace or path, e.g. an opaque key read back as `minecraft:`) also
         // stays opaque. The registration is still recorded and answered, but a
         // typed row under that id is one the content root must refuse, and it
@@ -4960,17 +4966,42 @@ impl Host for StdHost {
                 "create",
                 descriptor,
             ) if descriptor.ends_with(&format!("L{owner};")) => {
-                let registry = args
-                    .first()
-                    .and_then(expect_ref)
-                    .map_or("registry", String::as_str);
+                // The registry's key (`Registries.X`, `registry/<id>` text), or
+                // its id as an `Identifier`/`ResourceKey` handle.
+                let named = args.first().and_then(|registry| {
+                    host_ids::identifier_key(registry)
+                        .map(str::to_owned)
+                        .or_else(|| host_ids::resource_key_parts(registry).map(|(_, id)| id))
+                });
+                let named = named.map(|id| format!("registry/{id}"));
+                let registry = named.as_deref().unwrap_or_else(|| {
+                    args.first()
+                        .and_then(expect_ref)
+                        .map_or("registry", String::as_str)
+                });
                 let namespace = args
                     .get(1)
                     .and_then(expect_ref)
                     .map_or("default", String::as_str);
-                Ok(Value::Ref(Some(format!(
-                    "deferred-register/{registry}/{namespace}"
-                ))))
+                let marker = format!("deferred-register/{registry}/{namespace}");
+                // `create(Identifier, ns)` is `createRegistryKey(id)`, the
+                // key `Registries.X` is.
+                let registry_key = match args.first() {
+                    Some(id) if host_ids::identifier_key(id).is_some() => {
+                        Value::Ref(Some(format!(
+                            "registry/{}",
+                            host_ids::identifier_key(id).unwrap_or_default()
+                        )))
+                    }
+                    Some(key) => key.clone(),
+                    None => Value::Ref(None),
+                };
+                self.record_deferred_register(
+                    &marker,
+                    &registry_key,
+                    args.get(1).and_then(expect_ref),
+                );
+                Ok(Value::Ref(Some(marker)))
             }
             ("net/fabricmc/fabric/api/event/EventFactory", "createArrayBacked", descriptor)
                 if descriptor.ends_with("Lnet/fabricmc/fabric/api/event/Event;") =>
@@ -5714,26 +5745,25 @@ impl Host for StdHost {
                 "isDirectory" | "isRegularFile" | "isSymbolicLink" | "isExecutable",
                 descriptor,
             ) if descriptor.starts_with("(Ljava/nio/file/Path;") => Ok(Value::Int(0)),
+            // `ResourceKey.create(registryKey, id)` interns the key of
+            // `registryKey.identifier()` and `id` (`host_ids.rs`).
             ("net/minecraft/resources/ResourceKey", "create", descriptor)
                 if descriptor.ends_with("Lnet/minecraft/resources/ResourceKey;") =>
             {
-                Ok(Value::Ref(Some(format!(
-                    "resource-key/{}/{}",
-                    args.first()
-                        .map(value_marker)
-                        .unwrap_or_else(|| "null".into()),
-                    args.get(1)
-                        .map(value_marker)
-                        .unwrap_or_else(|| "null".into())
-                ))))
+                let null = Value::Ref(None);
+                let (registry, location) =
+                    (args.first().unwrap_or(&null), args.get(1).unwrap_or(&null));
+                let id = java_identifier::id_text(self, location);
+                Ok(host_ids::resource_key(registry, location, id))
             }
             ("net/minecraft/tags/TagKey", "create", descriptor)
                 if descriptor.ends_with("Lnet/minecraft/tags/TagKey;") =>
             {
-                Ok(tag_key_value(
-                    args.first().map(expect_string).unwrap_or_default(),
-                    args.get(1).map(expect_string).unwrap_or_default(),
-                ))
+                let null = Value::Ref(None);
+                let (registry, location) =
+                    (args.first().unwrap_or(&null), args.get(1).unwrap_or(&null));
+                let id = java_identifier::id_text(self, location);
+                Ok(host_ids::tag_key(registry, location, id))
             }
             // `URI.create`/`URI.parse` keep the text in the marker: a mod's
             // null-check on the result must not see null just because the
@@ -8786,64 +8816,78 @@ impl Host for StdHost {
                 self.iterators.insert(marker.clone(), (values, 0));
                 Ok(Value::Ref(Some(marker)))
             }
-            (
-                "net/minecraft/resources/ResourceKey",
-                "identifier" | "location",
-                "()Lnet/minecraft/resources/Identifier;"
-                | "()Lnet/minecraft/resources/ResourceLocation;",
-            ) if expect_string(receiver).starts_with("registry/") => {
+            // A `registry/<id>` value is also its registry key (`Registries.X`,
+            // `ResourceKey[minecraft:root / <id>]`) until the registry family
+            // moves to handles (#156 P4's second half).
+            ("net/minecraft/resources/ResourceKey", name, descriptor)
+                if expect_string(receiver).starts_with("registry/") =>
+            {
                 let id = expect_string(receiver).trim_start_matches("registry/");
-                let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-                Ok(identifier_value(namespace, path))
-            }
-            ("net/minecraft/resources/ResourceKey", name, descriptor) => {
-                let marker = expect_string(receiver);
-                // A key `ResourceKey.create(registry, id)` built names `id`;
-                // any other marker keeps the opaque answer it had.
-                let identifier = resource_key_identifier(receiver).map_or_else(
-                    || identifier_value("minecraft", marker),
-                    |(namespace, path)| identifier_value(namespace, path),
-                );
                 match (name, descriptor) {
                     (
                         "identifier" | "location",
                         "()Lnet/minecraft/resources/Identifier;"
                         | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(identifier),
+                    ) => Ok(host_ids::identifier_of_text(id)),
                     (
                         "registry",
                         "()Lnet/minecraft/resources/Identifier;"
                         | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(identifier_value("minecraft", marker)),
-                    ("hashCode", "()I") => Ok(Value::Int(stable_hash(marker))),
-                    _ => Ok(Value::default_for(&r.descriptor)),
+                    ) => Ok(identifier_value("minecraft", "root")),
+                    ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(format!(
+                        "ResourceKey[minecraft:root / {id}]"
+                    )))),
+                    _ => self.unknown_host_call(r),
                 }
             }
-            ("net/minecraft/tags/TagKey", name, descriptor) => {
-                let (registry, location) = tag_key_parts(receiver);
-                match (name, descriptor) {
-                    ("registry", "()Lnet/minecraft/resources/ResourceKey;") => {
-                        Ok(Value::Ref(Some(registry.to_owned())))
-                    }
+            // A `ResourceKey` or `TagKey` handle (`host_ids.rs`); `toString`/
+            // `equals`/`hashCode` are its kind's row. An unnamed key answers
+            // what the arguments it was made from tell, and counts the rest.
+            (
+                owner @ ("net/minecraft/resources/ResourceKey" | "net/minecraft/tags/TagKey"),
+                name,
+                descriptor,
+            ) if host_ids::is_resource_key(receiver) || host_ids::is_tag_key(receiver) => {
+                let tag = owner == "net/minecraft/tags/TagKey";
+                let answer = match (name, descriptor) {
                     (
-                        "location",
+                        "identifier" | "location",
                         "()Lnet/minecraft/resources/Identifier;"
                         | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(Value::Ref(Some(location.to_owned()))),
-                    ("isFor", "(Lnet/minecraft/resources/ResourceKey;)Z") => Ok(Value::Int(
-                        (registry == expect_string(Self::argument(r, args, 0)?)) as i32,
-                    )),
-                    ("hashCode", "()I") => {
-                        Ok(Value::Int(stable_hash(&format!("{registry}|{location}"))))
+                    ) => host_ids::key_location(receiver),
+                    // `ResourceKey.registry()`: the registry's id.
+                    (
+                        "registry",
+                        "()Lnet/minecraft/resources/Identifier;"
+                        | "()Lnet/minecraft/resources/ResourceLocation;",
+                    ) if !tag => host_ids::resource_key_parts(receiver)
+                        .map(|(registry, _)| host_ids::identifier_of_text(&registry)),
+                    // `TagKey.registry()`/`ResourceKey.registryKey()`: the
+                    // registry key (`Registries.X`).
+                    ("registry", "()Lnet/minecraft/resources/ResourceKey;") if tag => {
+                        host_ids::key_registry(receiver)
                     }
-                    ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(
-                        (expect_string(Self::argument(r, args, 0)?) == expect_string(receiver))
-                            as i32,
-                    )),
-                    ("toString", "()Ljava/lang/String;") => {
-                        Ok(Value::Ref(Some(format!("TagKey[{registry} / {location}]"))))
+                    ("registryKey", "()Lnet/minecraft/resources/ResourceKey;") if !tag => {
+                        host_ids::key_registry(receiver)
                     }
-                    _ => Ok(Value::default_for(&r.descriptor)),
+                    ("isFor", "(Lnet/minecraft/resources/ResourceKey;)Z") => {
+                        host_ids::key_is_for(receiver, Self::argument(r, args, 0)?)
+                            .map(|is_for| Value::Int(i32::from(is_for)))
+                    }
+                    ("cast", descriptor) if descriptor.ends_with(")Ljava/util/Optional;") => {
+                        host_ids::key_is_for(receiver, Self::argument(r, args, 0)?).map(|is_for| {
+                            if is_for {
+                                optional_wrap(receiver.clone())
+                            } else {
+                                empty_optional()
+                            }
+                        })
+                    }
+                    _ => None,
+                };
+                match answer {
+                    Some(answer) => Ok(answer),
+                    None => self.unknown_host_call(r),
                 }
             }
             ("net/fabricmc/loader/api/FabricLoader", "isModLoaded", "(Ljava/lang/String;)Z") => {
@@ -9168,12 +9212,16 @@ impl Host for StdHost {
                     .first()
                     .and_then(expect_ref)
                     .map_or("entry", String::as_str);
-                let key = format!(
-                    "{}/{}",
-                    expect_ref(receiver)
-                        .map_or("deferred-register/registry/default", String::as_str,),
-                    id
-                );
+                let register = expect_ref(receiver)
+                    .map_or("deferred-register/registry/default", String::as_str);
+                // `Identifier.fromNamespaceAndPath(namespace, name)` (Forge:
+                // `new ResourceLocation(modid, name)`): bad text throws here.
+                let forge = r.owner.starts_with("net/minecraftforge/");
+                let made = self.deferred_register_id(forge, register, id)?;
+                let key = format!("{register}/{id}");
+                if let Some((registry_key, entry_id)) = made {
+                    self.record_holder_id(&key, registry_key, &entry_id);
+                }
                 let value = Value::Ref(Some(format!("registered/{key}")));
                 self.registrations.push(RegistryEntry {
                     registry: expect_ref(receiver)
@@ -9232,19 +9280,13 @@ impl Host for StdHost {
                 "net/neoforged/neoforge/registries/DeferredHolder",
                 "getKey",
                 "()Lnet/minecraft/resources/ResourceKey;",
-            ) => Ok(Value::Ref(Some(format!(
-                "resource-key/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_key(r, receiver, "holder/"),
             (
                 "net/neoforged/neoforge/registries/DeferredHolder",
                 "getId",
                 "()Lnet/minecraft/resources/Identifier;"
                 | "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => Ok(Value::Ref(Some(format!(
-                "identifier/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_id(r, receiver, "holder/"),
             ("net/neoforged/neoforge/registries/DeferredHolder", "isPresent", "()Z") => {
                 Ok(Value::Int(1))
             }
@@ -9280,18 +9322,12 @@ impl Host for StdHost {
                 "net/minecraftforge/registries/RegistryObject",
                 "getRegistryName",
                 "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => Ok(Value::Ref(Some(format!(
-                "identifier/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_id(r, receiver, "holder/"),
             (
                 "net/minecraftforge/registries/RegistryObject",
                 "getKey",
                 "()Lnet/minecraft/resources/ResourceKey;",
-            ) => Ok(Value::Ref(Some(format!(
-                "resource-key/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_key(r, receiver, "holder/"),
             (
                 "net/minecraftforge/registries/RegistryObject",
                 "getOptional",
@@ -9306,10 +9342,7 @@ impl Host for StdHost {
                 "net/minecraftforge/registries/IForgeRegistryEntry",
                 "getRegistryName",
                 "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => Ok(Value::Ref(Some(format!(
-                "identifier/{}",
-                expect_ref(receiver).map_or("registered/", String::as_str)
-            )))),
+            ) => self.holder_id(r, receiver, "registered/"),
             (
                 "net/minecraftforge/registries/IForgeRegistryEntry",
                 "setRegistryName",
@@ -9334,12 +9367,7 @@ impl Host for StdHost {
             )),
             ("net/minecraft/core/Holder", "unwrapKey", "()Ljava/util/Optional;")
             | ("net/minecraft/core/Holder$Reference", "unwrapKey", "()Ljava/util/Optional;") => {
-                let key = expect_ref(receiver)
-                    .and_then(|value| value.strip_prefix("holder/"))
-                    .unwrap_or("deferred-register/registry/default/entry");
-                Ok(optional_wrap(Value::Ref(Some(format!(
-                    "resource-key/{key}"
-                )))))
+                self.holder_key(r, receiver, "holder/").map(optional_wrap)
             }
             (
                 "net/neoforged/neoforge/registries/DeferredRegister"
@@ -9352,10 +9380,15 @@ impl Host for StdHost {
                 "register",
                 "(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/Identifier;Ljava/util/function/Supplier;)V",
             ) if args.len() >= 3 => {
-                let registry = expect_ref(Self::argument(r, args, 0)?)
-                    .map(|value| value.strip_prefix("resource-key/").unwrap_or(value))
-                    .unwrap_or("minecraft:unknown")
-                    .to_owned();
+                // `Registries.X` (`registry/<id>` text), or a registry key
+                // handle naming the registry.
+                let registry_key = Self::argument(r, args, 0)?;
+                let registry = match host_ids::resource_key_parts(registry_key) {
+                    Some((_, location)) => location,
+                    None => expect_ref(registry_key)
+                        .map_or("minecraft:unknown", String::as_str)
+                        .to_owned(),
+                };
                 let (namespace, path) = identifier_parts(Self::argument(r, args, 1)?);
                 self.registrations.push(RegistryEntry {
                     registry,
@@ -9747,7 +9780,7 @@ fn builder_append_text<H: Host>(
 }
 
 fn identifier_value(namespace: &str, path: &str) -> Value {
-    Value::Ref(Some(format!("identifier/{namespace}:{path}")))
+    host_ids::identifier(namespace, path)
 }
 
 fn component_value(kind: &str, text: &str) -> Value {
@@ -9776,26 +9809,25 @@ fn identifier_parse(value: &str) -> Value {
     }
 }
 
+/// The `(namespace, path)` an id argument names: an `Identifier` handle, or
+/// `namespace:path` text where an API takes the id as a string (a bare path
+/// is `minecraft`'s). A `String` spelled like the old `identifier/` marker is
+/// just that text.
 fn identifier_parts(value: &Value) -> (&str, &str) {
-    let raw = expect_string(value);
-    let value = raw.strip_prefix("identifier/").unwrap_or(raw);
-    value.split_once(':').unwrap_or(("minecraft", value))
+    let raw = host_ids::identifier_key(value).unwrap_or_else(|| expect_string(value));
+    raw.split_once(':').unwrap_or(("minecraft", raw))
 }
 
-/// The identifier a `resource-key/<registry>/<identifier>` marker names.
-///
-/// `ResourceKey.create` keeps both arguments as value markers, so the id is the
-/// last `identifier/` segment of the text. A key built from anything else has
-/// no id and answers `None` rather than inventing one.
-fn resource_key_identifier(value: &Value) -> Option<(&str, &str)> {
-    let marker = expect_ref(value)?.strip_prefix("resource-key/")?;
-    let at = marker
-        .rfind("identifier/")
-        .or_else(|| marker.rfind("ridentifier/"))?;
-    let id = marker[at..].strip_prefix('r').unwrap_or(&marker[at..]);
-    let (namespace, path) = id.split_once(':')?;
-    let namespace = namespace.strip_prefix("identifier/")?;
-    (!namespace.is_empty() && !path.is_empty()).then_some((namespace, path))
+/// The identifier a `ResourceKey` handle names (its location, also when its
+/// registry is one the host could not name). A key whose location is no
+/// known id answers `None` rather than inventing one.
+fn resource_key_identifier(value: &Value) -> Option<(String, String)> {
+    if !host_ids::is_resource_key(value) {
+        return None;
+    }
+    let location = host_ids::key_location(value)?;
+    let (namespace, path) = host_ids::identifier_key(&location)?.split_once(':')?;
+    (!namespace.is_empty() && !path.is_empty()).then(|| (namespace.to_owned(), path.to_owned()))
 }
 
 /// Registry handles commonly read during Fabric/NeoForge bootstrap.
@@ -9839,17 +9871,6 @@ fn registry_static_id(owner: &str, field: &str) -> Option<&'static str> {
         // Every other vanilla registry field answers its own id too, so a
         // wrapper over `BuiltInRegistries.FLUID` is not a null registry.
         .or_else(|| vanilla_registries::registry_id(owner, field))
-}
-
-fn tag_key_value(registry: &str, location: &str) -> Value {
-    Value::Ref(Some(format!("tag-key/{registry}|{location}")))
-}
-
-fn tag_key_parts(value: &Value) -> (&str, &str) {
-    expect_string(value)
-        .strip_prefix("tag-key/")
-        .and_then(|value| value.split_once('|'))
-        .unwrap_or(("", ""))
 }
 
 fn stable_hash(value: &str) -> i32 {
@@ -10328,7 +10349,6 @@ fn block_declaration_properties(builder: &BTreeMap<String, String>) -> BTreeMap<
 /// so a crafting remainder that points at one is recorded but not exported:
 /// the loader requires a real id and would reject the marker text.
 fn marker_id(value: &str) -> Option<String> {
-    let value = value.strip_prefix("identifier/").unwrap_or(value);
     let (namespace, path) = value.split_once(':')?;
     let lowercase = |part: &str, extra: &[u8]| {
         !part.is_empty()
@@ -10407,6 +10427,12 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         | "java/util/NoSuchElementException"
         | "java/util/ConcurrentModificationException"
         | "java/io/UncheckedIOException" => "java/lang/RuntimeException",
+        // The game's own: what `Identifier`'s factories throw (26.3
+        // `IdentifierException`, and `ResourceLocationException` before the
+        // 1.21 rename) extends `RuntimeException`.
+        "net/minecraft/IdentifierException" | "net/minecraft/ResourceLocationException" => {
+            "java/lang/RuntimeException"
+        }
         "java/lang/NumberFormatException"
         | "java/nio/charset/UnsupportedCharsetException"
         | "java/nio/charset/IllegalCharsetNameException" => "java/lang/IllegalArgumentException",
@@ -36012,7 +36038,7 @@ mandatory = true
         let id = host
             .invoke(&parse, &[Value::Ref(Some("ruby:lamp".into()))])
             .unwrap();
-        assert_eq!(id, Value::Ref(Some("identifier/ruby:lamp".into())));
+        assert_eq!(id, identifier_value("ruby", "lamp"));
         let modern_parse = MethodRef {
             owner: "net/minecraft/resources/ResourceLocation".into(),
             name: "parse".into(),
@@ -36060,7 +36086,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&prefixed, &id, &[Value::Ref(Some("block/".into()))],)
                 .unwrap(),
-            Value::Ref(Some("identifier/ruby:block/lamp".into()))
+            identifier_value("ruby", "block/lamp")
         );
         let language_key = MethodRef {
             owner: "net/minecraft/resources/Identifier".into(),
@@ -36106,10 +36132,9 @@ mandatory = true
             name: "identifier".into(),
             descriptor: "()Lnet/minecraft/resources/Identifier;".into(),
         };
-        assert!(matches!(
-            host.invoke_instance(&key_id, &key, &[]).unwrap(),
-            Value::Ref(Some(_))
-        ));
+        // The registry argument names no registry: the key is unnamed, but
+        // its location is the id it was made from.
+        assert_eq!(host.invoke_instance(&key_id, &key, &[]).unwrap(), id);
         let key_id_modern = MethodRef {
             owner: "net/minecraft/resources/ResourceKey".into(),
             name: "identifier".into(),
@@ -36327,11 +36352,12 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(
-            holder_key,
-            optional_wrap(Value::Ref(Some(
-                "resource-key/deferred-register/registry/demo/entry".into()
-            )))
+        // The register named no registry (`"registry"`): a key, but an
+        // unnamed one.
+        assert!(
+            optional_payload(&holder_key).is_some_and(|key| host_ids::is_resource_key(&key)
+                && host_ids::resource_key_parts(&key).is_none()),
+            "{holder_key:?}"
         );
         let modern_id = host
             .invoke_instance(
@@ -36344,12 +36370,8 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(
-            modern_id,
-            Value::Ref(Some(
-                "identifier/holder/deferred-register/registry/demo/entry".into()
-            ))
-        );
+        // `namespace:name`, the register's namespace and the entry's name.
+        assert_eq!(modern_id, identifier_value("demo", "entry"));
         let optional = host
             .invoke_instance(
                 &MethodRef {
@@ -36499,7 +36521,7 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert!(matches!(name, Value::Ref(Some(marker)) if marker.starts_with("identifier/")));
+        assert_eq!(name, identifier_value("legacy", "entry"));
         // The post-registration holder surface a legacy mod reads next: the
         // same `DeferredRegister.register` row answers presence and its id.
         assert_eq!(
@@ -36526,9 +36548,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Ref(Some(
-                "identifier/holder/deferred-register/registry/legacy/entry".into()
-            ))
+            identifier_value("legacy", "entry")
         );
         assert_eq!(host.registrations().len(), 1);
     }
@@ -36546,8 +36566,8 @@ mandatory = true
             &register,
             &event,
             &[
-                Value::Ref(Some("resource-key/minecraft:item".into())),
-                Value::Ref(Some("identifier/ruby:wand".into())),
+                host_ids::resource_key_named("minecraft:root", "minecraft:item"),
+                identifier_value("ruby", "wand"),
                 Value::Ref(Some("@indy:ruby-wand-supplier".into())),
             ],
         )
@@ -38070,7 +38090,7 @@ mandatory = true
             &constructor,
             &type_marker,
             &[
-                Value::Ref(Some("identifier/demo:ping".into())),
+                identifier_value("demo", "ping"),
                 Value::Ref(Some("stream-codec".into())),
             ],
         )
@@ -38082,7 +38102,7 @@ mandatory = true
         };
         assert_eq!(
             host.invoke_instance(&id, &type_marker, &[]).unwrap(),
-            Value::Ref(Some("identifier/demo:ping".into()))
+            identifier_value("demo", "ping")
         );
         let to_string = MethodRef {
             owner: id.owner.clone(),
@@ -40004,17 +40024,21 @@ mandatory = true
 
     #[test]
     fn resource_keys_name_the_registration_id_they_carry() {
-        let key = Value::Ref(Some(
-            "resource-key/registry/minecraft:item/ridentifier/beautify:hanging_pot".into(),
-        ));
-        assert_eq!(
-            resource_key_identifier(&key),
-            Some(("beautify", "hanging_pot"))
+        let id = identifier_value("beautify", "hanging_pot");
+        let key = host_ids::resource_key(
+            &Value::Ref(Some("registry/minecraft:item".into())),
+            &id,
+            Some("beautify:hanging_pot".into()),
         );
-        assert_eq!(
-            resource_key_identifier(&Value::Ref(Some("resource-key/other/thing".into()))),
-            None
-        );
+        let named = Some(("beautify".to_owned(), "hanging_pot".to_owned()));
+        assert_eq!(resource_key_identifier(&key), named);
+        // A registry argument no model names: an unnamed key, which still
+        // names its location; a location that is no id names nothing.
+        let other = Value::Ref(Some("other".into()));
+        let unnamed = host_ids::resource_key(&other, &id, None);
+        assert_eq!(resource_key_identifier(&unnamed), named);
+        let nameless = host_ids::resource_key(&other, &Value::Ref(Some("thing".into())), None);
+        assert_eq!(resource_key_identifier(&nameless), None);
     }
 
     #[test]
@@ -42510,11 +42534,7 @@ mandatory = true
             Host::invoke(
                 &mut host,
                 &register,
-                &[
-                    registry,
-                    Value::Ref(Some("identifier/ruby:wand".into())),
-                    value.clone(),
-                ],
+                &[registry, identifier_value("ruby", "wand"), value.clone()],
             )
             .unwrap(),
             value
@@ -42533,7 +42553,7 @@ mandatory = true
             &register,
             &[
                 Value::Ref(None),
-                Value::Ref(Some("identifier/ruby:wand".into())),
+                identifier_value("ruby", "wand"),
                 Value::Ref(Some("@indy:ruby-wand".into())),
             ],
         )
@@ -42566,16 +42586,12 @@ mandatory = true
                 .insert(marker.to_owned(), BTreeMap::new());
         }
         for (id, marker) in [
-            ("identifier/", "@block-unnamed"),
-            ("identifier/ruby:ore", "@block-named"),
+            (identifier_value("minecraft", ""), "@block-unnamed"),
+            (identifier_value("ruby", "ore"), "@block-named"),
         ] {
             let value = Value::Ref(Some(marker.into()));
-            let answer = Host::invoke(
-                &mut host,
-                &register,
-                &[registry.clone(), Value::Ref(Some(id.into())), value.clone()],
-            )
-            .unwrap();
+            let answer =
+                Host::invoke(&mut host, &register, &[registry.clone(), id, value.clone()]).unwrap();
             // The caller's static field still gets its value either way.
             assert_eq!(answer, value);
         }

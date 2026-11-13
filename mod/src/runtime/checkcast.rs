@@ -198,7 +198,7 @@ impl<H: Host> Runtime<'_, H> {
             });
         }
         HostKind::of_class(target)?;
-        if *value == Value::Ref(None) {
+        if *value == Value::Ref(None) || crate::runtime::host_ids::text_is_a(value, target) {
             return Some(HostCast::Fits);
         }
         Some(match self.exact_class(value) {
