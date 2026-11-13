@@ -2322,6 +2322,24 @@ pub trait Host {
         None
     }
 
+    /// A new unmodifiable list (`ImmutableCollections.ListN`) holding
+    /// `values`, for a host that models one.
+    fn unmodifiable_list(&mut self, _values: Vec<Value>) -> Option<Value> {
+        None
+    }
+
+    /// How many mutators have run on the host collection `marker` so far: a
+    /// stream over it uses this to notice its callbacks wrote to it
+    /// (`stream_pipeline.rs`).
+    fn collection_writes(&self, _marker: &str) -> u64 {
+        0
+    }
+
+    /// The map a `keySet()`/`values()`/`entrySet()` copy was taken from.
+    fn view_copy_map(&self, _marker: &str) -> Option<String> {
+        None
+    }
+
     /// How many unknown host calls this host has counted (each answered with
     /// a neutral value), for a model that must not build a verdict on one.
     fn counted_unknown_calls(&self) -> usize {
@@ -2533,6 +2551,11 @@ pub struct StdHost {
     neoforge_bus: neoforge_bus::BusState,
     holders: BTreeMap<String, Value>,
     mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Mutator calls run on each host collection (`Host::collection_writes`).
+    collection_writes: BTreeMap<String, u64>,
+    /// `keySet()`/`values()`/`entrySet()` copies and their maps
+    /// (`Host::view_copy_map`).
+    view_copy_maps: BTreeMap<String, String>,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
     unmodifiable_collections: BTreeMap<String, Option<String>>,
@@ -2667,6 +2690,8 @@ impl StdHost {
             neoforge_bus: neoforge_bus::BusState::default(),
             holders: BTreeMap::new(),
             mutable_collections: BTreeMap::new(),
+            collection_writes: BTreeMap::new(),
+            view_copy_maps: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             null_hostile_lists: BTreeSet::new(),
             synchronized_views: BTreeMap::new(),
@@ -3528,7 +3553,26 @@ impl StdHost {
         cancelled
     }
 
+    /// Remember which host map a view copy came from, so a stream over it
+    /// can notice writes to the map (`stream_pipeline.rs`).
+    fn note_view_copy(&mut self, copy: &Value, map: &Value) {
+        if let (Some(copy), Some(map)) = (expect_ref(copy), expect_ref(map))
+            && self.mutable_collections.contains_key(map)
+        {
+            self.view_copy_maps.insert(copy.clone(), map.clone());
+        }
+    }
+
     fn record(&mut self, r: &MethodRef, receiver: Option<&Value>, args: &[Value]) {
+        if java_immutable::is_mutator(&r.name)
+            && let Some(marker) = receiver.and_then(expect_ref)
+            && self
+                .mutable_collections
+                .contains_key(self.synchronized_target(marker))
+        {
+            let marker = self.synchronized_target(marker).to_owned();
+            *self.collection_writes.entry(marker).or_default() += 1;
+        }
         self.calls.push(r.clone());
         self.invocations.push(HostInvocation {
             method: r.clone(),
@@ -4064,12 +4108,25 @@ impl Host for StdHost {
     fn replace_mutable_collection(&mut self, value: &Value, values: Vec<Value>) {
         if let Some(marker) = expect_ref(value) {
             let marker = self.synchronized_target(marker).to_owned();
+            *self.collection_writes.entry(marker.clone()).or_default() += 1;
             self.mutable_collections.insert(marker, values);
         }
     }
 
     fn empty_mutable_collection(&mut self, kind: &str) -> Option<Value> {
         Some(self.empty_collection(kind))
+    }
+
+    fn unmodifiable_list(&mut self, values: Vec<Value>) -> Option<Value> {
+        Some(self.unmodifiable_values("list", values))
+    }
+
+    fn collection_writes(&self, marker: &str) -> u64 {
+        self.collection_writes.get(marker).copied().unwrap_or(0)
+    }
+
+    fn view_copy_map(&self, marker: &str) -> Option<String> {
+        self.view_copy_maps.get(marker).cloned()
     }
 
     fn payload_type_id(&self, marker: &str) -> Option<String> {
@@ -4751,17 +4808,18 @@ impl Host for StdHost {
                 "toUnmodifiableSet",
                 "()Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some("collector/set".into()))),
+            // An unmodifiable list that rejects `null` (`List.of`'s
+            // `ListN`; Guava's `ImmutableList` is the host's same shape).
             (
                 "java/util/stream/Collectors",
                 "toUnmodifiableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/list".into()))),
-            // Guava's immutable collectors are the same list/set shapes.
-            (
+            )
+            | (
                 "com/google/common/collect/ImmutableList",
                 "toImmutableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/list".into()))),
+            ) => Ok(Value::Ref(Some("collector/unmodifiable-list".into()))),
             (
                 "com/google/common/collect/ImmutableSet",
                 "toImmutableSet",
@@ -4800,9 +4858,11 @@ impl Host for StdHost {
                 "joining",
                 "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some(format!(
+                // `joining(delimiter, prefix, suffix)`; the payload is
+                // prefix, delimiter, suffix.
                 "collector/joining/{}\u{1f}{}\u{1f}{}",
-                expect_string(Self::argument(r, args, 0)?),
                 expect_string(Self::argument(r, args, 1)?),
+                expect_string(Self::argument(r, args, 0)?),
                 expect_string(Self::argument(r, args, 2)?)
             )))),
             ("java/util/List", "of", descriptor) if descriptor.ends_with("Ljava/util/List;") => {
@@ -7293,7 +7353,9 @@ impl Host for StdHost {
                         Ok(map_entry_value(&key, &value))
                     })
                     .collect::<Result<Vec<_>, NativeError>>()?;
-                Ok(collection_value("set", &entries))
+                let copy = collection_value("set", &entries);
+                self.note_view_copy(&copy, receiver);
+                Ok(copy)
             }
             // `ConcurrentHashMap.keySet()` declares its `KeySetView`; the
             // snapshot is the same key set.
@@ -7309,7 +7371,9 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| parse_collection_value(&pair[0]))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(collection_value("set", &keys))
+                let copy = collection_value("set", &keys);
+                self.note_view_copy(&copy, receiver);
+                Ok(copy)
             }
             (owner, "values", "()Ljava/util/Collection;") if is_map_owner(owner) => {
                 let values = host_collection_values(self, receiver)?;
@@ -7319,7 +7383,9 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| parse_collection_value(&pair[1]))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(collection_value("list", &values))
+                let copy = collection_value("list", &values);
+                self.note_view_copy(&copy, receiver);
+                Ok(copy)
             }
             (owner, "toString", "()Ljava/lang/String;") if is_collection_owner(owner) => {
                 // A jar subclass's marker names its own class; the JDK owner
@@ -22562,7 +22628,8 @@ impl<H: Host> Runtime<'_, H> {
         }
         let values = self.stream_output(receiver, &r.name)?;
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
-            ("toList", "()Ljava/util/List;") => collection_value("list", &values),
+            // `Stream.toList()`: an unmodifiable `ListN` that allows `null`.
+            ("toList", "()Ljava/util/List;") => self.unmodifiable_list(values),
             ("toArray", "()[Ljava/lang/Object;") => {
                 let marker = self.new_array(class, method);
                 self.arrays.insert(marker.clone(), values);
@@ -22573,7 +22640,18 @@ impl<H: Host> Runtime<'_, H> {
                     NativeError::Metadata("Stream.collect needs a collector".into())
                 })?;
                 match collector.as_str() {
-                    "collector/list" => collection_value("list", &values),
+                    // `ArrayList::new`, `List::add`: a list of its own.
+                    "collector/list" => self.new_array_list(values),
+                    "collector/unmodifiable-list" => {
+                        if values.contains(&Value::Ref(None)) {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/NullPointerException".into(),
+                                message: None,
+                                frame: None,
+                            });
+                        }
+                        self.unmodifiable_list(values)
+                    }
                     "collector/set" => collection_value("set", &values),
                     collector if collector.starts_with("collector/joining/") => {
                         let payload = collector
@@ -36186,45 +36264,47 @@ mandatory = true
             )
             .unwrap()
             .unwrap();
+        // A real list now (`Stream.toList()`'s `ListN`, `Collectors.toList()`'s
+        // `ArrayList`): its elements are what the stream yielded.
+        let listed = runtime
+            .invoke_stream(
+                &MethodRef {
+                    owner: "java/util/stream/Stream".into(),
+                    name: "toList".into(),
+                    descriptor: "()Ljava/util/List;".into(),
+                },
+                Some(&distinct),
+                &[],
+                "demo/Stream",
+                "probe",
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            runtime
-                .invoke_stream(
-                    &MethodRef {
-                        owner: "java/util/stream/Stream".into(),
-                        name: "toList".into(),
-                        descriptor: "()Ljava/util/List;".into(),
-                    },
-                    Some(&distinct),
-                    &[],
-                    "demo/Stream",
-                    "probe",
-                )
-                .unwrap(),
-            Some(collection_value(
-                "list",
-                &[Value::Ref(Some("alpha".into())), Value::Int(2)],
-            ))
+            runtime_collection_values(runtime.host, &listed).unwrap(),
+            ["ralpha", "i2"]
         );
         let collector = Value::Ref(Some("collector/list".into()));
         let distinct = distinct_stream(&mut runtime);
+        // A real list now (`Stream.toList()`'s `ListN`, `Collectors.toList()`'s
+        // `ArrayList`): its elements are what the stream yielded.
+        let listed = runtime
+            .invoke_stream(
+                &MethodRef {
+                    owner: "java/util/stream/Stream".into(),
+                    name: "collect".into(),
+                    descriptor: "(Ljava/util/stream/Collector;)Ljava/lang/Object;".into(),
+                },
+                Some(&distinct),
+                std::slice::from_ref(&collector),
+                "demo/Stream",
+                "probe",
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            runtime
-                .invoke_stream(
-                    &MethodRef {
-                        owner: "java/util/stream/Stream".into(),
-                        name: "collect".into(),
-                        descriptor: "(Ljava/util/stream/Collector;)Ljava/lang/Object;".into(),
-                    },
-                    Some(&distinct),
-                    std::slice::from_ref(&collector),
-                    "demo/Stream",
-                    "probe",
-                )
-                .unwrap(),
-            Some(collection_value(
-                "list",
-                &[Value::Ref(Some("alpha".into())), Value::Int(2)],
-            ))
+            runtime_collection_values(runtime.host, &listed).unwrap(),
+            ["ralpha", "i2"]
         );
         let distinct = distinct_stream(&mut runtime);
         let array = runtime

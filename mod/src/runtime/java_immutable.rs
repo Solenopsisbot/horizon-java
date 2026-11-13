@@ -110,6 +110,11 @@ impl StdHost {
         Value::Ref(Some(marker))
     }
 
+    /// [`Self::unmodifiable`] for the stream terminals (`Host::unmodifiable_list`).
+    pub(crate) fn unmodifiable_values(&mut self, kind: &str, values: Vec<Value>) -> Value {
+        self.unmodifiable(kind, values)
+    }
+
     /// The elements a collection argument holds, parsed.
     fn elements(&self, value: &Value) -> Result<Vec<Value>, NativeError> {
         crate::runtime::host_collection_values(self, value)?

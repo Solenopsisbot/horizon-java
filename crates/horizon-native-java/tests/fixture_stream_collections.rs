@@ -91,6 +91,70 @@ public final class Probe {
         return take(a + "," + b + "," + c);
     }
 
+    public static String collectedListIsOwn() {
+        List<Integer> l = Stream.of(1, 2).collect(Collectors.toList());
+        l.add(3);
+        List<Integer> m = Stream.of(1, 2).map(x -> x * 10).collect(Collectors.toList());
+        m.set(0, 5);
+        return take(l + "," + m);
+    }
+
+    public static String toListUnmodifiable() {
+        String a;
+        try { Stream.of(1, 2).toList().add(3); a = "ok"; } catch (UnsupportedOperationException e) { a = err(e); }
+        String b;
+        try { Stream.of(1, 2).map(x -> x).toList().set(0, 5); b = "ok"; } catch (UnsupportedOperationException e) { b = err(e); }
+        String c;
+        try { IntStream.range(0, 2).boxed().toList().add(3); c = "ok"; } catch (UnsupportedOperationException e) { c = err(e); }
+        boolean same = Stream.of(1, 2, 3).toList().getClass() == List.of(1, 2, 3).getClass();
+        List<Integer> nulls = Stream.of(1, null).toList();
+        return take(a + "," + b + "," + c + "," + same + "," + nulls);
+    }
+
+    public static String unmodifiableCollectors() {
+        String a;
+        try { Stream.of(1, 2).collect(Collectors.toUnmodifiableList()).add(3); a = "ok"; } catch (UnsupportedOperationException e) { a = err(e); }
+        String b;
+        try { Stream.of(1, null).collect(Collectors.toUnmodifiableList()); b = "ok"; } catch (NullPointerException e) { b = "npe"; }
+        return take(a + "," + b);
+    }
+
+    public static String joiningOrder() {
+        String a = IntStream.rangeClosed(1, 4).mapToObj(i -> "v" + i).collect(Collectors.joining("|", "<", ">"));
+        String b = Stream.of("x").collect(Collectors.joining(",", "[", "]"));
+        String c = Stream.<String>empty().collect(Collectors.joining(",", "[", "]"));
+        return take(a + " " + b + " " + c);
+    }
+
+
+    public static String restoreDuringForEach() {
+        List<Integer> l = new ArrayList<>(List.of(1, 2, 3));
+        l.stream().forEach(x -> { log("e" + x); if (x == 1) { l.add(9); l.remove(3); } });
+        return take(l);
+    }
+
+    public static String restoreDuringAnyMatch() {
+        List<Integer> l = new LinkedList<>(List.of(1, 2, 3));
+        return take(l.stream().peek(x -> { if (x == 1) { l.add(9); l.remove(3); } }).anyMatch(x -> x == 3));
+    }
+
+    public static String mapViewPutDuringForEach() {
+        Map<String, Integer> m = new TreeMap<>(Map.of("a", 1, "b", 2));
+        m.values().stream().forEach(x -> { log("e" + x); if (x == 1) m.put("c", 3); });
+        return take(m);
+    }
+
+    public static String mapViewPutBeforeTerminal() {
+        Map<String, Integer> m = new HashMap<>(Map.of("a", 1));
+        Stream<String> s = m.keySet().stream();
+        m.put("b", 2);
+        return take(s.toList());
+    }
+
+    public static String sortedLambda() {
+        return take(Stream.of(3, 1, 2).sorted((a, b) -> { log("c" + a + b); return a - b; }).toList());
+    }
+
     public static String hashSetAddDuringForEach() {
         Set<Integer> set = new HashSet<>(Set.of(1, 2));
         String c;
@@ -124,6 +188,16 @@ fn to_map_and_host_collection_streams_run_as_jdk_25_does() {
             (
                 "reuseRefused",
                 " => java.lang.IllegalStateException:stream has already been operated upon or closed,java.lang.IllegalStateException:stream has already been operated upon or closed,java.lang.IllegalStateException:stream has already been operated upon or closed",
+            ),
+            ("collectedListIsOwn", " => [1, 2, 3],[5, 20]"),
+            ("joiningOrder", " => <v1|v2|v3|v4> [x] []"),
+            (
+                "toListUnmodifiable",
+                " => java.lang.UnsupportedOperationException:null,java.lang.UnsupportedOperationException:null,java.lang.UnsupportedOperationException:null,true,[1, null]",
+            ),
+            (
+                "unmodifiableCollectors",
+                " => java.lang.UnsupportedOperationException:null,npe",
             ),
         ],
     );
@@ -181,5 +255,50 @@ fn a_same_size_list_change_during_a_stream_is_counted() {
             "java/util/ArrayList#spliterator()Ljava/util/Spliterator;".to_owned(),
             1
         )]
+    );
+}
+
+/// Counted until #105's `modCount` is under this stack: a change that writes
+/// a collection and restores its contents moves the JDK's `modCount` (JDK 25:
+/// CME), which the contents cannot show; a write to the source during the
+/// traversal is counted.
+#[test]
+fn restoring_changes_during_a_stream_are_counted() {
+    for method in ["restoreDuringForEach", "restoreDuringAnyMatch"] {
+        let (_, unknown) = run(method);
+        assert!(
+            unknown
+                .iter()
+                .any(|(call, _)| call.ends_with("#spliterator()Ljava/util/Spliterator;")),
+            "{method}: {unknown:?}"
+        );
+    }
+}
+
+/// Counted: a map view's stream reads a copy, where the JDK's view sees a
+/// `put` to its map (and its iterator fails fast).
+#[test]
+fn map_writes_behind_a_view_stream_are_counted() {
+    for method in ["mapViewPutDuringForEach", "mapViewPutBeforeTerminal"] {
+        let (_, unknown) = run(method);
+        assert!(
+            unknown
+                .iter()
+                .any(|(call, _)| call.ends_with("#spliterator()Ljava/util/Spliterator;")),
+            "{method}: {unknown:?}"
+        );
+    }
+}
+
+/// Counted until #110's TimSort is under this stack: a comparator lambda would
+/// see the JDK's comparisons in another order.
+#[test]
+fn sorting_with_a_jar_comparator_is_counted() {
+    let (_, unknown) = run("sortedLambda");
+    assert!(
+        unknown
+            .iter()
+            .any(|(call, _)| call.starts_with("java/util/stream/Stream#sorted")),
+        "{unknown:?}"
     );
 }
