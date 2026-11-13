@@ -73,6 +73,7 @@ mod host_entry;
 mod host_events;
 mod host_game_event;
 mod host_ids;
+mod host_invoke;
 mod host_list_iterator;
 mod host_optional;
 mod host_path;

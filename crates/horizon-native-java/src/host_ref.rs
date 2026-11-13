@@ -203,6 +203,18 @@ pub enum HostKind {
     /// `net.minecraft.references.BlockItemId`: key the block and item ids'
     /// [`HostRef::of_values`].
     BlockItemId,
+    /// `java.lang.invoke.MethodType`: key the method descriptor
+    /// (`host_invoke.rs`).
+    MethodType,
+    /// `java.lang.invoke.MethodHandles$Lookup`: key `[mode, class]`
+    /// (`host_invoke.rs`).
+    MethodHandlesLookup,
+    /// A `java.lang.invoke.MethodHandle`: key its combinator tree as JSON
+    /// (`method_handles.rs`).
+    MethodHandle,
+    /// The `ConstantCallSite` `LambdaMetafactory.metafactory` returns: key its
+    /// target handle's JSON (`method_handles.rs`).
+    CallSite,
     /// A Java array: key `<array class>#<n>`, its elements in the runtime's
     /// `arrays` table (`host_array.rs`).
     Array,
@@ -641,6 +653,42 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed(crate::host_ids::BLOCK_ITEM_ID),
         canonical: never_canonical,
         methods: &crate::host_ids::BLOCK_ITEM_ID_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodType,
+        tag: "mtype",
+        class: ClassRule::Fixed(crate::host_invoke::METHOD_TYPE),
+        // Java interns method types: one object per descriptor.
+        canonical: always_canonical,
+        methods: &crate::host_invoke::METHOD_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodHandlesLookup,
+        tag: "mhlk",
+        class: ClassRule::Fixed(crate::host_invoke::LOOKUP),
+        canonical: crate::host_invoke::lookup_canonical,
+        methods: &crate::host_invoke::LOOKUP_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodHandle,
+        tag: "mh",
+        // `DirectMethodHandle`, `BoundMethodHandle$Species_LL`, …: a
+        // `MethodHandle` of a class the runtime does not know.
+        class: ClassRule::Unknown {
+            declared: crate::method_handles::handle_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::method_handles::HANDLE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CallSite,
+        tag: "csite",
+        // Java 25's metafactory returns a plain `ConstantCallSite`. `FromKey`
+        // keeps that exact class off `HostKind::of_class`, since a jar may
+        // extend `ConstantCallSite`.
+        class: ClassRule::FromKey(crate::method_handles::call_site_class),
+        canonical: never_canonical,
+        methods: &crate::method_handles::CALL_SITE_METHODS,
     },
     KindInfo {
         kind: HostKind::Array,
