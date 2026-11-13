@@ -813,6 +813,49 @@ mod tests {
         assert_eq!(host.unknown_host_call_count(), 2);
     }
 
+    /// Entry names spelled with every separator a key layer uses either fail
+    /// as Java's `Identifier` does or name their own entry: `getId` reads
+    /// back the literal name and no two holders share an id or a key
+    /// ("keys never parse jar text", #156).
+    #[test]
+    fn entry_names_with_separators_round_trip_and_never_alias() {
+        let alphabet = [
+            "a", "|", ",", ":", "/", "\\", "#", "?", ".", "i1", "hhold:", "-", "_",
+        ];
+        let mut host = StdHost::new();
+        let mut ids = std::collections::BTreeSet::new();
+        let mut keys = std::collections::BTreeSet::new();
+        let get_id = method(
+            "net/neoforged/neoforge/registries/DeferredHolder",
+            "getId",
+            "()Lnet/minecraft/resources/Identifier;",
+        );
+        for a in alphabet {
+            for b in alphabet {
+                let name = format!("x{a}{b}");
+                let valid = name
+                    .chars()
+                    .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '/' | '.' | '_' | '-'));
+                let Ok(holder) = demo_holder(&mut host, &name) else {
+                    assert!(!valid, "{name:?} was refused");
+                    continue;
+                };
+                assert!(valid, "{name:?} was accepted");
+                let id = host.invoke_instance(&get_id, &holder, &[]).unwrap();
+                assert_eq!(
+                    crate::runtime::host_ids::identifier_key(&id),
+                    Some(format!("demo:{name}").as_str())
+                );
+                assert!(ids.insert(format!("demo:{name}")), "{name:?}");
+                let Value::Host(handle) = &holder else {
+                    panic!("{holder:?}")
+                };
+                assert!(keys.insert(handle.key().to_owned()), "{name:?}");
+            }
+        }
+        assert_eq!(host.unknown_host_call_count(), 0);
+    }
+
     /// A builder's key holds the registry it answers, whatever that
     /// registry's id is spelled with, and two registries never give one
     /// builder key.

@@ -18,8 +18,8 @@ use horizon_native_java::StdHost;
 /// out here, ran `Bootstrap.bootStrap()` first), printed these lines, the
 /// same on two runs but for the identity hashes; pasted verbatim.
 const EXPECTED: &str = "\
-spelled=falsefalsefalsefalsefalsefalsefalseregistry/minecraft:item,falsefalsefalsefalsefalsefalsefalseholder/deferred-register/registry/minecraft:item/demo/thing,falsefalsefalsefalsefalsefalsefalseregistered/deferred-register/registry/minecraft:item/demo/thing,falsefalsefalsefalsefalsefalsefalsehreg:minecraft:item,falsefalsefalsefalsefalsefalsefalsehhold:1,CCE\n\
-spelledStrings=Stringtrue-895996210,Stringtrue1353332634,Stringtrue-1209087779,4rs\n\
+spelled=falsefalsefalsefalsefalsefalsefalseregistry/minecraft:item,falsefalsefalsefalsefalsefalsefalseholder/deferred-register/registry/minecraft:item/demo/thing,falsefalsefalsefalsefalsefalsefalseregistered/deferred-register/registry/minecraft:item/demo/thing,falsefalsefalsefalsefalsefalsefalsehreg:2minecraft:item,falsefalsefalsefalsefalsefalsefalsehhold:1,CCE\n\
+spelledStrings=Stringtrue493552932,Stringtrue1353332634,Stringtrue-1209087779,4rs\n\
 identity=4|2476|truefalsetrue\n\
 keys=ResourceKey[minecraft:root / minecraft:item]|minecraft:item|minecraft:root|truefalsetrue|net.minecraft.resources.ResourceKey|ResourceKey[minecraft:root / minecraft:item]true|minecraft:block|[ResourceKey[minecraft:root / minecraft:item], ResourceKey[minecraft:root / minecraft:block]]true|ResourceKey[minecraft:root / demo:things]\n\
 registries=truefalsetruefalse|ResourceKey[minecraft:root / minecraft:item]true|truetruetruefalsefalsetrue|true1\n\
@@ -146,7 +146,7 @@ public final class Probe {
     /** Strings spelled like the old markers stay Strings. */
     public static String spelled() {
         Object[] texts = {"registry/minecraft:item", "holder/deferred-register/registry/minecraft:item/demo/thing",
-            "registered/deferred-register/registry/minecraft:item/demo/thing", "hreg:minecraft:item", "hhold:1"};
+            "registered/deferred-register/registry/minecraft:item/demo/thing", "hreg:2minecraft:item", "hhold:1"};
         Object item = BuiltInRegistries.ITEM;
         Object key = Registries.ITEM;
         StringBuilder out = new StringBuilder();
@@ -155,7 +155,7 @@ public final class Probe {
                 .append(t instanceof Supplier).append(t.equals(item)).append(item.equals(t)).append(key.equals(t))
                 .append(t).append(',');
         }
-        return out.append(cast("hreg:minecraft:item")).toString();
+        return out.append(cast("hreg:2minecraft:item")).toString();
     }
 
     /** Registry keys: Registries.X is ResourceKey[minecraft:root / X], interned. */
@@ -199,7 +199,7 @@ public final class Probe {
 
     /** Strings spelled like a handle's text are Strings: class, hash, map keys. */
     public static String spelledStrings() {
-        Object[] texts = {"hreg:minecraft:item", "hhold:i0,i0,null", "hrgd:0"};
+        Object[] texts = {"hreg:2minecraft:item", "hhold:i0,i0,null", "hrgd:0"};
         StringBuilder out = new StringBuilder();
         Map<Object, String> m = new HashMap<>();
         m.put(BuiltInRegistries.ITEM, "r");
@@ -207,7 +207,7 @@ public final class Probe {
             out.append(t.getClass().getSimpleName()).append(t instanceof String).append(t.hashCode()).append(',');
             m.put(t, "s");
         }
-        return out.append(m.size()).append(m.get(BuiltInRegistries.ITEM)).append(m.get("hreg:minecraft:item")).toString();
+        return out.append(m.size()).append(m.get(BuiltInRegistries.ITEM)).append(m.get("hreg:2minecraft:item")).toString();
     }
 
     /** Identity: one registry and one registry key per id; one holder per register call. */
