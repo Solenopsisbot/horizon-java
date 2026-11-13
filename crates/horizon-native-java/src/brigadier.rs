@@ -1624,7 +1624,9 @@ impl StdHost {
                 .map_or(Value::Ref(None), |id| self.brigadier.node_value(id))),
             "isFork" => Ok(Value::Int(i32::from(node.modifier))),
             "addChild" => {
-                let child = self.brigadier.node_of(args.first().ok_or_else(unknown)?, r)?;
+                let child = self
+                    .brigadier
+                    .node_of(args.first().ok_or_else(unknown)?, r)?;
                 self.brigadier.add_child(id, child, 0)?;
                 Ok(Value::Void)
             }
