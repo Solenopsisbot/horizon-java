@@ -215,8 +215,7 @@ public class Refl {
         .map(f -> Map.entry(-f.getName().length(), f))
         .sorted(Comparator.comparingInt(Map.Entry::getKey))
         .map(Map.Entry::getValue)
-        .map(f -> { f.setAccessible(true); try { return f.getName() + "=" + f.get(holder); } catch (Exception e) { return e.toString(); } })
-        .map(s -> s.startsWith("names=") ? "names=array" : s)
+        .map(f -> { f.setAccessible(true); try { Object v = f.get(holder); return f.getName() + "=" + (v instanceof String[] a ? "array" + a.length : v); } catch (Exception e) { return e.toString(); } })
         .collect(java.util.stream.Collectors.joining(","));
   }
 

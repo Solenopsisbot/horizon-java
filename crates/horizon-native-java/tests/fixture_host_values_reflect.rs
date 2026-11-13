@@ -91,7 +91,7 @@ const CASES: &[(&str, Outcome)] = &[
     // and `get` on each: the pair hands back each copy (counted while a
     // pair's text dropped the copy number; Shulker Box Tooltip's config
     // tree, through DFU's `Pair`).
-    ("fieldStream", Exact("names=array,plain=4")),
+    ("fieldStream", Exact("names=array1,plain=4")),
     // A `HashMap` keyed by `Method`, copied, iterated and wrapped (counted
     // while a `Method` had no `hashCode`; DazzleConf's default-method map).
     ("methodMap", Exact("2,2,size,false")),

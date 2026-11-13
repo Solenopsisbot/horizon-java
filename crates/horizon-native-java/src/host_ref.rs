@@ -215,6 +215,17 @@ pub enum HostKind {
     /// The `ConstantCallSite` `LambdaMetafactory.metafactory` returns: key its
     /// target handle's JSON (`method_handles.rs`).
     CallSite,
+    /// A Java array: key `<array class>#<n>`, its elements in the runtime's
+    /// `arrays` table (`host_array.rs`).
+    Array,
+    /// Vanilla's `ColorCollection` record, its sixteen values in the
+    /// runtime's `arrays` table: key `color-collection#<n>`
+    /// (`color_collection.rs`).
+    ColorCollection,
+    /// The empty array the runtime answers for an unmodelled call whose
+    /// declared result is an array: key `<declared class>#empty`
+    /// (`host_array.rs`). Its runtime class is unknown.
+    UnknownArray,
 }
 
 /// How a kind's Java class follows from its key.
@@ -223,7 +234,7 @@ pub(crate) enum ClassRule {
     /// Every object of the kind is this class.
     Fixed(&'static str),
     /// A family whose objects are of many classes (jar objects, collections,
-    /// game objects), or a class other values than handles may also be
+    /// game objects, arrays), or a class other values than handles may also be
     /// (`CompletableFuture`): the class is read from the key.
     FromKey(fn(&str) -> &str),
     /// The object's runtime class is not known (a jar's lambda, a proxy, a
@@ -631,6 +642,31 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::FromKey(crate::method_handles::call_site_class),
         canonical: never_canonical,
         methods: &crate::method_handles::CALL_SITE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Array,
+        tag: "arr",
+        class: ClassRule::FromKey(crate::host_array::class_of_key),
+        canonical: crate::host_array::canonical,
+        methods: &crate::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::ColorCollection,
+        tag: "colors",
+        class: ClassRule::Fixed(crate::color_collection::OWNER),
+        // One key per collection the runtime built.
+        canonical: always_canonical,
+        methods: &crate::color_collection::COLOR_COLLECTION,
+    },
+    KindInfo {
+        kind: HostKind::UnknownArray,
+        tag: "arru",
+        class: ClassRule::Unknown {
+            declared: crate::host_array::surely,
+        },
+        // One key stands for every array such a call returned.
+        canonical: never_canonical,
+        methods: &crate::host_array::ARRAY,
     },
 ];
 

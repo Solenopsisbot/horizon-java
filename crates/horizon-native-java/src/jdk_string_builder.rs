@@ -719,7 +719,7 @@ impl<H: Host> Runtime<'_, H> {
                     Answer::Int(value) => Value::Int(value),
                     Answer::Text(text) => Value::Ref(Some(text)),
                     Answer::WriteChars { at, units } => {
-                        let Some(array) = args.get(2).and_then(expect_ref) else {
+                        let Some(array) = args.get(2).and_then(host_array::array_key) else {
                             return Ok(None);
                         };
                         let Some(elements) = self.arrays.get_mut(array) else {
@@ -776,8 +776,8 @@ impl<H: Host> Runtime<'_, H> {
                 ("F", Value::Float(value)) => Arg::Float(*value),
                 ("D", Value::Float(value)) => Arg::Double(*value),
                 ("[C", Value::Ref(None)) => Arg::Chars(None),
-                ("[C", Value::Ref(Some(array))) => {
-                    let Some(elements) = self.arrays.get(array) else {
+                ("[C", array @ Value::Host(_)) => {
+                    let Some(elements) = self.owned_array(array) else {
                         return Ok(None);
                     };
                     let mut units = Vec::with_capacity(elements.len());

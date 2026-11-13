@@ -95,6 +95,11 @@ impl<H: Host> Runtime<'_, H> {
         if class == "java/lang/Object" {
             return true;
         }
+        // A handle is what its kind's row says (`host_ref.rs`): an array is
+        // an `Object[]` by JLS array subtyping, not by a class chain.
+        if let Value::Host(handle) = value {
+            return handle.instance_of(class, self) == Some(true);
+        }
         if let Some(own) = class_of_value(value)
             && (own == class || self.class_is_instance(&own, class))
         {
@@ -107,11 +112,12 @@ impl<H: Host> Runtime<'_, H> {
             return true;
         }
         // A string is a bare marker: no object, boxed, collection, array,
-        // callback, enum or game prefix claims it.
+        // callback, enum or game prefix claims it. A `#` claims it only as an
+        // object's `class#n` (`[I#0` is a string: arrays are handles).
         if class == "java/lang/String" || class == "java/lang/CharSequence" {
             let claimed = class_of_value(value).is_some()
-                || marker.contains('#')
-                || ["array/", "@", "enum/", "game/", "registry/"]
+                || marker.contains('#') && !value_class::is_plain_string(marker)
+                || ["@", "enum/", "game/", "registry/"]
                     .iter()
                     .any(|prefix| marker.starts_with(prefix));
             return !claimed;
