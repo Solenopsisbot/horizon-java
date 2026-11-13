@@ -21,7 +21,8 @@ const EXPECTED: &str = "\
 spelled=Stringtrue242617473falsefalsefalsefalsefalsefalse,Stringtrue-1467112479falsefalsefalsefalsefalsefalse,Stringtrue1921539161falsefalsefalsefalsefalsefalse,Stringtrue-1306580884falsefalsefalsefalsefalsefalse,Stringtrue777244203falsefalsefalsefalsefalsefalse,6ss|guava-cache-builderexecutor-thread-factory\n\
 slashStrings=falsefalse,falsefalse,falsefalse,falsefalse,falsefalse,falsefalse,falsefalse,falsefalse,falsefalse,falsefalse,10s\n\
 executors=falsefalsetruetrue|truetruetruetruetrue|5truefalsenullxtruetruetruetruefalse|true1false|truetruetruetrue\n\
-callables=done|null|truefalsetruetruetruetruefalse\n\
+callables=done|null|truefalsetruetruetrue\n\
+callableContains=truefalse\n\
 services=java.util.ServiceLoader[demo.Greeter]|falsefalsetruetruetrue|hellofalsetrue|demo.Hellohellotruetruefalse|hellotruefalse\n\
 guava=[a, b, , c]|x-y|truetruetrue|truetrue|k!\n\
 identity=6|247\n\
@@ -182,7 +183,15 @@ public final class Probe {
         Object o = c;
         ThreadFactory t = Executors.defaultThreadFactory();
         return c.call() + "|" + plain.call() + "|" + c.equals(c) + c.equals(plain) + (o instanceof Callable)
-            + (t instanceof ThreadFactory) + t.equals(t) + List.of(c).contains(c) + List.of(c).contains(plain);
+            + (t instanceof ThreadFactory) + t.equals(t);
+    }
+
+    /** A callable in a host list: found as itself (identity), not as another made from the same task. */
+    public static String callableContains() {
+        Runnable r = () -> {};
+        Callable c = Executors.callable(r, "done");
+        Callable plain = Executors.callable(r);
+        return "" + List.of(c).contains(c) + List.of(c).contains(plain);
     }
 
     /** ServiceLoader: one loader per load; providers built by the JDK's rules; Provider equality by classes. */
@@ -397,7 +406,7 @@ fn run(fixture: &javac_fixture::Fixture, method: &str) -> (String, Vec<(String, 
 /// loaders and their providers, Guava splitters, joiners and cache builders
 /// answer as Java 25 does with nothing counted: the executor model's inline
 /// tasks, completed futures and shutdown state; a fresh object per factory
-/// call (`IdentityHashMap`, `List.contains`); `ServiceLoader`'s text, lookup
+/// call (`IdentityHashMap`); `ServiceLoader`'s text, lookup
 /// and cached providers (equal by their classes); a builder's setters
 /// answering it; and no string spelled like an old marker or a handle's
 /// text is one.
@@ -442,15 +451,17 @@ fn what_only_a_jvm_knows_is_counted() {
 }
 
 /// Answers that need what only a JVM knows are Java 25's or counted, never
-/// a silent wrong one: providers of two loaders in a `HashSet`/`HashMap`
+/// a silent wrong one: a callable found in a host list as itself (the list
+/// keeps its key, not which object it was), providers of two loaders in a `HashSet`/`HashMap`
 /// (equal, so one entry), a provider's identity across one loader's
 /// `stream()` calls and across `reload()` (fresh objects), a loader read as
 /// an `Iterable` by Guava, and two separately made joiners compared through
-/// host lists (`Object.equals`, identity) once #175 is in (the next test).
+/// host lists (`Object.equals`, identity) in the next test.
 #[test]
 fn answers_only_a_jvm_knows_are_java_25s_or_counted() {
     let fixture = fixture("host-services-lists");
     for method in [
+        "callableContains",
         "providerIdentity",
         "providerHashes",
         "reloadIdentity",
@@ -469,9 +480,8 @@ fn answers_only_a_jvm_knows_are_java_25s_or_counted() {
 /// equal keys but are two objects with `Object`'s `equals`: in a `HashSet`, as
 /// `HashMap` keys, in `Set.of`/`Map.of`, through `Objects.equals` and host
 /// lists, the answer is Java 25's or counted. The rows answer `None` (unknown
-/// identity); shared code then compared their keys until #175.
+/// identity), and shared code counts it (#175).
 #[test]
-#[ignore = "#175: shared collection code answers an unknown equals from key equality"]
 fn fresh_objects_with_equal_keys_are_never_merged_silently() {
     let fixture = fixture("host-services-fresh");
     for method in ["joinerContains", "sameJoinerContains", "freshEquality"] {

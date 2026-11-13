@@ -13,7 +13,8 @@
 //!
 //! A callback receives bounded markers, never live game objects: the server is
 //! `game/server`, a level `game/level/<dimension>`, a player
-//! `game/player/<uuid>`, a NeoForge/Forge event object `game-event/<event>`.
+//! `game/player/<uuid>`; a NeoForge/Forge event object is a host handle of its class
+//! (`host_game_event.rs`).
 //! The game hands a snapshot ([`EventFacade`]) and the firing's context
 //! ([`EventContext`]) to each firing, and the markers answer the few methods
 //! callbacks call first (`getTickCount`, `getPlayerList().getPlayers()`,
@@ -870,6 +871,23 @@ const SUBSCRIBE_EVENT: &[&str] = &[
     "Lnet/minecraftforge/eventbus/api/SubscribeEvent;",
 ];
 
+/// Every class [`bus_event`] names, both loaders.
+pub(crate) fn bus_event_classes() -> Vec<String> {
+    let mut classes = Vec::new();
+    for (roots, table) in [
+        ([NEOFORGE_EVENT_ROOT, FORGE_EVENT_ROOT], BUS_EVENTS),
+        (
+            [NEOFORGE_CLIENT_EVENT_ROOT, FORGE_CLIENT_EVENT_ROOT],
+            CLIENT_BUS_EVENTS,
+        ),
+    ] {
+        for root in roots {
+            classes.extend(table.iter().map(|(rest, _)| format!("{root}{rest}")));
+        }
+    }
+    classes
+}
+
 /// The game event and loader an event class names, if the game fires it.
 pub(crate) fn bus_event(class: &str) -> Option<(GameEvent, EventLoader)> {
     let client = class
@@ -1104,6 +1122,9 @@ pub struct EventFiring {
     /// The first non-`PASS` `InteractionResult` a Fabric listener returned
     /// (`SUCCESS`, `FAIL`...).
     pub interaction: Option<String>,
+    /// The event objects this firing handed its NeoForge/Forge listeners, one
+    /// per event class: every listener of one firing gets the same object.
+    objects: Vec<(String, Value)>,
 }
 
 impl EventFiring {
@@ -1114,7 +1135,19 @@ impl EventFiring {
             context,
             cancelled: false,
             interaction: None,
+            objects: Vec::new(),
         }
+    }
+
+    /// This firing's event object of `class` (`host_game_event.rs`), made by
+    /// its first listener on that class and handed to every later one.
+    pub(crate) fn event_object(&mut self, class: &str) -> Value {
+        if let Some((_, object)) = self.objects.iter().find(|(known, _)| known == class) {
+            return object.clone();
+        }
+        let object = crate::runtime::host_game_event::game_event(class);
+        self.objects.push((class.to_owned(), object.clone()));
+        object
     }
 }
 
@@ -1178,10 +1211,6 @@ fn dimension_key(id: &str) -> Value {
     crate::runtime::host_ids::resource_key_named("minecraft:dimension", id)
 }
 
-fn event_marker(event: GameEvent) -> Value {
-    marker(format!("game-event/{}", event.name()))
-}
-
 /// The façade object one marker stands for.
 enum Facade<'a> {
     Server,
@@ -1204,9 +1233,6 @@ fn facade(marker: &str) -> Option<Facade<'_>> {
     }
     if marker == PLAYER_LIST {
         return Some(Facade::PlayerList);
-    }
-    if marker.starts_with("game-event/") {
-        return Some(Facade::Event);
     }
     let rest = marker.strip_prefix("game/")?;
     let (kind, id) = rest.split_once('/')?;
@@ -1360,6 +1386,11 @@ impl StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
+        // The event object a NeoForge/Forge listener received answers from the firing.
+        if crate::runtime::host_game_event::fired_event(receiver).is_some() {
+            let answer = self.facade_answer(&Facade::Event, r, args);
+            return Some(answer.ok_or_else(|| NativeError::UnknownHostCall(r.clone())));
+        }
         let text = expect_ref(receiver)?;
         // `new LevelResource("data/x.json")`: keep its id for a later
         // `getWorldPath`.
@@ -2425,7 +2456,7 @@ impl NativeJar {
         }
         let event_args = match listener.shape {
             Some(shape) => fabric_arguments(shape, firing)?,
-            None => vec![event_marker(firing.event)],
+            None => vec![firing.event_object(&listener.source)],
         };
         let marks = host.call_log_marks();
         host.note_firing_levels(firing);
@@ -3067,7 +3098,9 @@ mod tests {
                 ..EventContext::default()
             },
         )));
-        let event = event_marker(GameEvent::UseEntity);
+        let event = crate::runtime::host_game_event::game_event(
+            "net/neoforged/neoforge/event/entity/player/PlayerInteractEvent$EntityInteract",
+        );
         let call = |host: &mut StdHost, name: &str, returns: &str| {
             host.game_event_call(
                 &MethodRef {
