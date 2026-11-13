@@ -673,15 +673,15 @@ impl<H: Host> Runtime<'_, H> {
         Ok(seen)
     }
 
-    /// `DistinctOps`' `accept(t)`: pass `t` on when `seen.add(t)`. The
+    /// `DistinctOps`' `accept(t)`: `seen.add(t)`, whether `t` passes on. The
     /// elements' own `equals`/`hashCode` run, as JDK 25's `HashSet` runs
-    /// them; a membership the table cannot decide (an identity hash) is
-    /// counted and decided by marker.
+    /// them. `None`: a membership the table cannot decide (an identity
+    /// hash), counted; the caller decides it by value.
     pub(crate) fn distinct_accept(
         &mut self,
         seen: &Value,
         value: &Value,
-    ) -> Result<bool, NativeError> {
+    ) -> Result<Option<bool>, NativeError> {
         let marker = expect_ref(seen).cloned().unwrap_or_default();
         let kind = TableKind {
             map: false,
@@ -690,16 +690,12 @@ impl<H: Host> Runtime<'_, H> {
         let mut table = self.take_table(&marker, kind);
         let added = self.set_add(seen, &mut table, value);
         self.keep_table(seen, table);
-        match added? {
-            Some(added) => Ok(added),
-            None => {
-                self.host.unknown_operand_call(&stream_member(
-                    "distinct",
-                    "()Ljava/util/stream/Stream;",
-                ))?;
-                Ok(!self.collection_elements(seen)?.contains(value))
-            }
+        let added = added?;
+        if added.is_none() {
+            self.host
+                .unknown_operand_call(&stream_member("distinct", "()Ljava/util/stream/Stream;"))?;
         }
+        Ok(added)
     }
 
     /// `Collectors.toSet()`: `HashSet::new` and `Set::add`, so the result

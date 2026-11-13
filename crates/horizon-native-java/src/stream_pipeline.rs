@@ -73,14 +73,48 @@
 //!   changed before the traversal ended (`<Map>#spliterator`): the JDK's view
 //!   sees the change, the copy does not.
 
+use crate::host_ref::{HostKind, HostRef, Methods};
 use crate::{MethodRef, NativeError, Value, expect_ref};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// Prefix of a `Stream.Builder` marker. A builder is a `Consumer`, so it is a
-/// callback marker: `list.forEach(builder)` reaches it through the callback
-/// path.
-pub(crate) const BUILDER_PREFIX: &str = "@fn:stream-builder:";
+/// `Stream.builder()`'s object (`Streams.StreamBuilderImpl`) in the kind
+/// table (`host_ref.rs`): a handle keyed by the runtime's builder number.
+/// `Object`'s `equals` is identity; its `toString`/`hashCode` print and are
+/// the identity hash, which is not modelled (`None`: the caller counts).
+pub(crate) const STREAM_BUILDER: Methods = Methods {
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    equals: |handle, other, _| {
+        Ok(match other {
+            Value::Host(other) => handle.same_object(other),
+            _ => Some(false),
+        })
+    },
+    // `StreamBuilderImpl extends AbstractStreamBuilderImpl implements
+    // Stream.Builder` (a `Consumer`); `AbstractStreamBuilderImpl implements
+    // Spliterator` (JDK 25.0.5's `javap`).
+    instance_of: |_, wanted, _| {
+        Some(matches!(
+            wanted,
+            "java/lang/Object"
+                | "java/util/stream/Streams$StreamBuilderImpl"
+                | "java/util/stream/Streams$AbstractStreamBuilderImpl"
+                | "java/util/stream/Stream$Builder"
+                | "java/util/function/Consumer"
+                | "java/util/Spliterator"
+        ))
+    },
+    crosses_jars: |_, _| false,
+};
+
+/// The builder number a `Stream.Builder` handle carries.
+pub(crate) fn builder_key(value: &Value) -> Option<&str> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::StreamBuilder => Some(handle.key()),
+        _ => None,
+    }
+}
 
 /// Elements one push may collect, or one builder may hold, before the
 /// runtime refuses the stream as a runaway (a `flatMap` fan-out); far above
@@ -130,9 +164,9 @@ enum State {
     None,
     /// `skip`/`limit`: how many elements are left to drop or pass.
     Left(i64),
-    /// `distinct`: `DistinctOps`' `HashSet` of the references seen, and the
-    /// primitives seen (an `IntStream`'s `distinct` boxes them, so two are
-    /// the same element exactly when their values are).
+    /// `distinct`: `DistinctOps`' `HashSet` of the elements seen (a
+    /// primitive stream's `distinct` boxes them into the same set), and the
+    /// counted elements whose hash the set cannot know, decided by value.
     Seen(Value, Vec<Value>),
     /// `sorted`: the elements buffered until the source ends.
     Buffer(Vec<Value>),
@@ -1183,27 +1217,22 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 Ok(())
             }
             Stage::Distinct => {
-                let Some(State::Seen(set, primitives)) = self.state(id, at) else {
+                let Some(State::Seen(set, _)) = self.state(id, at) else {
                     return self.accept(id, next, value);
                 };
-                if let Value::Int(_) | Value::Long(_) | Value::Float(_) = value {
-                    // A primitive stream's element: `Integer`/`Long`/`Double`
-                    // `equals` is equality of the value (of its bits, for a
-                    // `double`: `NaN` equals itself, `0.0` is not `-0.0`).
-                    let same = |a: &Value, b: &Value| match (a, b) {
-                        (Value::Float(a), Value::Float(b)) => {
-                            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
-                        }
-                        _ => a == b,
-                    };
-                    if primitives.iter().any(|seen| same(seen, &value)) {
-                        return Ok(());
-                    }
-                    primitives.push(value.clone());
-                    return self.accept(id, next, value);
-                }
                 let set = set.clone();
-                if self.distinct_accept(&set, &value)? {
+                let passes = match self.distinct_accept(&set, &value)? {
+                    Some(added) => added,
+                    // Counted: kept by value.
+                    None => match self.state(id, at) {
+                        Some(State::Seen(_, by_value)) if !by_value.contains(&value) => {
+                            by_value.push(value.clone());
+                            true
+                        }
+                        _ => false,
+                    },
+                };
+                if passes {
                     self.accept(id, next, value)?;
                 }
                 Ok(())
@@ -1383,25 +1412,26 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             && is_stream_owner(&r.owner)
             && r.descriptor.starts_with("()Ljava/util/stream/")
         {
-            let marker = format!("{BUILDER_PREFIX}{}", self.pipelines.next_builder);
+            let key = self.pipelines.next_builder.to_string();
             self.pipelines.next_builder += 1;
             self.pipelines
                 .builders
-                .insert(marker.clone(), Some(Vec::new()));
-            return Ok(Some(Value::Ref(Some(marker))));
+                .insert(key.clone(), Some(Vec::new()));
+            return Ok(Some(Value::Host(HostRef::new(
+                HostKind::StreamBuilder,
+                key,
+            ))));
         }
-        let Some(marker) = receiver
-            .and_then(expect_ref)
-            .filter(|marker| marker.starts_with(BUILDER_PREFIX))
-            .cloned()
-        else {
+        let Some(builder) = receiver.filter(|value| builder_key(value).is_some()) else {
             return Ok(None);
         };
+        let marker = builder_key(builder).unwrap_or_default().to_owned();
         match r.name.as_str() {
             "add" | "accept" => {
                 self.builder_accept(&marker, args)?;
                 Ok(Some(if r.name == "add" {
-                    Value::Ref(Some(marker))
+                    // `add` answers `this`: the same handle.
+                    builder.clone()
                 } else {
                     Value::Void
                 }))
@@ -1441,17 +1471,17 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         Ok(())
     }
 
-    /// A stream callback marker invoked as its functional interface: a
-    /// builder used as a `Consumer`.
+    /// A builder handle invoked as its functional interface, a `Consumer`
+    /// (`list.forEach(builder)`); `None` for any other value.
     pub(crate) fn stream_callback(
         &mut self,
-        marker: &str,
+        callback: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        if !marker.starts_with(BUILDER_PREFIX) {
+        let Some(key) = builder_key(callback).map(str::to_owned) else {
             return Ok(None);
-        }
-        self.builder_accept(marker, args)?;
+        };
+        self.builder_accept(&key, args)?;
         Ok(Some(Value::Void))
     }
 }
