@@ -1521,12 +1521,15 @@ mod tests {
 
     #[test]
     fn logger_factories_answer_a_named_disabled_logger() {
-        let by_class = method(
+        // The `Class`/`Object`/no-argument overloads are named by a class
+        // the runtime knows (`invoke_logger_factory`; fixture_host_values_p2b
+        // checks them against Java 25); the host answers the `String` one.
+        let by_name = method(
             "org/apache/logging/log4j/LogManager",
             "getLogger",
-            "(Ljava/lang/Class;)Lorg/apache/logging/log4j/Logger;",
+            "(Ljava/lang/String;)Lorg/apache/logging/log4j/Logger;",
         );
-        let logger = static_call(&by_class, &[text("xaero/lib/XaeroLib")])
+        let logger = static_call(&by_name, &[text("xaero.lib.XaeroLib")])
             .unwrap()
             .unwrap();
         assert_ne!(logger, Value::Ref(None));
