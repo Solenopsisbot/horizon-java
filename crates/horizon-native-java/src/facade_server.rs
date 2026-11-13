@@ -106,9 +106,6 @@ const REGISTRY: &str = "game/registry/";
 const LAYERED: &str = "game/registries/layered";
 /// `MinecraftServer.getCommands()`.
 const COMMANDS: &str = "game/commands";
-/// The marker `Thread.currentThread()` answers: callbacks run on the server
-/// thread, so it is also the server's running thread.
-const THREAD: &str = "thread/main";
 const GAME_RULE: &str = "game-rule/";
 const LEVEL_RESOURCE: &str = "level-resource/";
 
@@ -240,7 +237,9 @@ pub(crate) fn server_member(
         ("getDataStorage", "()Lnet/minecraft/world/level/storage/SavedDataStorage;") => {
             Ok(marker(crate::facade_saved_data::STORAGE))
         }
-        ("getRunningThread", "()Ljava/lang/Thread;") => Ok(marker(THREAD)),
+        // `Thread.currentThread()`: callbacks run on the server thread, so it
+        // is also the server's running thread.
+        ("getRunningThread", "()Ljava/lang/Thread;") => Ok(crate::host_jdk::main_thread()),
         // The server's folder: the one the world folder sits in, as a
         // dedicated server's `<level-name>` sits in its working directory.
         ("getServerDirectory", "()Ljava/nio/file/Path;") => {

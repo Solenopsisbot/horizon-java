@@ -16,7 +16,7 @@
 //! Java 25 run (`tests/fixture_host_values_p2.rs`).
 
 use crate::runtime::Value;
-use crate::runtime::host_path::identity_equals;
+use crate::runtime::host_jdk::identity_equals;
 use crate::runtime::host_ref::{ClassHierarchy, HostKind, HostRef, Methods};
 
 /// `StandardWatchEventKinds.<name>`.

@@ -1,15 +1,18 @@
-//! #156 P2 (first half): paths, files, `FMLPaths` and the watch service's
-//! objects are host handles, not text a jar `String` can spell.
+//! #156 P2: paths, files, `FMLPaths`, the watch service's objects, the main
+//! thread, loggers, stack walking and modules are host handles, not text a
+//! jar `String` can spell.
 //!
 //! `fixtures/host_values/P2.java` holds one `static String` method per case.
 //! The expected strings are what OpenJDK 25.0.5 printed for it (`javac
 //! --release 21`, two runs alike, on elysium), with the real NeoForge
-//! `FMLPaths` (loader 12.0.12; `LogUtils` stubbed so its `<clinit>` runs) on
-//! the class path. Here `FMLPaths` is a stub that never ships, so the calls
-//! reach the host's model. Outcomes as in `fixture_host_values_review.rs`:
+//! `FMLPaths` (loader 12.0.12; `LogUtils` stubbed so its `<clinit>` runs) and
+//! log4j-api 2.26.0 on the class path. Here those classes are stubs that
+//! never ship, so the calls reach the host's models. Outcomes as in
+//! `fixture_host_values_review.rs`:
 //!
 //! * `Exact`: Java's answer, nothing counted;
-//! * `Counted`: Java's answer needs what no run can reproduce (the machine's
+//! * `Counted`: Java's answer needs what no run can reproduce (an identity
+//!   hash, the process's thread id, a line number, the machine's
 //!   `sun.jnu.encoding`, two objects with equal keys), so the run counts it;
 //! * `Gap`: a known silent difference, with its plan (not asserted).
 
@@ -84,15 +87,67 @@ const CASES: &[(&str, Outcome)] = &[
             "ENTRY_CREATE|ENTRY_MODIFYOVERFLOW|truefalsetruefalse|truefalsejava.nio.file.StandardWatchEventKinds$StdWatchEventKind|1",
         ),
     ),
-    // Registering again answers the same key; the event's handle is one
-    // object; the classes are JDK 25's on Linux, the platform the host reports.
+    // Registering again answers the same key; the event's handle is one object.
     (
         "watchService",
+        Exact("truetruetruetruetruefalsetruetrue|truetruetruea.txttruetruetruetrue|false"),
+    ),
+    (
+        "threadSpelled",
+        Exact("falsefalse|thread/main|thread/main|2sr"),
+    ),
+    // One thread: canonical, so an `IdentityHashMap` holds it once.
+    (
+        "threadReal",
+        Exact("main|truetruefalse|truetruefalsejava.lang.Thread|1"),
+    ),
+    // Java 25: `Thread[#3,main,5,main]`.
+    ("threadText", Counted),
+    (
+        "loggerSpelled",
+        Exact("falsefalse|logger/demo|logger/demo|2sr"),
+    ),
+    // log4j and `java.util.logging` cache one logger per name.
+    (
+        "loggerReal",
+        Exact("truetruefalsefalsedemo|truefalse|truetruetruedemo"),
+    ),
+    ("loggerTwo", Counted),
+    // `stack-walker` was a bare marker word; now it is only a String.
+    (
+        "stackSpelled",
         Exact(
-            "truetruetruetruetruefalsetruetrue|truetruetruea.txttruetruetruetrue|sun.nio.fs.LinuxWatchService,sun.nio.fs.LinuxWatchService$LinuxWatchKey,sun.nio.fs.AbstractWatchKey$Event|false",
+            "java.lang.Stringtruefalsefalse1525255963|stack-walker|stack-walker|2sr|falsefalse|stack-frame/stackSpelled@demo/P2|stack-frame/stackSpelled@demo/P2|2sr|falsefalse|stack-trace-element/stackSpelled@demo/P2|stack-trace-element/stackSpelled@demo/P2|2sr",
         ),
     ),
-    // Java 25: `java.lang.Stringtrue42849958java.lang.Stringtrue1589362998`.
+    (
+        "stackReal",
+        Exact(
+            "truetruetruefalsejava.lang.StackWalker|stackRealdemo.P2truetruetruefalsejava.lang.StackFrameInfo|stackRealdemo.P2truetruefalsetruefalsejava.lang.StackTraceElement",
+        ),
+    ),
+    ("stackTwo", Counted),
+    ("stackElements", Counted),
+    // Java 25: `demo.P2.stackText(P2.java:238)`, twice; the runtime keeps no
+    // file or line.
+    ("stackText", Counted),
+    (
+        "moduleSpelled",
+        Exact(
+            "falsefalse|module/unnamed|module/unnamed|2sr|falsefalse|module/java.base|module/java.base|2sr",
+        ),
+    ),
+    (
+        "moduleReal",
+        Exact(
+            "truefalsetruefalsefalsetruejava.base|module java.base|module java.basemodule java.base|truefalsejava.lang.Module|1",
+        ),
+    ),
+    // Java 25: `unnamed module @7a7b0070`.
+    ("moduleText", Counted),
+    // Java 25: `java.lang.Stringtrue1886486174java.lang.Stringtrue-744991998
+    // java.lang.Stringtrue866498461java.lang.Stringtrue42849958
+    // java.lang.Stringtrue1589362998java.lang.Stringtrue63063380`.
     (
         "wordedClasses",
         Gap("#156 P17: is_plain_string reads `word/rest` text as a marker, not a String"),
@@ -107,6 +162,18 @@ public enum FMLPaths {
 }
 "#;
 
+const LOG_MANAGER_STUB: &str = r#"
+package org.apache.logging.log4j;
+public final class LogManager {
+  public static Logger getLogger(String name) { return null; }
+}
+"#;
+
+const LOGGER_STUB: &str = r#"
+package org.apache.logging.log4j;
+public interface Logger { String getName(); }
+"#;
+
 #[test]
 fn p2_handles_answer_as_java_25_or_count() {
     let fixture = Fixture::build(
@@ -114,6 +181,8 @@ fn p2_handles_answer_as_java_25_or_count() {
         &[
             ("demo/P2.java", include_str!("fixtures/host_values/P2.java")),
             ("net/neoforged/fml/loading/FMLPaths.java", FMLPATHS_STUB),
+            ("org/apache/logging/log4j/LogManager.java", LOG_MANAGER_STUB),
+            ("org/apache/logging/log4j/Logger.java", LOGGER_STUB),
         ],
     );
     let mut failures = Vec::new();

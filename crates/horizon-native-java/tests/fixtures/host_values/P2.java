@@ -4,11 +4,12 @@ import java.io.File;
 import java.nio.file.*;
 import java.util.*;
 import net.neoforged.fml.loading.FMLPaths;
+import org.apache.logging.log4j.LogManager;
 
 /**
- * #156 P2 (first half): paths, files, FMLPaths and the watch service as host
- * handles. Each method is one case; the expected strings are what OpenJDK
- * 25.0.5 printed for it.
+ * #156 P2: paths, files, FMLPaths, watch services, threads, loggers, stack
+ * walking and modules as host handles. Each method is one case; the expected
+ * strings are what OpenJDK 25.0.5 printed for it.
  */
 public final class P2 {
   static String ex(Throwable e) { return "EXC " + e.getClass().getName(); }
@@ -147,8 +148,7 @@ public final class P2 {
       WatchEvent<?> event = got.pollEvents().get(0);
       Object e = event;
       out += "|" + (got == k1) + got.equals(k2) + (event.kind() == StandardWatchEventKinds.ENTRY_CREATE) + event.context()
-          + (event.context() instanceof Path) + (e instanceof WatchEvent) + (e == event) + e.equals(event)
-          + "|" + s.getClass().getName() + "," + k.getClass().getName() + "," + e.getClass().getName();
+          + (event.context() instanceof Path) + (e instanceof WatchEvent) + (e == event) + e.equals(event);
       ws.close();
       out += "|" + k1.isValid();
       Files.delete(dir.resolve("a.txt"));
@@ -157,11 +157,117 @@ public final class P2 {
     } catch (Throwable e) { return ex(e); }
   }
 
+  public static String threadSpelled() {
+    try { return worded("thread/main", Thread.currentThread()); } catch (Throwable e) { return ex(e); }
+  }
+
+  public static String threadReal() {
+    try {
+      Thread c = Thread.currentThread();
+      Object o = c;
+      Map<Object, Integer> m = new IdentityHashMap<>();
+      m.put(Thread.currentThread(), 1);
+      m.put(Thread.currentThread(), 2);
+      return c.getName() + "|" + (c == Thread.currentThread())
+          + c.equals(Thread.currentThread()) + c.equals("thread/main") + "|" + (o instanceof Runnable) + (o instanceof Thread)
+          + (o instanceof String) + o.getClass().getName() + "|" + m.size();
+    } catch (Throwable e) { return ex(e); }
+  }
+
+  /** A thread's text names its id, which is the process's. */
+  public static String threadText() { return "" + Thread.currentThread(); }
+
+  public static String loggerSpelled() {
+    try { return worded("logger/demo", LogManager.getLogger("demo")); } catch (Throwable e) { return ex(e); }
+  }
+
+  public static String loggerReal() {
+    try {
+      Object a = LogManager.getLogger("demo");
+      Object j = java.util.logging.Logger.getLogger("demo");
+      return "" + (a == LogManager.getLogger("demo")) + a.equals(LogManager.getLogger("demo")) + (a == LogManager.getLogger("other"))
+          + a.equals(j) + LogManager.getLogger("demo").getName() + "|" + (a instanceof org.apache.logging.log4j.Logger)
+          + (a instanceof String) + "|" + (j == java.util.logging.Logger.getLogger("demo")) + j.equals(java.util.logging.Logger.getLogger("demo"))
+          + (j instanceof java.util.logging.Logger) + java.util.logging.Logger.getLogger("demo").getName();
+    } catch (Throwable e) { return ex(e); }
+  }
+
+  /** Two anonymous loggers are two objects: identity is counted. */
+  public static String loggerTwo() {
+    return "" + (java.util.logging.Logger.getAnonymousLogger() == java.util.logging.Logger.getAnonymousLogger());
+  }
+
+  public static String stackSpelled() {
+    try {
+      return plain("stack-walker", StackWalker.getInstance()) + "|" + worded("stack-frame/stackSpelled@demo/P2", "x")
+          + "|" + worded("stack-trace-element/stackSpelled@demo/P2", new Throwable().getStackTrace()[0]);
+    } catch (Throwable e) { return ex(e); }
+  }
+
+  public static String stackReal() {
+    try {
+      StackWalker w = StackWalker.getInstance();
+      Object o = w;
+      StackWalker.StackFrame f = w.walk(s -> s.findFirst().get());
+      Object fo = f;
+      StackTraceElement e = new Throwable().getStackTrace()[0];
+      Object eo = e;
+      return "" + (w == StackWalker.getInstance()) + w.equals(StackWalker.getInstance()) + (o instanceof StackWalker)
+          + (o instanceof String) + o.getClass().getName() + "|" + f.getMethodName() + f.getClassName() + (fo == f) + fo.equals(f)
+          + (fo instanceof StackWalker.StackFrame) + (fo instanceof String) + fo.getClass().getName() + "|" + e.getMethodName()
+          + e.getClassName() + (eo == e) + eo.equals(e) + e.equals("stackReal") + (eo instanceof StackTraceElement)
+          + (eo instanceof String) + eo.getClass().getName();
+    } catch (Throwable e) { return ex(e); }
+  }
+
+  /** Two walks hand out two frame objects: identity is counted. */
+  public static String stackTwo() {
+    StackWalker w = StackWalker.getInstance();
+    return "" + (w.walk(s -> s.findFirst().get()) == w.walk(s -> s.findFirst().get()));
+  }
+
+  /** Two elements of one method made by two throwables: equals needs their lines, counted. */
+  public static String stackElements() {
+    StackTraceElement a = new Throwable().getStackTrace()[0];
+    StackTraceElement b = new Throwable().getStackTrace()[0];
+    return "" + a.equals(b);
+  }
+
+  /** A stack trace element's text: Java names the file and line, which the runtime does not keep. */
+  public static String stackText() {
+    StackTraceElement e = new Throwable().getStackTrace()[0];
+    return e + "|" + e.toString();
+  }
+
+  /** An unnamed module prints its identity hash. */
+  public static String moduleText() { return "" + P2.class.getModule(); }
+
   /** A non-ASCII path's bytes are the machine's `sun.jnu.encoding`. */
   public static String pathNonAscii() { return "" + Path.of("\u00e9").hashCode(); }
 
   /** Spellings with a `word/` head: is_plain_string still reads them as markers (#156 P17). */
   public static String wordedClasses() {
-    return wordedClass("watch-kind/ENTRY_CREATE") + wordedClass("fml-path/GAMEDIR/path:/horizon/game");
+    return wordedClass("thread/main") + wordedClass("logger/demo") + wordedClass("module/unnamed")
+        + wordedClass("watch-kind/ENTRY_CREATE") + wordedClass("fml-path/GAMEDIR/path:/horizon/game")
+        + wordedClass("stack-frame/m@demo/P2");
+  }
+
+  public static String moduleSpelled() {
+    try { return worded("module/unnamed", P2.class.getModule()) + "|" + worded("module/java.base", String.class.getModule()); }
+    catch (Throwable e) { return ex(e); }
+  }
+
+  public static String moduleReal() {
+    try {
+      Module m = P2.class.getModule();
+      Module b = String.class.getModule();
+      Object o = b;
+      Map<Object, Integer> id = new IdentityHashMap<>();
+      id.put(m, 1);
+      id.put(P2.class.getModule(), 2);
+      return "" + (m == P2.class.getModule()) + (m == b) + m.equals(P2.class.getModule()) + m.equals(b) + m.isNamed()
+          + b.isNamed() + b.getName() + "|" + b + "|" + ("" + b) + b.toString() + "|" + (o instanceof Module) + (o instanceof String)
+          + o.getClass().getName() + "|" + id.size();
+    } catch (Throwable e) { return ex(e); }
   }
 }

@@ -20,17 +20,8 @@
 //!   hash (counted). `get()` answers the virtual root the loader hands out
 //!   (`neoforge_loader.rs`).
 
-use crate::runtime::Value;
 use crate::runtime::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, instance_of_class};
-
-/// `self == other` as `Object.equals` answers it: `None` when only the JVM
-/// knows (equal keys of a kind that is not canonical, two constructions).
-pub(crate) fn identity_equals(handle: &HostRef, other: &Value) -> Option<bool> {
-    match other {
-        Value::Host(other) => handle.same_object(other),
-        _ => Some(false),
-    }
-}
+use crate::runtime::{Value, host_jdk::identity_equals};
 
 /// `UnixPath`'s supertypes (and itself), for `instanceof`/`checkcast`.
 const PATH_TYPES: &[&str] = &[
