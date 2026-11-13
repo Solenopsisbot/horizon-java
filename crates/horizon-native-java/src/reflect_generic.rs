@@ -183,13 +183,17 @@ fn erased(descriptor: &str) -> Value {
 
 /// The `(class, name, descriptor)` a `Method` handle names, when it carries
 /// its descriptor.
+///
+/// A lookup the runtime could not settle carries only the parameters it was
+/// asked for (`(I)`, no return type) and the class it was asked on (maybe a
+/// subclass of the declaring one), so none of its facts is answered here
+/// (counted).
 fn method_marker(value: Option<&Value>) -> Option<(String, String, String)> {
     let method = host_reflect::method_of(value?)?;
-    Some((
-        method.class.to_owned(),
-        method.name.to_owned(),
-        method.descriptor?.to_owned(),
-    ))
+    let descriptor = method
+        .descriptor
+        .filter(|descriptor| !descriptor.ends_with(')'))?;
+    Some((method.class, method.name, descriptor))
 }
 
 /// The `Type` a type marker (a class name or a `type/` node) names.
@@ -293,75 +297,6 @@ impl<H: Host> Runtime<'_, H> {
         ))
     }
 
-    /// `Class.getDeclaredMethods()` (`declared`) or `Class.getMethods()` as
-    /// `Method` handles.
-    ///
-    /// `getDeclaredMethods` is every method the class declares except its
-    /// constructors and static initializer. `getMethods` is the public ones,
-    /// plus the public methods its jar superclasses and superinterfaces
-    /// declare (a static interface method is not inherited), first declaration
-    /// of a signature winning, which is what config libraries walking an
-    /// interface hierarchy expect. A private interface helper
-    /// (`BreedingCap.getAreaAt`) was listed before and read as a config key.
-    /// `Object`'s own methods are not listed, as the class model does not hold
-    /// it.
-    pub(super) fn reflected_methods(&self, class: &str, declared: bool) -> Vec<Value> {
-        let marker = |owner: &str, method: &Method| {
-            let declared = self.class(owner).and_then(|file| {
-                host_reflect::Declared::of(file, &method.name, &method.descriptor)
-            });
-            host_reflect::method(
-                owner,
-                &method.name,
-                Some(&method.descriptor),
-                declared.as_ref(),
-            )
-        };
-        let Some(file) = self.class(class) else {
-            return Vec::new();
-        };
-        let is_member = |method: &Method| method.name != "<init>" && method.name != "<clinit>";
-        if declared {
-            return file
-                .methods
-                .iter()
-                .filter(|method| is_member(method))
-                .map(|method| marker(class, method))
-                .collect();
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        let mut out = Vec::new();
-        let mut queue = std::collections::VecDeque::from([(class.to_owned(), true)]);
-        let mut visited = std::collections::BTreeSet::new();
-        while let Some((current, own)) = queue.pop_front() {
-            if visited.len() >= MAX_SUPERCLASS_WALK || !visited.insert(current.clone()) {
-                continue;
-            }
-            let Some(file) = self.class(&current) else {
-                continue;
-            };
-            let interface = class_access_flags(file).is_some_and(|flags| flags & 0x0200 != 0);
-            for method in &file.methods {
-                let public = method.access & 0x0001 != 0;
-                // A superinterface's static method is not a member of the
-                // implementing class or sub-interface.
-                if !is_member(method) || !public || (interface && !own && method.is_static()) {
-                    continue;
-                }
-                if seen.insert(format!("{}{}", method.name, method.descriptor)) {
-                    out.push(marker(&current, method));
-                }
-            }
-            if !file.super_name.is_empty() {
-                queue.push_back((file.super_name.clone(), false));
-            }
-            for parent in file.interface_names() {
-                queue.push_back((parent, false));
-            }
-        }
-        out
-    }
-
     /// `Class.getModifiers()`: a jar class's access flags without
     /// `ACC_SUPER`, which is what the JVM reports for a top-level class (a
     /// member class's `InnerClasses` flags, such as `static` or `private`, are
@@ -463,7 +398,9 @@ impl<H: Host> Runtime<'_, H> {
             ("getModifiers", "()I") => {
                 let file = self.class(&class)?;
                 let method = file.method(&name, &descriptor)?;
-                Value::Int(i32::from(method.access) & 0x0fff)
+                // The JVM's recognized method flags (`Method.getModifiers`),
+                // bridge, varargs and synthetic included: a bridge is `4161`.
+                Value::Int(i32::from(method.access) & 0x1dff)
             }
             ("isDefault", "()Z") => {
                 let file = self.class(&class)?;

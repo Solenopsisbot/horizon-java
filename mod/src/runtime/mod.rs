@@ -20979,22 +20979,36 @@ impl<H: Host> Runtime<'_, H> {
             && r.descriptor == "()[Ljava/lang/reflect/Field;"
         {
             let class = reflection_class_name(receiver, r)?.to_owned();
-            let declared = r.name == "getDeclaredFields";
-            let fields = self
-                .class(&class)
-                .map(|file| {
+            // `getDeclaredFields` is the class file's table; `getFields` the
+            // public fields of the class, its superinterfaces and
+            // superclasses (`host_reflect.rs`). A class whose fields the
+            // runtime cannot list (a JDK or game class) is counted, never an
+            // empty array.
+            let fields = if r.name == "getDeclaredFields" {
+                self.class(&class).map(|file| {
                     file.fields
                         .iter()
-                        .filter(|field| declared || field.access & 1 != 0)
-                        .map(|field| (field.name.clone(), field.descriptor.clone(), field.access))
+                        .map(|field| {
+                            (
+                                class.clone(),
+                                field.name.clone(),
+                                field.descriptor.clone(),
+                                field.access,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
-                .unwrap_or_default();
+            } else {
+                self.public_field_list(&class)
+            };
+            let Some(fields) = fields else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
             // One fresh `Field` per element, as `copyField` makes them.
             let fields = fields
                 .into_iter()
-                .map(|(name, descriptor, access)| {
-                    self.field_copy(&class, &name, Some((&descriptor, access)))
+                .map(|(declaring, name, descriptor, access)| {
+                    self.field_copy(&declaring, &name, Some((&descriptor, access)))
                 })
                 .collect::<Vec<_>>();
             let marker = self.new_array("java/lang/reflect/Field", "getDeclaredFields");
@@ -21028,7 +21042,41 @@ impl<H: Host> Runtime<'_, H> {
             && r.descriptor == "()[Ljava/lang/reflect/Method;"
         {
             let class = reflection_class_name(receiver, r)?.to_owned();
-            let methods = self.reflected_methods(&class, r.name == "getDeclaredMethods");
+            // `getDeclaredMethods`: the class file's methods but its
+            // constructors and initializer; `getMethods`: the public member
+            // methods (`host_reflect.rs`). A class the runtime cannot list
+            // (a JDK or game class) is counted, never an empty array.
+            let methods = if r.name == "getDeclaredMethods" {
+                self.class(&class).map(|file| {
+                    file.methods
+                        .iter()
+                        .filter(|method| method.name != "<init>" && method.name != "<clinit>")
+                        .map(|method| {
+                            (
+                                class.clone(),
+                                method.name.clone(),
+                                method.descriptor.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            } else {
+                self.public_method_list(&class).map(|methods| {
+                    methods
+                        .into_iter()
+                        .map(|method| (method.class, method.name, method.descriptor))
+                        .collect()
+                })
+            };
+            let Some(methods) = methods else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
+            let methods = methods
+                .iter()
+                .map(|(declaring, name, descriptor)| {
+                    self.reflected_method(declaring, name, Some(descriptor))
+                })
+                .collect::<Vec<_>>();
             let marker = self.new_array("java/lang/reflect/Method", "getMethods");
             self.arrays.insert(marker.clone(), methods);
             return Ok(Some(Value::Ref(Some(marker))));
@@ -21041,22 +21089,42 @@ impl<H: Host> Runtime<'_, H> {
             let name = expect_string(StdHost::argument(r, args, 0)?);
             let parameter_types = self.parameter_types(args);
             let descriptor = self.reflected_descriptor(class, name, &parameter_types);
-            // `getDeclaredMethod` on a class the runtime holds: its methods
-            // are the class file's, so a miss throws Java's exception
-            // (`getMethod` also searches supertypes and is not decided here).
-            if r.name == "getDeclaredMethod"
-                && let Some(file) = self.class(class)
-                && match descriptor.as_deref() {
-                    Some(descriptor) => file.method(name, descriptor).is_none(),
-                    // A parameter that names no type leaves it undecided.
-                    None => parameter_types.is_empty(),
-                }
-                && let Some(parameters) = parameter_types
-                    .iter()
-                    .map(|parameter| expect_ref(parameter).cloned())
-                    .collect::<Option<Vec<_>>>()
+            // `getMethod` searches the public methods of the class, its
+            // superclasses (to `Object`) and superinterfaces as the JDK does,
+            // so it finds the declaring class's method and never a private
+            // one; `getDeclaredMethod` the class's own methods of any access.
+            // Both take the most specific return type and never a
+            // constructor. A miss among held classes throws Java's
+            // exception; a search that leaves them keeps the lookup unread
+            // (its facts are counted).
+            if let Some(signature) = parameter_types
+                .iter()
+                .map(class_descriptor)
+                .collect::<Option<String>>()
             {
-                return Err(host_reflect::no_such_method(class, name, &parameters));
+                let parameters = format!("({signature})");
+                let found = if r.name == "getMethod" {
+                    self.method_lookup(class, name, &parameters)
+                } else {
+                    self.declared_method_lookup(class, name, &parameters)
+                };
+                match found {
+                    host_reflect::MethodLookup::Found(declaring, descriptor) => {
+                        return Ok(Some(self.reflected_method(
+                            &declaring,
+                            name,
+                            Some(&descriptor),
+                        )));
+                    }
+                    host_reflect::MethodLookup::Absent => {
+                        let parameters = parameter_types
+                            .iter()
+                            .filter_map(|parameter| expect_ref(parameter).cloned())
+                            .collect::<Vec<_>>();
+                        return Err(host_reflect::no_such_method(class, name, &parameters));
+                    }
+                    host_reflect::MethodLookup::Unknown => {}
+                }
             }
             return Ok(Some(self.reflected_method(
                 class,
@@ -21267,9 +21335,10 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 ("newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
                     if !self.has_class(class) {
-                        return Err(NativeError::MissingMethod(format!(
-                            "{class}#<init>{descriptor}"
-                        )));
+                        // A JDK or game constructor: the runtime has no body
+                        // to run (counted, answered neutral as any unmodelled
+                        // call).
+                        return self.host.unknown_operand_call(r).map(Some);
                     }
                     let arguments = StdHost::argument(r, args, 0)?;
                     let arguments = if matches!(arguments, Value::Ref(None)) {
@@ -21324,9 +21393,12 @@ impl<H: Host> Runtime<'_, H> {
                     let answer = self.host.invoke(&target, &invocation_args)?;
                     return reflected_return(self, descriptor, answer).map(Some);
                 }
-                return Err(NativeError::MissingMethod(format!("{owner}#{name}")));
+                // A JDK or game method the runtime has no body for: counted
+                // (answered neutral, as any unmodelled call), never a
+                // made-up answer.
+                return self.host.unknown_operand_call(r).map(Some);
             };
-            let target = class_file
+            let Some(target) = class_file
                 .methods
                 .iter()
                 .find(|candidate| {
@@ -21335,17 +21407,39 @@ impl<H: Host> Runtime<'_, H> {
                         && arg_count(&candidate.descriptor) == invocation_args.len()
                 })
                 .cloned()
-                .ok_or_else(|| NativeError::MissingMethod(format!("{owner}#{name}")))?;
+            else {
+                // A lookup the runtime could not settle (its method is in a
+                // class it does not hold): counted.
+                return self.host.unknown_operand_call(r).map(Some);
+            };
             let target_receiver = if target.is_static() {
                 None
             } else {
                 Some(StdHost::argument(r, args, 0)?.clone())
             };
+            // `Method.invoke` dispatches as `invokevirtual`/`invokeinterface`
+            // would: a static or private target runs its own body, any other
+            // the receiver class's override (its superclass chain, then the
+            // maximally specific default, `member_owner`). A selection that
+            // leaves the held classes is counted.
+            let receiver_class = target_receiver
+                .as_ref()
+                .and_then(|receiver| self.receiver_class(receiver))
+                .map(str::to_owned);
+            let owner = match receiver_class {
+                Some(class) if !target.is_static() && target.access & 0x0002 == 0 => {
+                    match self.member_owner(&class, &target.name, &target.descriptor) {
+                        Some((owner, true)) => owner,
+                        _ => return self.host.unknown_operand_call(r).map(Some),
+                    }
+                }
+                _ => owner.to_owned(),
+            };
             // `Object[]` hands boxed values to a primitive parameter, so unbox
             // against the target's own descriptor before the body reads it.
             let invocation_args = coerce_arguments(&target.descriptor, &invocation_args);
             let answer = self.invoke(
-                owner,
+                &owner,
                 &target.name,
                 &target.descriptor,
                 target_receiver,
