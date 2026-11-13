@@ -148,12 +148,12 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Err(class_cast_exception(&runtime_class, target));
         }
-        // A `stream/...` text that is no live stream is a jar `String`
-        // spelled like one (`stream_pipeline::stream_marker`): never a stream.
+        // A plain `String`, or a `stream/...` text that is no live stream (a
+        // jar `String` spelled like one), is never a stream: Java's CCE.
         if crate::stream_pipeline::is_stream_interface(target)
             && let Value::Ref(Some(text)) = value
-            && text.starts_with("stream/")
-            && !self.is_live_stream(text)
+            && (crate::value_class::is_plain_string(text)
+                || (text.starts_with("stream/") && !self.is_live_stream(text)))
         {
             return Err(class_cast_exception("java/lang/String", target));
         }
@@ -167,6 +167,11 @@ impl<H: Host> Runtime<'_, H> {
         let (verdict, runtime_class) = self.cast_verdict(value, target, target_is_interface);
         match verdict {
             Verdict::Yes => Ok(()),
+            // A stream's class is a pipeline stage's own, which the
+            // exception's message would name: counted, its marker never shown.
+            Verdict::No if expect_ref(value).is_some_and(|marker| self.is_live_stream(marker)) => {
+                self.count_cast(value, target)
+            }
             Verdict::No => Err(class_cast_exception(
                 runtime_class.as_deref().unwrap_or("java/lang/Object"),
                 target,

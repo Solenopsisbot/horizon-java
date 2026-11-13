@@ -9898,6 +9898,10 @@ fn java_value_text(value: &Value, desc: &str) -> String {
         Value::Long(value) => value.to_string(),
         Value::Float(value) if desc == "F" => format_java_float32(*value),
         Value::Float(value) => format_java_float(*value),
+        // A stream never prints its marker (`stream_pipeline.rs`).
+        Value::Ref(Some(value)) if stream_pipeline::is_stream_marker(value) => {
+            stream_pipeline::STREAM_TEXT.into()
+        }
         Value::Ref(Some(value)) => value.clone(),
         Value::Boxed(boxed) => boxed.text(),
         Value::Host(_) => host_text(value),
@@ -10717,6 +10721,10 @@ fn value_text(value: &Value) -> String {
             // instance method.
             if let Some(value) = value.strip_prefix("regex-pattern/") {
                 return value.to_owned();
+            }
+            // A stream never prints its marker (`stream_pipeline.rs`).
+            if stream_pipeline::is_stream_marker(value) {
+                return stream_pipeline::STREAM_TEXT.into();
             }
             value.clone()
         }
@@ -11620,7 +11628,12 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
         },
         Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
             // An object no model prints (a jar object, an identity hash)
-            // is counted; the element keeps its marker in the text.
+            // is counted; the element keeps its marker in the text. A
+            // stream is counted too, and never prints its marker.
+            if stream_pipeline::is_stream_marker(marker) {
+                let _ = host.unknown_host_call(&jar_text::object_to_string());
+                return stream_pipeline::STREAM_TEXT.into();
+            }
             if jar_text::object_marker_class(marker).is_some() {
                 let _ = host.unknown_host_call(&jar_text::object_to_string());
             }
@@ -18614,6 +18627,9 @@ fn predicate_marker_value(marker: &str) -> bool {
 /// [`composed_callback`] reads back.
 fn callback_text(value: &Value) -> Option<String> {
     match value {
+        // A jar `String` spelled like a handle's encoding is no callback, and
+        // never becomes the handle (`composed_callback`).
+        Value::Ref(Some(marker)) if HostRef::decode(marker).is_some() => None,
         Value::Ref(Some(marker)) => Some(marker.clone()),
         Value::Host(handle) => Some(handle.encode()),
         _ => None,

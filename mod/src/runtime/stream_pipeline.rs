@@ -319,6 +319,22 @@ pub(crate) fn stream_marker(class: &str, method: &str, n: usize) -> String {
     format!("stream/{class}/{method}/{n}~{tag:016x}")
 }
 
+/// Whether `text` has a stream marker's shape (`stream/...~<16 hex>`). A
+/// path that cannot ask the runtime whether a stream is live (the host's
+/// collection text) treats such a text as a stream: it is never printed,
+/// since a printed marker is a forgeable capability.
+pub(crate) fn is_stream_marker(text: &str) -> bool {
+    text.starts_with("stream/")
+        && text.rsplit_once('~').is_some_and(|(_, tag)| {
+            tag.len() == 16 && tag.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+}
+
+/// What a stream prints where its text is counted: Java's is the stage
+/// class and identity hash (`ReferencePipeline$Head@1b6d3586`), which no run
+/// reproduces; never the marker.
+pub(crate) const STREAM_TEXT: &str = "null";
+
 /// The stream interfaces a `String` never is.
 pub(crate) fn is_stream_interface(class: &str) -> bool {
     matches!(
