@@ -9890,6 +9890,10 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
         "org/slf4j/event/Level" => &["ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
         // The JDK's open options, checked by `Files`' writers (`open_options.rs`).
         "java/nio/file/StandardOpenOption" => open_options::STANDARD_OPEN_OPTIONS,
+        // `Collector.of`'s characteristics (`stream_pipeline.rs`).
+        "java/util/stream/Collector$Characteristics" => {
+            &["CONCURRENT", "UNORDERED", "IDENTITY_FINISH"]
+        }
         _ => return None,
     })
 }

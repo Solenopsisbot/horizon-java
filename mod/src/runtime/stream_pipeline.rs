@@ -203,6 +203,9 @@ pub(crate) struct Pipelines {
     /// `Stream.Builder`s: their elements, `None` once built.
     builders: BTreeMap<String, Option<Vec<Value>>>,
     next_builder: usize,
+    /// `Collector.of` collectors: supplier, accumulator, and the finisher
+    /// unless the collector is `IDENTITY_FINISH`.
+    collectors: BTreeMap<String, (Value, Value, Option<Value>)>,
     drives: BTreeMap<u64, Drive>,
     next_drive: u64,
 }
@@ -532,6 +535,9 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         if let Some(value) = self.stream_builder_call(r, receiver, args)? {
             return Ok(Some(value));
         }
+        if let Some(value) = self.collector_of(r, args)? {
+            return Ok(Some(value));
+        }
         if r.owner == "java/util/stream/Stream"
             && r.name == "concat"
             && r.descriptor
@@ -690,6 +696,28 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 best: None,
             },
             ("collect", _) if reference && args.len() == 3 => Terminal::Supply(arg(1), arg(0)),
+            // A `Collector.of` collector: `supplier` in `begin`, the
+            // accumulator per element, the finisher after the push.
+            ("collect", "(Ljava/util/stream/Collector;)Ljava/lang/Object;") => {
+                let Some((supplier, accumulator, finisher)) = expect_ref(&arg(0))
+                    .and_then(|marker| self.pipelines.collectors.get(marker))
+                    .cloned()
+                else {
+                    return Ok(None);
+                };
+                self.count_parallel(stream)?;
+                let Terminal::Container(_, container) =
+                    self.drive(stream, Terminal::Supply(accumulator, supplier), None)?
+                else {
+                    return Ok(Some(Value::Ref(None)));
+                };
+                return Ok(Some(match finisher {
+                    Some(finisher) => {
+                        self.call_sam("java/util/function/Function", &finisher, &[container])?
+                    }
+                    None => container,
+                }));
+            }
             _ => return Ok(None),
         };
         let callbacks: &[Value] = match &terminal {
@@ -1161,6 +1189,57 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             }
         }
         Ok(())
+    }
+
+    /// `Collector.of(supplier, accumulator, combiner[, finisher],
+    /// characteristics...)`: a collector `collect` runs per element. The
+    /// combiner is never called by a sequential stream.
+    fn collector_of(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "java/util/stream/Collector" || r.name != "of" {
+            return Ok(None);
+        }
+        let (supplier, accumulator, finisher, characteristics) = match args {
+            [supplier, accumulator, combiner, characteristics] => {
+                if *combiner == Value::Ref(None) {
+                    return Err(npe());
+                }
+                (supplier, accumulator, None, characteristics)
+            }
+            [supplier, accumulator, combiner, finisher, characteristics] => {
+                if *combiner == Value::Ref(None) || *finisher == Value::Ref(None) {
+                    return Err(npe());
+                }
+                (
+                    supplier,
+                    accumulator,
+                    Some(finisher.clone()),
+                    characteristics,
+                )
+            }
+            _ => return Ok(None),
+        };
+        if [supplier, accumulator, characteristics].contains(&&Value::Ref(None)) {
+            return Err(npe());
+        }
+        let identity = self.array(characteristics).is_ok_and(|values| {
+            values
+                .iter()
+                .any(|value| crate::runtime::value_text(value).ends_with("IDENTITY_FINISH"))
+        });
+        let marker = format!("collector/of/{}", self.pipelines.collectors.len());
+        self.pipelines.collectors.insert(
+            marker.clone(),
+            (
+                supplier.clone(),
+                accumulator.clone(),
+                finisher.filter(|_| !identity),
+            ),
+        );
+        Ok(Some(Value::Ref(Some(marker))))
     }
 
     /// `Stream.builder()` and the builder's `add`/`accept`/`build`.
