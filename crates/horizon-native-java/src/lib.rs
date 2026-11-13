@@ -68,7 +68,9 @@ mod hook_shapes;
 mod host_array;
 mod host_entry;
 mod host_events;
+mod host_executors;
 mod host_game_event;
+mod host_guava;
 mod host_ids;
 mod host_invoke;
 mod host_jdk;
@@ -78,6 +80,7 @@ mod host_path;
 mod host_ref;
 mod host_reflect;
 mod host_registry;
+mod host_services;
 mod host_watch;
 mod immutable_collections;
 mod iteration_guard;
@@ -4930,7 +4933,12 @@ impl Host for StdHost {
                 if !self.merged_service_providers(&service).is_empty()
                     || !host_models_class(&service)
                 {
-                    Ok(Value::Ref(Some(format!("service-loader/{service}"))))
+                    // The interpreter makes each load its own loader
+                    // (`service_loader.rs`); this host-only one shares its
+                    // iterator counter for a serial.
+                    let loader = host_services::loader(&service, self.next_iterator);
+                    self.next_iterator = self.next_iterator.saturating_add(1);
+                    Ok(loader)
                 } else {
                     Err(NativeError::Metadata(format!(
                         "java/util/ServiceLoader has no explicitly seeded providers for {service}; host classpath scanning is disabled"
@@ -7499,14 +7507,11 @@ impl Host for StdHost {
             }
         }
         if r.owner == "java/util/ServiceLoader$Provider" {
-            let marker = receiver_marker.as_deref().ok_or_else(|| {
-                NativeError::Metadata("malformed java/util/ServiceLoader$Provider marker".into())
-            })?;
             // The interpreter answers a provider (`service_loader.rs`); this
             // is the host's nominal fallback, the class name.
-            let Some((_, provider)) = service_loader::provider_parts(marker) else {
+            let Some((_, provider)) = host_services::provider_parts(receiver) else {
                 return Err(NativeError::Metadata(
-                    "unsupported java/util/ServiceLoader$Provider marker".into(),
+                    "unsupported java/util/ServiceLoader$Provider receiver".into(),
                 ));
             };
             return match (r.name.as_str(), r.descriptor.as_str()) {
@@ -7519,13 +7524,10 @@ impl Host for StdHost {
                 ))),
             };
         }
-        if r.owner == "java/util/ServiceLoader" {
-            let marker = receiver_marker.as_deref().ok_or_else(|| {
-                NativeError::Metadata("malformed java/util/ServiceLoader marker".into())
-            })?;
-            let service = service_loader::loader_service(marker).ok_or_else(|| {
-                NativeError::Metadata("unsupported java/util/ServiceLoader marker".into())
-            })?;
+        if r.owner == "java/util/ServiceLoader"
+            && let Some((service, _)) = host_services::loader_parts(receiver)
+        {
+            let service = service.as_str();
             if r.name == "iterator" && r.descriptor == "()Ljava/util/Iterator;" {
                 let providers = self.merged_service_providers(service);
                 if providers.is_empty() && host_models_class(service) {
@@ -31845,10 +31847,7 @@ mandatory = true
         let loader = host
             .invoke(&load, &[Value::Ref(Some("demo.Provider".into()))])
             .unwrap();
-        assert_eq!(
-            loader,
-            Value::Ref(Some("service-loader/demo/Provider".into()))
-        );
+        assert_eq!(loader, host_services::loader("demo/Provider", 0));
         let iterator = host
             .invoke_instance(
                 &MethodRef {
