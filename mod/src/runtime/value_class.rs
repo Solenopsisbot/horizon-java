@@ -39,7 +39,6 @@ const SEPARATOR_FREE_MARKERS: &[&str] = &[
     "method-handles-lookup",
     "guava-cache-builder",
     "mixin-environment",
-    "stack-walker",
 ];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
@@ -198,8 +197,9 @@ mod tests {
             // Spelled like the boxes once were; boxes are no longer text.
             "integer:5",
             "true",
-            // Spelled like a path once was (#156 P2).
+            // Spelled like a path and the stack walker once were (#156 P2).
             "path:/horizon/game",
+            "stack-walker",
         ] {
             assert!(is_plain_string(text), "{text:?} should be a string");
         }

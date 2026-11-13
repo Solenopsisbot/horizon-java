@@ -193,6 +193,18 @@ pub enum HostKind {
     /// An event a host caller dispatches or posts: key its cancelled flag and
     /// name.
     PostedEvent,
+    /// The thread callbacks run on (`host_jdk.rs`): key `main`.
+    Thread,
+    /// A logger: key `of_values([api, name])`.
+    Logger,
+    /// A `StackWalker`: key `""` for `getInstance()`'s, `options` otherwise.
+    StackWalker,
+    /// A `StackWalker.StackFrame` / `StackTraceElement` of a jar frame: key
+    /// `of_values([class, method])`.
+    StackFrame,
+    StackTraceElement,
+    /// A `java.lang.Module`: key `unnamed` or `java.base`.
+    Module,
 }
 
 /// How a kind's Java class follows from its key.
@@ -542,6 +554,50 @@ const KINDS: &[KindInfo] = &[
         },
         canonical: never_canonical,
         methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Thread,
+        tag: "thr",
+        class: ClassRule::FromKey(|_| "java/lang/Thread"),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_jdk::THREAD,
+    },
+    KindInfo {
+        kind: HostKind::Logger,
+        tag: "log",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_jdk::logger_declared,
+        },
+        canonical: crate::runtime::host_jdk::logger_canonical,
+        methods: &crate::runtime::host_jdk::LOGGER,
+    },
+    KindInfo {
+        kind: HostKind::StackWalker,
+        tag: "walker",
+        class: ClassRule::Fixed("java/lang/StackWalker"),
+        canonical: canonical_when_empty,
+        methods: &crate::runtime::host_jdk::STACK_WALKER,
+    },
+    KindInfo {
+        kind: HostKind::StackFrame,
+        tag: "frame",
+        class: ClassRule::Fixed("java/lang/StackFrameInfo"),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_jdk::STACK_FRAME,
+    },
+    KindInfo {
+        kind: HostKind::StackTraceElement,
+        tag: "ste",
+        class: ClassRule::FromKey(|_| "java/lang/StackTraceElement"),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_jdk::STACK_TRACE_ELEMENT,
+    },
+    KindInfo {
+        kind: HostKind::Module,
+        tag: "module",
+        class: ClassRule::Fixed("java/lang/Module"),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_jdk::MODULE,
     },
 ];
 

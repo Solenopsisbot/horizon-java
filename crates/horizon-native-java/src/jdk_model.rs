@@ -13,15 +13,17 @@
 //!   charsets every JVM must ship (`StandardCharsets`) are known; any other
 //!   name raises `UnsupportedCharsetException`, as a JVM without that charset
 //!   would.
-//! * `logger/<name>`: a log4j, slf4j, `java.util.logging` or Mojang
-//!   `LogUtils` logger. Nothing is written anywhere: every level reports
-//!   disabled and every logging call returns without effect, which is what a
-//!   logger configured to drop the mod's output does.
+//! * a logger (a `HostKind::Logger` handle, `host_jdk.rs`): log4j, slf4j,
+//!   `java.util.logging`, `System.Logger` or Mojang `LogUtils`. Nothing is
+//!   written anywhere: every level reports disabled and every logging call
+//!   returns without effect, which is what a logger configured to drop the
+//!   mod's output does.
 //!
 //! The module also answers `Path.resolveSibling`, which the host's path model
 //! lacked. Paths stay virtual (`host_path.rs`): no call in this file reads or
 //! writes the host filesystem.
 
+use crate::host_jdk::logger_value;
 use crate::{MethodRef, NativeError, Value, expect_ref, expect_string};
 
 /// The canonical names of the charsets `java.nio.charset.StandardCharsets`
@@ -37,15 +39,9 @@ const STANDARD_CHARSETS: &[(&str, &str)] = &[
 
 /// Prefix of a modelled `Charset` marker.
 const CHARSET_PREFIX: &str = "charset/";
-/// Prefix of a modelled logger marker.
-const LOGGER_PREFIX: &str = "logger/";
 
 fn charset_value(canonical: &str) -> Value {
     Value::Ref(Some(format!("{CHARSET_PREFIX}{canonical}")))
-}
-
-fn logger_value(name: &str) -> Value {
-    Value::Ref(Some(format!("{LOGGER_PREFIX}{name}")))
 }
 
 /// The canonical name `Charset.forName` resolves `name` to, matching the
@@ -79,12 +75,15 @@ fn is_logger_owner(owner: &str) -> bool {
     )
 }
 
-/// The logger name a factory argument names: a `String` as is, a `Class`
-/// marker (an internal name) as its binary name, and anything else as the
-/// root logger's empty name.
-fn logger_name(args: &[Value]) -> String {
+/// The logger name a factory argument names: a `String` as it is, a `Class`
+/// (an internal name, by the factory's declared parameter) as its binary
+/// name, and anything else as the root logger's empty name.
+fn logger_name(r: &MethodRef, args: &[Value]) -> String {
     match args.first() {
-        Some(Value::Ref(Some(text))) => text.replace('/', "."),
+        Some(Value::Ref(Some(text))) if r.descriptor.starts_with("(Ljava/lang/Class;") => {
+            text.replace('/', ".")
+        }
+        Some(Value::Ref(Some(text))) => text.clone(),
         _ => String::new(),
     }
 }
@@ -223,24 +222,31 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         ("org/apache/logging/log4j/LogManager", "getLogger" | "getFormatterLogger", descriptor)
             if descriptor.ends_with(")Lorg/apache/logging/log4j/Logger;") =>
         {
-            Some(Ok(logger_value(&logger_name(args))))
+            let api = if r.name == "getLogger" {
+                "log4j"
+            } else {
+                "log4j-formatter"
+            };
+            Some(Ok(logger_value(api, &logger_name(r, args))))
         }
-        ("org/apache/logging/log4j/LogManager", "getRootLogger", _) => Some(Ok(logger_value(""))),
+        ("org/apache/logging/log4j/LogManager", "getRootLogger", _) => {
+            Some(Ok(logger_value("log4j", "")))
+        }
         ("org/slf4j/LoggerFactory", "getLogger", descriptor)
             if descriptor.ends_with(")Lorg/slf4j/Logger;") =>
         {
-            Some(Ok(logger_value(&logger_name(args))))
+            Some(Ok(logger_value("slf4j", &logger_name(r, args))))
         }
         // Mojang's `LogUtils.getLogger()` names the caller's class through a
         // stack walk; the bounded runtime has no stack to walk, so the logger
         // is anonymous. Its name is never observable through a disabled logger.
         ("com/mojang/logging/LogUtils", "getLogger", "()Lorg/slf4j/Logger;") => {
-            Some(Ok(logger_value("")))
+            Some(Ok(logger_value("mojang", "")))
         }
         ("java/util/logging/Logger", "getLogger", descriptor)
             if descriptor.ends_with(")Ljava/util/logging/Logger;") =>
         {
-            Some(Ok(logger_value(&logger_name(args))))
+            Some(Ok(logger_value("jul", &logger_name(r, args))))
         }
         // `System.getLogger(String[, ResourceBundle])`: the JDK's
         // `System.Logger` is answered by the same disabled-logger model as
@@ -249,14 +255,11 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         ("java/lang/System", "getLogger", descriptor)
             if descriptor.ends_with(")Ljava/lang/System$Logger;") =>
         {
-            Some(Ok(logger_value(&logger_name(args))))
+            Some(Ok(logger_value("system", &logger_name(r, args))))
         }
-        ("java/util/logging/Logger", "getGlobal" | "getAnonymousLogger", _) => {
-            Some(Ok(logger_value(if r.name == "getGlobal" {
-                "global"
-            } else {
-                ""
-            })))
+        ("java/util/logging/Logger", "getGlobal", _) => Some(Ok(logger_value("jul", "global"))),
+        ("java/util/logging/Logger", "getAnonymousLogger", _) => {
+            Some(Ok(logger_value("jul-anonymous", "")))
         }
         // The single runtime object. `availableProcessors` and the memory
         // reads already answer on it (a single-threaded bounded runtime is one
@@ -366,14 +369,14 @@ pub(crate) fn instance_call(
         )
         .then(|| Ok(Value::Ref(Some(kind.to_owned()))));
     }
+    if let Some(name) = crate::host_jdk::logger_name(receiver)
+        && is_logger_owner(&r.owner)
+    {
+        return logger_call(r, &name);
+    }
     let marker = expect_ref(receiver)?;
     if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
         return charset_call(r, canonical, args);
-    }
-    if let Some(name) = marker.strip_prefix(LOGGER_PREFIX)
-        && (is_logger_owner(&r.owner) || r.owner == "java/lang/Object")
-    {
-        return logger_call(r, name);
     }
     if let Some(kind) = marker.strip_prefix("fabric-resource-loader/") {
         return match (r.name.as_str(), r.descriptor.as_str()) {
