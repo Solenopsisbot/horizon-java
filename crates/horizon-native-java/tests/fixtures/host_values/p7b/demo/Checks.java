@@ -35,8 +35,8 @@ public final class Checks {
   }
 
   /** Every check, in the order the runs take them. */
-  public static final String[] NAMES = {"ran", "nodes", "builders", "argumentTypes", "permissions", "spelled", "used",
-      "identities", "generic", "builderAsOther", "argumentTypeAsOther", "hashed", "nodeTwins", "nodeHash",
+  public static final String[] NAMES = {"ran", "nodes", "builders", "argumentTypes", "permissions", "spelled",
+      "identities", "generic", "builderAsOther", "argumentTypeAsOther", "hashed", "used", "nodeTwins", "nodeHash",
       "argumentNodeText", "nodeClass", "argumentTypeState", "permissionTwice", "sourceClass", "keptSourceName"};
   static int step;
 

@@ -10,8 +10,7 @@
 //!   target;
 //! - **throws** a catchable `java/lang/ClassCastException`: a value that cannot
 //!   be the target (a jar object of an unrelated jar class, a boxed number,
-//!   a collection, an optional, a JDK enum ..., a plain string cast to a JDK,
-//!   game or library type `String` does not implement);
+//!   a collection, an optional, a JDK enum ...);
 //! - **counted**: a value whose class the runtime cannot follow (a game
 //!   object, which a Mixin may make implement a jar interface; an opaque host
 //!   marker; a string the untyped runtime cannot tell from a marker). The cast
@@ -150,18 +149,8 @@ impl<H: Host> Runtime<'_, H> {
             return Err(class_cast_exception(&runtime_class, target));
         }
         let Some(target_file) = self.class(target) else {
-            // A plain string is a `String`, a final class: a cast to a type it
-            // does not implement throws, as `instanceof` already answers
-            // (`value_class.rs`). A string spelled like a retired marker
-            // (`brigadier/builder/0`) is no game or library object.
-            if let Value::Ref(Some(text)) = value
-                && crate::value_class::is_plain_string(text)
-                && !crate::value_class::STRING_TYPES.contains(&target)
-            {
-                return Err(class_cast_exception("java/lang/String", target));
-            }
-            // Any other JDK or game value: the runtime models those values by
-            // marker and keeps its previous behaviour.
+            // A JDK or game target: the runtime models those values by marker
+            // and keeps its previous behaviour.
             return Ok(());
         };
         let target_is_interface =

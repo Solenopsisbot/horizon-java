@@ -732,7 +732,11 @@ impl BrigadierState {
 
     /// The node a `then`/`redirect`/`addChild` argument names: a built node,
     /// or a builder (built at that call, as `then(ArgumentBuilder)` does).
-    fn node_of(&mut self, value: &Value) -> Result<usize, NativeError> {
+    ///
+    /// Anything else (a string spelled like an old marker, a jar's own
+    /// `CommandNode` subclass) is not modelled: the call `r` is refused as an
+    /// unmodelled one, which `brigadier_call` counts.
+    fn node_of(&mut self, value: &Value, r: &MethodRef) -> Result<usize, NativeError> {
         if let Some(id) = handles::node_id(value).filter(|&id| id < self.nodes.len()) {
             return Ok(id);
         }
@@ -742,10 +746,7 @@ impl BrigadierState {
         if handles::is(value, HostKind::BrigadierDispatcher) {
             return self.root();
         }
-        Err(NativeError::Metadata(format!(
-            "brigadier: {} is not a command node",
-            expect_string(value)
-        )))
+        Err(NativeError::UnknownHostCall(r.clone()))
     }
 
     /// The requirement a `requires(predicate)` argument stands for.
@@ -1474,6 +1475,7 @@ impl StdHost {
                 let built = self.brigadier.node_of(
                     args.first()
                         .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?,
+                    r,
                 )?;
                 let root = self.brigadier.root()?;
                 self.brigadier.add_child(root, built, 0)?;
@@ -1512,12 +1514,20 @@ impl StdHost {
                         frame: None,
                     });
                 }
-                let child = self.brigadier.node_of(first.ok_or_else(unknown)?)?;
+                let child = self.brigadier.node_of(first.ok_or_else(unknown)?, r)?;
                 self.brigadier.add_child(builder.arguments, child, 0)?;
                 Ok(receiver.clone())
             }
             "executes" | "requires" | "suggests" | "redirect" | "fork" | "forward" => {
                 let value = first.cloned().unwrap_or(Value::Ref(None));
+                // A plain string is no `Command`, `Predicate` or provider:
+                // not modelled (a string spelled `brigadier/requires/0` is
+                // no level check), refused and counted.
+                if let Value::Ref(Some(text)) = &value
+                    && crate::value_class::is_plain_string(text)
+                {
+                    return Err(unknown());
+                }
                 let target = match r.name.as_str() {
                     "redirect" | "fork" | "forward" => {
                         if !self.brigadier.nodes[builder.arguments].children.is_empty() {
@@ -1527,7 +1537,7 @@ impl StdHost {
                                 frame: None,
                             });
                         }
-                        Some(self.brigadier.node_of(&value)?)
+                        Some(self.brigadier.node_of(&value, r)?)
                     }
                     _ => None,
                 };
@@ -1614,7 +1624,7 @@ impl StdHost {
                 .map_or(Value::Ref(None), |id| self.brigadier.node_value(id))),
             "isFork" => Ok(Value::Int(i32::from(node.modifier))),
             "addChild" => {
-                let child = self.brigadier.node_of(args.first().ok_or_else(unknown)?)?;
+                let child = self.brigadier.node_of(args.first().ok_or_else(unknown)?, r)?;
                 self.brigadier.add_child(id, child, 0)?;
                 Ok(Value::Void)
             }
