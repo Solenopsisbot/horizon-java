@@ -46,6 +46,27 @@
 use crate::runtime::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, Nested};
 use crate::runtime::{NativeError, Value};
 
+/// Whether `class` (the part of a `class#n` text before the `#`) names an
+/// object the runtime now holds only as a handle: an array (`[I#0`) or a
+/// `ColorCollection` (`color-collection#0`). No such text is an object any
+/// more, so it is a `String` (until P17 retires the text classifiers).
+pub(crate) fn handle_only_class(class: &str) -> bool {
+    class.starts_with('[') || class == "color-collection"
+}
+
+/// Whether `text` is an array class in descriptor form (`[I`, `[[Ljava/lang/String;`).
+pub(crate) fn is_array_descriptor(text: &str) -> bool {
+    let element = text.trim_start_matches('[');
+    if element.len() == text.len() {
+        return false;
+    }
+    matches!(element, "Z" | "B" | "C" | "S" | "I" | "J" | "F" | "D")
+        || element
+            .strip_prefix('L')
+            .and_then(|name| name.strip_suffix(';'))
+            .is_some_and(|name| !name.is_empty() && !name.contains(['[', ';']))
+}
+
 /// The suffix of [`shared_empty`]'s key.
 const SHARED_EMPTY: &str = "empty";
 
@@ -123,17 +144,29 @@ fn equals(
 /// `Cloneable` and `Serializable`, and to another array class when its
 /// components are (JLS 4.10.3: `String[]` is an `Object[]`, `int[]` is not).
 fn instance_of(handle: &HostRef, wanted: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
-    let wanted = if wanted.starts_with('[') {
-        wanted.to_owned()
-    } else {
-        format!("L{wanted};")
-    };
-    let answer = assignable(handle.class(), &wanted, hierarchy);
+    let answer = class_assignable(handle.class(), wanted, hierarchy);
     if is_shared_empty(handle.key()) {
         // Only the declared type is known, not the exact class.
         return answer.filter(|fits| *fits);
     }
     answer
+}
+
+/// Whether an object of class `class` is a `wanted` (each an internal name
+/// or an array descriptor), `None` where the hierarchy cannot tell.
+pub(crate) fn class_assignable(
+    class: &str,
+    wanted: &str,
+    hierarchy: &dyn ClassHierarchy,
+) -> Option<bool> {
+    let descriptor = |name: &str| {
+        if name.starts_with('[') {
+            name.to_owned()
+        } else {
+            format!("L{name};")
+        }
+    };
+    assignable(&descriptor(class), &descriptor(wanted), hierarchy)
 }
 
 /// Whether a value of field descriptor `from` is a `to`, `None` where the
@@ -218,6 +251,61 @@ mod tests {
                 "{} instanceof {wanted}",
                 handle.class()
             );
+        }
+    }
+
+    /// A key holds a jar's class name, which may contain any character but
+    /// `.;[/` (JVMS 4.2.1): `#`, `,`, `\\`, `:`, `empty`, digits. Each key reads
+    /// back as its own class, never a shared empty, never another array's
+    /// key, and round-trips through a list of markers (a collection, a
+    /// capture) as the same handle.
+    #[test]
+    fn class_names_with_every_separator_never_alias() {
+        let names = [
+            "demo/A",
+            "demo/A#1",
+            "demo/A#empty",
+            "demo/A,1",
+            "demo/A\\",
+            "demo/A:I:25#0",
+            "demo/#",
+            "demo/A#1#2",
+            "demo/empty",
+            "demo/h:arr",
+            "demo/A\\,#3",
+        ];
+        let mut keys = std::collections::BTreeSet::new();
+        for (index, name) in names.iter().enumerate() {
+            for class in [format!("[L{name};"), format!("[[L{name};")] {
+                for number in [0, 1, 12, index as u64] {
+                    let key = key(&class, number);
+                    assert_eq!(class_of_key(&key), class, "{key}");
+                    assert!(!is_shared_empty(&key), "{key}");
+                    assert!(keys.insert(key.clone()) || number == index as u64, "{key}");
+                    let value = handle(key.clone());
+                    let list = [value.clone(), Value::Ref(Some(key.clone()))]
+                        .iter()
+                        .map(crate::runtime::value_marker)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let back = crate::runtime::split_capture_markers(&list)
+                        .unwrap()
+                        .iter()
+                        .map(|marker| crate::runtime::parse_value_marker(marker).unwrap())
+                        .collect::<Vec<_>>();
+                    // The handle comes back as the same array; the string
+                    // spelled like its key stays a string.
+                    assert_eq!(back, vec![value, Value::Ref(Some(key.clone()))]);
+                    assert_eq!(array_key(&back[0]), Some(key.as_str()));
+                    assert_eq!(array_key(&back[1]), None);
+                }
+            }
+            let empty = shared_empty(&format!("[L{name};"));
+            assert_eq!(
+                array_key(&empty).map(class_of_key),
+                Some(format!("[L{name};").as_str())
+            );
+            assert!(array_key(&empty).is_some_and(is_shared_empty));
         }
     }
 

@@ -855,7 +855,8 @@ pub(crate) fn platform_instance_of(marker: &str, wanted: &str) -> bool {
     let Some((class, _)) = marker.split_once('#') else {
         return false;
     };
-    class_instance_of(class, wanted)
+    // `[I#0` is a string: arrays are handles (`host_array.rs`).
+    !crate::runtime::host_array::handle_only_class(class) && class_instance_of(class, wanted)
 }
 
 /// Whether an instance of the platform class `class` is a `wanted`.
@@ -945,7 +946,10 @@ pub(crate) fn class_access_flags(file: &crate::runtime::ClassFile) -> Option<u16
 /// (`owner/Class#n`), as opposed to string text.
 fn is_object_marker(marker: &str) -> bool {
     marker.rsplit_once('#').is_some_and(|(class, number)| {
-        class.contains('/') && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+        class.contains('/')
+            && !crate::runtime::host_array::handle_only_class(class)
+            && !number.is_empty()
+            && number.bytes().all(|b| b.is_ascii_digit())
     })
 }
 

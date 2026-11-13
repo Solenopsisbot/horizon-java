@@ -16,6 +16,7 @@ use std::{
 mod annotation_values;
 mod array_copy;
 mod array_deque;
+mod array_store;
 mod attachment_codec;
 mod block_item_id;
 mod boxed;
@@ -9628,6 +9629,10 @@ fn class_of_value(value: &Value) -> Option<String> {
         Value::Ref(None) => None,
         Value::Ref(Some(marker)) => {
             if let Some((class, _)) = marker.split_once('#') {
+                // A text `#` in a string (`#ff0000`, `[I#0`) names no class.
+                if value_class::is_plain_string(marker) {
+                    return Some("java/lang/String".into());
+                }
                 return Some(class.to_owned());
             }
             let class = if marker.starts_with("string-builder/") {
@@ -20457,6 +20462,11 @@ impl<H: Host> Runtime<'_, H> {
         if wanted == "java/lang/Object" {
             return true;
         }
+        // Every array is a handle (`host_array.rs`): a reference read as text
+        // is never one, however it is spelled (`"[I#0"`).
+        if wanted.starts_with('[') {
+            return false;
+        }
         if generic_type_instance_of(marker, wanted) {
             return true;
         }
@@ -20633,6 +20643,19 @@ impl<H: Host> Runtime<'_, H> {
                         None => return Ok(None),
                     }
                 };
+                // A `newType` the original's component is not a subtype of:
+                // `System.arraycopy` checks each element (`array_store.rs`).
+                if let (Some(source), Some(component)) = (
+                    value_class::array_component(StdHost::argument(r, args, 0)?),
+                    value_class::component_of_array_class(&class),
+                ) && host_array::class_assignable(&source, &component, self) != Some(true)
+                    && self.first_misfit(&class, &component, &values)?.is_some()
+                {
+                    return match self.arraycopy_store_exception(&source, &component) {
+                        Some(error) => Err(error),
+                        None => self.host.unknown_operand_call(r).map(Some),
+                    };
+                }
                 Ok(Some(self.new_array_value(&class, values)))
             }
             ("fill", descriptor) if descriptor.starts_with('[') => {
@@ -24558,6 +24581,11 @@ impl<H: Host> Runtime<'_, H> {
                             Err(array_index_out_of_bounds(index, length))
                         }
                     );
+                    // `aastore` checks the value against the component
+                    // (`array_store.rs`).
+                    if op == 0x53 {
+                        invoke_or_catch!(at, self.check_array_store(&array, &value));
+                    }
                     let values = self.arrays.get_mut(marker).ok_or_else(|| {
                         NativeError::Metadata("array is not owned by this invocation".into())
                     })?;
@@ -24625,15 +24653,17 @@ impl<H: Host> Runtime<'_, H> {
                     // A box the runtime keeps unboxed (`Double.valueOf`
                     // answers a `Float` value) is still a reference here.
                     let unboxed = self.library_instance_of(&value, &wanted);
+                    // Only a handle is an array (`host_array.rs`).
                     let matches = unboxed
-                        || expect_ref(&value).is_some_and(|marker| {
-                            self.object_is_instance_of(marker, &wanted)
-                                || self.host.host_instance_of(marker, &wanted)
-                                || jdk_model::platform_instance_of(marker, &wanted)
-                                || generic_type_instance_of(marker, &wanted)
-                                || (wanted == "java/lang/Class"
-                                    && class_marker_like(marker, self.classes, &self.linked))
-                        });
+                        || !wanted.starts_with('[')
+                            && expect_ref(&value).is_some_and(|marker| {
+                                self.object_is_instance_of(marker, &wanted)
+                                    || self.host.host_instance_of(marker, &wanted)
+                                    || jdk_model::platform_instance_of(marker, &wanted)
+                                    || generic_type_instance_of(marker, &wanted)
+                                    || (wanted == "java/lang/Class"
+                                        && class_marker_like(marker, self.classes, &self.linked))
+                            });
                     // A `false` no model can stand behind is counted
                     // (`checkcast.rs`), and the host's answer is the result.
                     let matches = if !matches && self.instance_of_is_guess(&value, &wanted) {

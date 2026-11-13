@@ -190,6 +190,16 @@ pub(crate) fn natural_compare(a: &Value, b: &Value) -> Result<i32, NativeError> 
             }
         }
     }
+    // `((Comparable) a).compareTo(b)`: a handle whose kind is known not to
+    // be `Comparable` (an array) fails the cast, as `ComparableTimSort` does.
+    if let Value::Host(handle) = a
+        && handle.instance_of("java/lang/Comparable", &crate::host_ref::JdkHierarchy) == Some(false)
+    {
+        return Err(crate::checkcast::class_cast_exception(
+            handle.class(),
+            "java/lang/Comparable",
+        ));
+    }
     Err(NativeError::Metadata(format!(
         "natural order of {} and {} is not modelled",
         super::describe_value(a),

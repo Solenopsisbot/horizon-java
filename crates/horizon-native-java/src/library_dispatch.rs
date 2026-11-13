@@ -473,6 +473,10 @@ impl<H: Host> Runtime<'_, H> {
         if let Value::Host(handle) = value {
             return handle.instance_of(wanted, self) == Some(true);
         }
+        // Every array is a handle: no other value is one, however spelled.
+        if wanted.starts_with('[') {
+            return false;
+        }
         unboxed_instance_of(value, wanted)
             || expect_ref(value).is_some_and(|marker| {
                 self.proxy_instance_of(marker, wanted)
@@ -1050,6 +1054,34 @@ impl<H: Host> Runtime<'_, H> {
                 None => return Ok(None),
             },
         };
+        // Each element is stored into a `T[]` (`array_store.rs`).
+        // `ArrayList.toArray(a)` copies its `Object[]` with
+        // `System.arraycopy`: into `a` itself, up to the first element that
+        // does not fit, when `a` is large enough. Another collection's
+        // message and partial writes are its own: counted.
+        if let Some(component) = value_class::component_of_array_class(&class)
+            && let Some(misfit) = self.first_misfit(&class, &component, &values)?
+        {
+            let array_list = expect_ref(receiver)
+                .and_then(|marker| crate::jar_text::object_marker_class(marker))
+                == Some("java/util/ArrayList");
+            let error = array_list
+                .then(|| self.arraycopy_store_exception("java/lang/Object", &component))
+                .flatten();
+            let Some(error) = error else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
+            if let Some(target) = &target
+                && let Some(slots) =
+                    host_array::array_key(target).and_then(|key| self.arrays.get_mut(key))
+                && slots.len() >= values.len()
+            {
+                for (slot, value) in slots.iter_mut().zip(&values[..misfit]) {
+                    *slot = value.clone();
+                }
+            }
+            return Err(error);
+        }
         // `toArray(T[] a)` fills `a` when it is large enough and nulls the
         // slot after the last element, as the JDK's `AbstractCollection` does;
         // otherwise it answers a new array of `a`'s class.

@@ -3,9 +3,12 @@
 //! An array used to be marker text (`array/<class>/<method>/<n>`, and one
 //! shared `array/empty`), the same `Value::Ref` a Java `String` is. Every
 //! expected string is what this class printed on Java 25 (OpenJDK 25.0.5,
-//! `javac --release 21`, two runs alike). An array's own `toString` and
-//! `hashCode` are identity based (`[I@1b6d3586`): Java defines no value for
-//! them, so the fixture checks only what Java does define about them.
+//! `javac --release 21`, two runs alike). Each method is either answered
+//! exactly as Java 25 does, uncounted ([`EXACT`]), or counted with exactly
+//! the calls [`COUNTED`] names: an array's own `toString`/`hashCode` are its
+//! identity hash, which Java leaves to the VM, and the `Arrays` content
+//! helpers are not modelled yet. A counted method that starts matching Java
+//! moves to [`EXACT`].
 
 use horizon_native_java::{NativeJar, StdHost, Value};
 use std::{fs, io::Write, path::PathBuf, process::Command};
@@ -19,14 +22,16 @@ import java.util.*;
 public final class ArrayValues {
   /** Strings spelled like the arrays' old markers, or a handle's text form, stay Strings. */
   public static String spelled() {
-    Object[] texts = {"array/empty", "array/demo/ArrayValues/spelled/0", "array/java/lang/String/args/0", "harr:[I#0", "harr:[Ljava/lang/String;#3"};
+    Object[] texts = {"array/empty", "array/demo/ArrayValues/spelled/0", "array/java/lang/String/args/0", "harr:[I#0",
+        "harr:[Ljava/lang/String;#3", "[I#0", "[Ljava/lang/String;#2", "[[I#7", "[I#empty", "color-collection#0"};
     StringBuilder out = new StringBuilder();
     for (Object t : texts) {
-      out.append(t instanceof Object[]).append(t instanceof int[]).append(t instanceof Cloneable)
+      out.append(t instanceof String).append(t instanceof CharSequence).append(t.getClass().getName())
+          .append(t instanceof Object[]).append(t instanceof int[]).append(t instanceof Cloneable)
           .append(t.equals(new int[0])).append(Objects.equals(t, String.valueOf(t)))
-          .append(t.equals(t.toString())).append(t.toString().length())
-          // `word/rest` text is still classified by is_plain_string (#156 P17).
-          .append(t.toString().contains("/") ? "" : String.valueOf(t.hashCode())).append(',');
+          .append(t.equals(t.toString())).append(t.toString().length()).append(t.hashCode())
+          .append(sw(t)).append(castInts(t).startsWith("class java.lang.String cannot be cast to class [I ("))
+          .append(int[].class.isInstance(t)).append(',');
     }
     int[] real = {5};
     List<Object> list = new ArrayList<>(List.of("harr:[I#0", real));
@@ -40,6 +45,16 @@ public final class ArrayValues {
         .append('|').append(castObjects("harr:[Ljava/lang/String;#3"))
         .append('|').append(Arrays.hashCode(new Object[] {"harr:[I#0", "x"}));
     return out.toString();
+  }
+
+  /** A type switch over arrays and strings. */
+  static String sw(Object o) {
+    return switch (o) {
+      case String s -> "string:" + s.length();
+      case int[] a -> "ints:" + a.length;
+      case Object[] a -> "objects:" + a.length;
+      default -> "other";
+    };
   }
 
   static String castInts(Object o) {
@@ -76,23 +91,113 @@ public final class ArrayValues {
         + "|" + Arrays.hashCode(s) + Arrays.hashCode((Object[]) null);
   }
 
-  /** The content-based Arrays helpers. */
-  public static String helpers() {
+  /** The content-based Arrays helpers, one call each. */
+  static final int[] A = {1, 2, 3};
+  static final String[] S = {"x", null, "z"};
+  static final double[] D = {1.5, -0.0, Double.NaN};
+  static final int[][] GRID = {{1, 2}, {3}};
+  public static String helperToStringInts() { return Arrays.toString(A); }
+  public static String helperToStringStrings() { return Arrays.toString(S); }
+  public static String helperToStringDoubles() { return Arrays.toString(D); }
+  public static String helperDeepToString() { return Arrays.deepToString(GRID); }
+  public static String helperHashCodeInts() { return "" + Arrays.hashCode(A); }
+  public static String helperHashCodeDoubles() { return "" + Arrays.hashCode(D); }
+  public static String helperDeepHashCode() { return "" + Arrays.deepHashCode(GRID); }
+  public static String helperEqualsInts() { return "" + Arrays.equals(A, new int[] {1, 2, 3}); }
+  public static String helperEqualsStrings() { return "" + Arrays.equals(S, new String[] {"x", null, "z"}); }
+  public static String helperEqualsDoubles() { return "" + Arrays.equals(D, new double[] {1.5, 0.0, Double.NaN}); }
+  public static String helperDeepEquals() { return "" + Arrays.deepEquals(GRID, new int[][] {{1, 2}, {3}}); }
+
+  /** Sorting arrays of arrays with a comparator, finding them in lists; type switches and Class.isInstance. */
+  public static String sorted() {
     int[] a = {1, 2, 3};
-    String[] s = {"x", null, "z"};
-    long[] l = {1L, -2L};
-    double[] d = {1.5, -0.0, Double.NaN};
-    char[] c = {'h', 'i'};
-    boolean[] z = {true, false};
-    int[][] grid = {{1, 2}, {3}};
-    Object[] mixed = {a, s, "q", 4};
-    return Arrays.toString(a) + Arrays.toString(s) + Arrays.toString(l) + Arrays.toString(d) + Arrays.toString(c)
-        + Arrays.toString(z) + Arrays.deepToString(grid) + Arrays.deepToString(mixed) + Arrays.toString((int[]) null)
-        + "|" + Arrays.hashCode(a) + "," + Arrays.hashCode(l) + "," + Arrays.hashCode(d)
-        + "," + Arrays.hashCode(c) + "," + Arrays.hashCode(z) + "," + Arrays.deepHashCode(grid) + "," + Arrays.hashCode((int[]) null)
-        + "|" + Arrays.equals(a, new int[] {1, 2, 3}) + Arrays.equals(a, new int[] {1, 2}) + Arrays.equals(s, new String[] {"x", null, "z"})
-        + Arrays.equals(d, new double[] {1.5, 0.0, Double.NaN}) + Arrays.equals(d, new double[] {1.5, -0.0, Double.NaN})
-        + Arrays.deepEquals(grid, new int[][] {{1, 2}, {3}}) + Arrays.equals(grid, new int[][] {{1, 2}, {3}});
+    int[] b = {4};
+    List<int[]> list = new ArrayList<>(List.of(a, b));
+    list.sort(Comparator.comparingInt(x -> x.length));
+    List<int[]> sorted = List.of(a, b).stream().sorted(Comparator.comparingInt(x -> -x.length)).toList();
+    return "" + (list.get(0) == b) + (list.get(1) == a) + (sorted.get(0) == a) + list.indexOf(a) + List.of(a, b).contains(b)
+        + List.of(a).indexOf(b) + sw(a) + sw(new String[2]) + sw(new int[0][]) + sw(new long[1])
+        + int[].class.isInstance(a) + Object[].class.isInstance(new String[0]) + Object[].class.isInstance(a);
+  }
+
+  /** Natural ordering of arrays: an array is no Comparable. */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public static String naturalOrder() {
+    List<Object> list = new ArrayList<>(List.of(new int[] {2}, new int[] {1}));
+    try { Collections.sort((List) list); return "sorted"; } catch (ClassCastException e) { return e.getMessage(); }
+  }
+
+  /** A store into an array checks the value's class. */
+  interface Store { void run() throws Exception; }
+  static class Base {}
+  static class Sub extends Base {}
+  static String store(Store r) {
+    try { r.run(); return "ok"; } catch (Exception e) { return e.getClass().getSimpleName() + ":" + e.getMessage(); }
+  }
+  public static String stores() {
+    String[] big = {"p", "q", "r"};
+    return store(() -> { Object[] x = new String[1]; x[0] = 1; })
+        + "|" + store(() -> { Object[] x = new Integer[1]; x[0] = "s"; })
+        + "|" + store(() -> { Object[] x = new int[1][]; x[0] = new long[1]; })
+        + "|" + store(() -> { Object[] x = new Sub[1]; x[0] = new Base(); })
+        + "|" + store(() -> { Object[] x = new Base[1]; x[0] = new Sub(); })
+        + "|" + store(() -> { Object[] x = new CharSequence[1]; x[0] = "s"; x[0] = 1; })
+        + "|" + store(() -> { Object[] x = new String[1][]; x[0] = new Object[0]; })
+        + "|" + store(() -> { Object[] x = new Object[1][]; x[0] = new String[0]; x[0] = new int[0]; })
+        + "|" + store(() -> { Object[] x = new Cloneable[1]; x[0] = new int[0]; x[0] = "s"; })
+        + "|" + store(() -> { Object[] x = new String[2]; x[0] = null; x[1] = "t"; })
+        + "|" + store(() -> { Object unused = new ArrayList<Object>(List.of(1)).toArray(new String[0]); })
+        + "|" + store(() -> { new ArrayList<Object>(List.of("a", 1)).toArray(big); }) + big[0] + big[1] + big[2]
+        + "|" + store(() -> { Object unused = new ArrayList<Object>(List.of(1)).toArray(String[]::new); })
+        + "|" + store(() -> { Object unused = Arrays.copyOf(new Object[] {1}, 1, String[].class); })
+        + "|" + store(() -> { Object unused = Arrays.copyOf(new Integer[] {1}, 1, String[].class); })
+        + "|" + store(() -> { Object unused = Arrays.copyOfRange(new Object[] {"a", 1}, 0, 2, String[].class); })
+        + "|" + store(() -> { Object unused = Arrays.copyOf(new int[][] {{1}}, 1, long[][].class); })
+        + "|" + store(() -> { Object unused = Arrays.copyOf(new CharSequence[] {"a"}, 1, Integer[].class); })
+        + "|" + store(() -> { Object unused = Arrays.copyOf(new Number[] {1.5}, 1, Integer[].class); })
+        + "|" + store(() -> { Object unused = Arrays.copyOf(new String[] {"a"}, 1, CharSequence[].class); })
+        + "|" + Arrays.copyOf(new Object[] {"a"}, 1, String[].class)[0]
+        + new ArrayList<Object>(List.of("b")).toArray(new String[0])[0];
+  }
+
+  /** Lambdas, method references and enum constants into arrays of a jar interface and enum. */
+  interface Hint { void set(int x); static Hint of(Runnable r) { return x -> r.run(); } }
+  enum Mode { A, B }
+  static final Hint HINT = Hint.of(() -> {});
+  public static String storeLambdas() {
+    java.util.function.IntConsumer c = Integer::valueOf;
+    Hint[] hints = {HINT, x -> {}, c::accept, new Hint() { public void set(int x) {} }};
+    Mode[] modes = {Mode.B, Mode.A};
+    Object[] objects = hints;
+    objects[1] = HINT;
+    return "" + hints.length + (hints[1] == HINT) + modes[0] + Mode.values().length;
+  }
+
+  /** A cast of an unmodelled call's array to a narrower array class: counted, its descriptor an array's. */
+  public static String castUnmodelled() {
+    Object signers = String.class.getSigners();
+    String[] strings = (String[]) signers;
+    return "" + (strings == null);
+  }
+
+  /** A store of a value whose class the runtime does not know (the current thread) into an array of a jar class. */
+  public static String storeUnknown() {
+    Object thread = Thread.currentThread();
+    return store(() -> { Object[] x = new Base[1]; x[0] = thread; });
+  }
+
+  /** Class objects (still text in the runtime) into Class[] and Type[]. */
+  public static String storeClasses() {
+    Class<?>[] classes = {int.class, String.class, ArrayValues.class};
+    java.lang.reflect.Type[] types = {long.class};
+    Object[] objects = classes;
+    objects[1] = boolean.class;
+    return classes[0].getName() + classes[1].getName() + types.length;
+  }
+
+  /** Another collection's toArray store failure (its message and partial writes are its own). */
+  public static String storeOtherCollection() {
+    return store(() -> { Object unused = new HashSet<Object>(List.of(1)).toArray(new String[0]); });
   }
 
   /** Arrays held by collections stay the same object; an equal copy is another. */
@@ -141,15 +246,11 @@ public final class ArrayValues {
     return "" + (Thread.currentThread().getStackTrace() == Thread.currentThread().getStackTrace());
   }
 
-  /** An array's own toString and hashCode are identity-based. */
-  public static String identityText() {
-    int[] a = {1};
-    String[] s = {"x"};
-    String text = a.toString();
-    String strings = String.valueOf((Object) s);
-    return (text != null && text.startsWith("[I@")) + "," + (strings != null && strings.startsWith("[Ljava.lang.String;@")) + ","
-        + (a.hashCode() == System.identityHashCode(a)) + "," + (a.hashCode() == a.hashCode()) + "," + (text != null && text.equals("" + a));
-  }
+  /** An array's own toString and hashCode are identity based: one call each. */
+  public static String arrayToString() { int[] a = {1}; String t = a.toString(); return "" + (t != null && t.startsWith("[I@")); }
+  public static String arrayConcat() { String[] s = {"x"}; return "" + ("" + s).startsWith("[Ljava.lang.String;@"); }
+  public static String arrayHashCode() { int[] a = {1}; return "" + (a.hashCode() == a.hashCode()); }
+  public static String arrayIdentityHash() { int[] a = {1}; return "" + (System.identityHashCode(a) == System.identityHashCode(a)); }
 }
 "#;
 
@@ -208,84 +309,221 @@ fn run(jar: &NativeJar, name: &str) -> (Value, Vec<(String, usize)>) {
     (value, host.unknown_host_calls())
 }
 
-const IF_ACMP: &str = "java/lang/Object#if_acmp(Ljava/lang/Object;Ljava/lang/Object;)Z";
+/// The methods answered exactly as Java 25 does, with nothing counted.
+const EXACT: &[(&str, &str)] = &[
+    // Strings spelled like the old markers (`array/...`), the handle text form (`harr:...`) and the new keys (`[I#0`, `color-collection#0`) are Strings: `instanceof String`, `getClass`, `equals`, `hashCode`, a type switch, a cast to `int[]`, `int[].class.isInstance`, list elements and `HashMap` keys.
+    (
+        "spelled",
+        "truetruejava.lang.Stringfalsefalsefalsefalsetruetrue11-319826409string:11truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue321513487838string:32truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue29553930770string:29truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue9-326518244string:9truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue26-1057508844string:26truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue42782267string:4truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue21759994836string:21truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue586822685string:5truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue81143864280string:8truefalse,truetruejava.lang.Stringfalsefalsefalsefalsetruetrue1817748405string:18truefalse,harr:[I#0truefalsetruetruetrue|2hr|array/emptyharr:[I#0|class java.lang.String cannot be cast to class [I (java.lang.String and [I are in module java.base of loader 'bootstrap')|class java.lang.String cannot be cast to class [Ljava.lang.Object; (java.lang.String and [Ljava.lang.Object; are in module java.base of loader 'bootstrap')|-1532129891",
+    ),
+    // Array classes, component types, JLS array `instanceof`, casts with Java's exact `ClassCastException` text, `equals`, clones, lengths, `Arrays.asList`, `Arrays.hashCode(Object[])`.
+    (
+        "real",
+        "[I[Ljava.lang.String;[[I[J[Ljava.lang.Object;|int,java.lang.String|truetruetruetruefalsetruefalsetruetruefalsefalse|class [Ljava.lang.Object; cannot be cast to class [Ljava.lang.String; ([Ljava.lang.Object; and [Ljava.lang.String; are in module java.base of loader 'bootstrap')|ok3|class [J cannot be cast to class [I ([J and [I are in module java.base of loader 'bootstrap')|class [I cannot be cast to class java.lang.String ([I and java.lang.String are in module java.base of loader 'bootstrap')|ok2|class [Ljava.lang.Object; cannot be cast to class [Ljava.lang.String; ([Ljava.lang.Object; and [Ljava.lang.String; are in module java.base of loader 'bootstrap')|class [I cannot be cast to class [Ljava.lang.Object; ([I and [Ljava.lang.Object; are in module java.base of loader 'bootstrap')|truefalsetruefalse|3[I331[x, null, z]3|1452330",
+    ),
+    // `List.sort`/`sorted()` with a comparator, `indexOf`/`contains` in host lists, type switches and `Class.isInstance` on arrays.
+    (
+        "sorted",
+        "truetruetrue1true-1ints:3objects:2objects:0othertruetruefalse",
+    ),
+    // An array is no `Comparable`: natural ordering throws Java's `ClassCastException`.
+    (
+        "naturalOrder",
+        "class [I cannot be cast to class java.lang.Comparable ([I and java.lang.Comparable are in module java.base of loader 'bootstrap')",
+    ),
+    // `aastore` into a typed array, `ArrayList.toArray(T[])` (with its partial copy) and `Arrays.copyOf(.., newType)` throw Java's `ArrayStoreException` texts.
+    (
+        "stores",
+        "ArrayStoreException:java.lang.Integer|ArrayStoreException:java.lang.String|ArrayStoreException:[J|ArrayStoreException:demo.ArrayValues$Base|ok|ArrayStoreException:java.lang.Integer|ArrayStoreException:[Ljava.lang.Object;|ArrayStoreException:[I|ArrayStoreException:java.lang.String|ok|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.Stringaqr|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String|ArrayStoreException:arraycopy: type mismatch: can not copy java.lang.Integer[] into java.lang.String[]|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String|ArrayStoreException:arraycopy: type mismatch: can not copy [I[] into [J[]|ArrayStoreException:arraycopy: type mismatch: can not copy java.lang.CharSequence[] into java.lang.Integer[]|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Number[] to the type of the destination array, java.lang.Integer|ok|ab",
+    ),
+    // Lambdas, method references, anonymous classes and enum constants stored into arrays of a jar interface and enum.
+    ("storeLambdas", "4trueB2"),
+    // `Class` objects (text until P13) into `Class[]` and `Type[]` are no `ArrayStoreException`.
+    ("storeClasses", "intboolean1"),
+    // An array held by a list, a map and another array stays that one object; its clone is equal in content only.
+    ("held", "truefalse-1truetrueanulltrue979"),
+    // Separate allocations are different objects, also as `IdentityHashMap` keys.
+    ("separate", "falsetruefalse232"),
+    // One array through two locals: provably one object.
+    ("sameHandle", "truetruetruefalse"),
+    // Two `getStackTrace()` arrays of the current thread: two objects.
+    ("twoTraces", "false"),
+];
 
-/// No string is an array, and the real arrays answer as Java 25 does: their
-/// classes and casts, the content-based `Arrays` helpers, the collections
-/// that hold them, and identity between separate arrays and of one array
-/// flowing through two locals. None of it is counted.
+/// The methods whose answer the runtime does not have: Java 25's answer, and
+/// exactly the calls counted instead (the neutral value they answer is not
+/// checked: it is no Java answer).
+#[allow(clippy::type_complexity)]
+const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperToStringInts",
+        "[1, 2, 3]",
+        &[("java/util/Arrays#toString([I)Ljava/lang/String;", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperToStringStrings",
+        "[x, null, z]",
+        &[(
+            "java/util/Arrays#toString([Ljava/lang/Object;)Ljava/lang/String;",
+            1,
+        )],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperToStringDoubles",
+        "[1.5, -0.0, NaN]",
+        &[("java/util/Arrays#toString([D)Ljava/lang/String;", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperDeepToString",
+        "[[1, 2], [3]]",
+        &[(
+            "java/util/Arrays#deepToString([Ljava/lang/Object;)Ljava/lang/String;",
+            1,
+        )],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperHashCodeInts",
+        "30817",
+        &[("java/util/Arrays#hashCode([I)I", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperHashCodeDoubles",
+        "569406559",
+        &[("java/util/Arrays#hashCode([D)I", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperDeepHashCode",
+        "31809",
+        &[("java/util/Arrays#deepHashCode([Ljava/lang/Object;)I", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperEqualsInts",
+        "true",
+        &[("java/util/Arrays#equals([I[I)Z", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperEqualsStrings",
+        "true",
+        &[(
+            "java/util/Arrays#equals([Ljava/lang/Object;[Ljava/lang/Object;)Z",
+            1,
+        )],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperEqualsDoubles",
+        "false",
+        &[("java/util/Arrays#equals([D[D)Z", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperDeepEquals",
+        "true",
+        &[(
+            "java/util/Arrays#deepEquals([Ljava/lang/Object;[Ljava/lang/Object;)Z",
+            1,
+        )],
+    ),
+    // An unmodelled call's array is the shared empty array of its declared type: a narrowing cast is counted, its descriptor an array's (`[Ljava/lang/String;`).
+    (
+        "castUnmodelled",
+        "true",
+        &[
+            (
+                "[Ljava/lang/String;#<checkcast>(Ljava/lang/Object;)[Ljava/lang/String;",
+                1,
+            ),
+            ("java/lang/Class#getSigners()[Ljava/lang/Object;", 1),
+        ],
+    ),
+    // A store of a value whose class the runtime does not know (the current thread) into an array of a jar class: counted, then stored, as `checkcast` counts the same cast.
+    (
+        "storeUnknown",
+        "ArrayStoreException:java.lang.Thread",
+        &[("[Ldemo/ArrayValues$Base;#<aastore>(Ljava/lang/Object;)V", 1)],
+    ),
+    // A `HashSet`'s `toArray(T[])` store failure: its message and partial writes are its own class's, so the call is counted.
+    (
+        "storeOtherCollection",
+        "ArrayStoreException:java.lang.Integer",
+        &[(
+            "java/util/HashSet#toArray([Ljava/lang/Object;)[Ljava/lang/Object;",
+            1,
+        )],
+    ),
+    // Two answers of an unmodelled call are shared empty arrays: identity between them is counted, never answered from equal keys.
+    (
+        "twoUnmodelled",
+        "true",
+        &[
+            ("java/lang/Class#getSigners()[Ljava/lang/Object;", 2),
+            (
+                "java/lang/Object#if_acmp(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                1,
+            ),
+        ],
+    ),
+    // `toString()` is `[I@<identity hash>`: no value the runtime has.
+    (
+        "arrayToString",
+        "true",
+        &[("java/lang/Object#toString()Ljava/lang/String;", 1)],
+    ),
+    // String concatenation of an array prints its `toString()`.
+    (
+        "arrayConcat",
+        "true",
+        &[("java/lang/Object#toString()Ljava/lang/String;", 1)],
+    ),
+    // `hashCode()` is the identity hash.
+    (
+        "arrayHashCode",
+        "true",
+        &[("java/lang/Object#hashCode()I", 2)],
+    ),
+    // `System.identityHashCode`.
+    (
+        "arrayIdentityHash",
+        "true",
+        &[("java/lang/System#identityHashCode(Ljava/lang/Object;)I", 2)],
+    ),
+];
+
 #[test]
 fn no_string_spells_an_array_and_the_arrays_answer_as_java_25() {
     let jar = jar("exact");
     let mut wrong = Vec::new();
-    for (name, expected) in [
-        (
-            "spelled",
-            "falsefalsefalsefalsetruetrue11,falsefalsefalsefalsetruetrue32,falsefalsefalsefalsetruetrue29,falsefalsefalsefalsetruetrue9-326518244,falsefalsefalsefalsetruetrue26,harr:[I#0truefalsetruetruetrue|2hr|array/emptyharr:[I#0|class java.lang.String cannot be cast to class [I (java.lang.String and [I are in module java.base of loader 'bootstrap')|class java.lang.String cannot be cast to class [Ljava.lang.Object; (java.lang.String and [Ljava.lang.Object; are in module java.base of loader 'bootstrap')|-1532129891",
-        ),
-        (
-            "real",
-            "[I[Ljava.lang.String;[[I[J[Ljava.lang.Object;|int,java.lang.String|truetruetruetruefalsetruefalsetruetruefalsefalse|class [Ljava.lang.Object; cannot be cast to class [Ljava.lang.String; ([Ljava.lang.Object; and [Ljava.lang.String; are in module java.base of loader 'bootstrap')|ok3|class [J cannot be cast to class [I ([J and [I are in module java.base of loader 'bootstrap')|class [I cannot be cast to class java.lang.String ([I and java.lang.String are in module java.base of loader 'bootstrap')|ok2|class [Ljava.lang.Object; cannot be cast to class [Ljava.lang.String; ([Ljava.lang.Object; and [Ljava.lang.String; are in module java.base of loader 'bootstrap')|class [I cannot be cast to class [Ljava.lang.Object; ([I and [Ljava.lang.Object; are in module java.base of loader 'bootstrap')|truefalsetruefalse|3[I331[x, null, z]3|1452330",
-        ),
-        // Two `getStackTrace()` arrays of the current thread: two objects.
-        ("twoTraces", "false"),
-        // An array held by a list, a map and another array stays that one
-        // object; its clone is equal in content only.
-        ("held", "truefalse-1truetrueanulltrue979"),
-        // Separate allocations are different objects, also as
-        // `IdentityHashMap` keys.
-        ("separate", "falsetruefalse232"),
-        // One array through two locals: provably one object.
-        ("sameHandle", "truetruetruefalse"),
-    ] {
+    for (name, expected) in EXACT {
         let (value, unknown) = run(&jar, name);
-        if value != Value::Ref(Some(expected.into())) || !unknown.is_empty() {
+        if value != Value::Ref(Some((*expected).into())) || !unknown.is_empty() {
             wrong.push(format!("{name}: {value:?} {unknown:?}"));
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// Two answers of a call the runtime does not model (Java 25: both `null`,
-/// so `true`). Each is the runtime's shared empty array, a new handle per
-/// call: one key standing for whatever each call returned, so identity
-/// cannot tell one object from two. The comparison is counted, never
-/// answered from the equal keys.
 #[test]
-fn identity_of_two_shared_empty_arrays_is_counted() {
-    let jar = jar("empties");
-    let (value, unknown) = run(&jar, "twoUnmodelled");
-    assert!(
-        unknown.iter().any(|(call, _)| call == IF_ACMP),
-        "{value:?} {unknown:?}"
-    );
-}
-
-/// `Arrays.toString`/`hashCode`/`equals`/`deep*` of primitive and nested
-/// arrays read the elements, so no identity is involved, but the runtime
-/// does not model them (main counts every one): each is answered as Java 25
-/// does or counted, never answered differently.
-#[test]
-fn arrays_helpers_answer_as_java_25_or_are_counted() {
-    let jar = jar("helpers");
-    let (value, unknown) = run(&jar, "helpers");
-    assert!(
-        value == Value::Ref(Some("[1, 2, 3][x, null, z][1, -2][1.5, -0.0, NaN][h, i][true, false][[1, 2], [3]][[1, 2, 3], [x, null, z], q, 4]null|30817,993,569406559,4290,40359,31809,0|truefalsetruefalsetruetruefalse".into())) || !unknown.is_empty(),
-        "{value:?} {unknown:?}"
-    );
-}
-
-/// An array's `toString()` (`[I@1b6d3586`) and `hashCode()` name its identity
-/// hash, which Java leaves to the VM. The runtime has no such number and
-/// never invents one: what Java does define about them (the `[I@` prefix,
-/// `hashCode() == System.identityHashCode(a)`) is answered as Java 25 does,
-/// or the call is counted.
-#[test]
-fn identity_text_of_an_array_is_never_invented() {
-    let jar = jar("identity-text");
-    let (value, unknown) = run(&jar, "identityText");
-    assert!(
-        value == Value::Ref(Some("true,true,true,true,true".into())) || !unknown.is_empty(),
-        "{value:?} {unknown:?}"
-    );
+fn what_the_runtime_cannot_answer_is_counted_by_name() {
+    let jar = jar("counted");
+    let mut wrong = Vec::new();
+    for (name, java, calls) in COUNTED {
+        let (value, unknown) = run(&jar, name);
+        let expected = calls
+            .iter()
+            .map(|(call, count)| ((*call).to_owned(), *count))
+            .collect::<Vec<_>>();
+        if unknown != expected {
+            wrong.push(format!("{name} (Java 25: {java}): {value:?} {unknown:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

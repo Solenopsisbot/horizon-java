@@ -92,7 +92,7 @@ fn in_java_base(class: &str) -> bool {
 /// `runtime_class` (internal names). Two `java.base` classes get the JVM's
 /// whole message (`SharedRuntime::generate_class_cast_message`); otherwise
 /// the module/loader clause is left out (a named departure, above).
-fn class_cast_exception(runtime_class: &str, target: &str) -> NativeError {
+pub(crate) fn class_cast_exception(runtime_class: &str, target: &str) -> NativeError {
     let (from, to) = (runtime_class.replace('/', "."), target.replace('/', "."));
     let message = if in_java_base(runtime_class) && in_java_base(target) {
         format!(
@@ -170,7 +170,12 @@ impl<H: Host> Runtime<'_, H> {
         let cast = MethodRef {
             owner: target.to_owned(),
             name: "<checkcast>".into(),
-            descriptor: format!("(Ljava/lang/Object;)L{target};"),
+            // An array class is already a descriptor (`[I`).
+            descriptor: if target.starts_with('[') {
+                format!("(Ljava/lang/Object;){target}")
+            } else {
+                format!("(Ljava/lang/Object;)L{target};")
+            },
         };
         self.host
             .invoke(&cast, std::slice::from_ref(value))
@@ -208,7 +213,7 @@ impl<H: Host> Runtime<'_, H> {
     /// it: a string, a box, a jar object, a JDK object a jar constructed
     /// (`java/util/ArrayList#3`). Not a host model's collection or entry,
     /// whose JDK class (`List12` or `ListN`, `KeyValueHolder`) is not kept.
-    fn exact_class(&self, value: &Value) -> Option<String> {
+    pub(super) fn exact_class(&self, value: &Value) -> Option<String> {
         let marker = match value {
             Value::Ref(Some(marker)) => marker,
             Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {

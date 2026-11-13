@@ -50,19 +50,30 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 /// - a box, a builder, a collection, a path or an enum constant: whatever
 ///   `Object.getClass` names (`class_of_value`), including `true`/`false`;
 /// - an object `<class>#<n>`: a `#` after a non-empty, separator-free class;
-/// - a callback, comparator or array class: a leading `@` or `[`;
+/// - a callback or comparator: a leading `@`; an array class: a whole
+///   descriptor (`[I`, `[Ljava/lang/String;`);
 /// - a marker kind or class name: a `/` whose first segment has no `:`, `.`
 ///   or space (`list/3`, `registry/minecraft:item`, `demo/Main`), which a
 ///   resource id like `minecraft:block/stone` does not match.
+///
+/// Arrays and `ColorCollection`s are handles, never text (`host_array.rs`):
+/// a text spelled like their old markers (`array/...`) or their keys
+/// (`[I#0`, `color-collection#0`) is a `String`.
 pub(crate) fn is_plain_string(marker: &str) -> bool {
-    if marker.starts_with(['@', '[']) || SEPARATOR_FREE_MARKERS.contains(&marker) {
+    if marker.starts_with("array/") {
+        return true;
+    }
+    if marker.starts_with('@')
+        || host_array::is_array_descriptor(marker)
+        || SEPARATOR_FREE_MARKERS.contains(&marker)
+    {
         return false;
     }
     if let Some((class, _)) = marker.split_once('#')
         && !class.is_empty()
         && !class.contains([':', ' '])
     {
-        return false;
+        return host_array::handle_only_class(class);
     }
     if !marker.contains('#') && class_of_value(&Value::Ref(Some(marker.to_owned()))).is_some() {
         return false;

@@ -88,6 +88,11 @@ impl<H: Host> Runtime<'_, H> {
         if class == "java/lang/Object" {
             return true;
         }
+        // A handle is what its kind's row says (`host_ref.rs`): an array is
+        // an `Object[]` by JLS array subtyping, not by a class chain.
+        if let Value::Host(handle) = value {
+            return handle.instance_of(class, self) == Some(true);
+        }
         if let Some(own) = class_of_value(value)
             && (own == class || self.class_is_instance(&own, class))
         {
@@ -102,12 +107,7 @@ impl<H: Host> Runtime<'_, H> {
         // A string is a bare marker: no object, boxed, collection, array,
         // callback, enum or game prefix claims it.
         if class == "java/lang/String" || class == "java/lang/CharSequence" {
-            let claimed = class_of_value(value).is_some()
-                || marker.contains('#')
-                || ["@", "enum/", "game/", "registry/", "identifier/"]
-                    .iter()
-                    .any(|prefix| marker.starts_with(prefix));
-            return !claimed;
+            return value_class::is_plain_string(marker);
         }
         self.object_is_instance_of(marker, class)
     }
