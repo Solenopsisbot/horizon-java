@@ -1249,9 +1249,15 @@ impl StdHost {
         }
         if let Value::Host(_) = receiver {
             // What a model does not answer is an unmodelled call: counted
-            // (and refused by a strict host, as a running command's is).
+            // (and refused by a strict host, as a running command's is),
+            // once: a model that went through `unknown_host_call` already did.
+            let counted = self.unknown_host_call_count();
             return match self.brigadier_handle_call(r, receiver, args) {
-                Some(Err(NativeError::UnknownHostCall(_))) => Some(self.unknown_host_call(r)),
+                Some(Err(NativeError::UnknownHostCall(_)))
+                    if self.unknown_host_call_count() == counted =>
+                {
+                    Some(self.unknown_host_call(r))
+                }
                 answer => answer,
             };
         }
