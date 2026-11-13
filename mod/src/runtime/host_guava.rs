@@ -137,7 +137,7 @@ mod tests {
                 crate::runtime::host_services::loader_parts(&loader),
                 Some((text.clone(), 7))
             );
-            let provider = crate::runtime::host_services::provider(text, text, 7);
+            let provider = crate::runtime::host_services::provider(text, text);
             assert_eq!(
                 crate::runtime::host_services::provider_parts(&provider),
                 Some((text.clone(), text.clone()))

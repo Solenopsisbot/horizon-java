@@ -11,13 +11,13 @@
 //!   load's serial. Every `ServiceLoader.load` is a new loader: canonical by
 //!   serial, `Object`'s `equals`, `toString` `java.util.ServiceLoader[<service>]`.
 //! * iterator: key the serial; one object per `iterator()` call.
-//! * provider: key the service, the provider class and its loader's serial.
-//!   A loader hands out the same `Provider` object for a provider every time
-//!   (`l.stream().findFirst().get() == l.stream().findFirst().get()` on Java
-//!   25), so the key names one object: canonical. `ProviderImpl.equals`
-//!   compares the service and provider classes, so providers of two loaders
-//!   are equal but not `==`; `hashCode` hashes the two `Class` objects
-//!   (identity hashes): counted.
+//! * provider: key the service and the provider class, what
+//!   `ProviderImpl.equals` compares: providers of two loaders are equal (and
+//!   one bucket of a `HashSet`), but not `==`. Not canonical: one loader
+//!   hands out the same `Provider` from each `stream()` (`==` on Java 25),
+//!   while a `reload()` makes new ones, which a key cannot tell apart, so
+//!   identity is counted unless the same handle flows. `hashCode` hashes the
+//!   two `Class` objects (identity hashes): counted.
 //!
 //! The classes are `ServiceLoader` (final), an anonymous iterator and
 //! `ServiceLoader$ProviderImpl`; all three are [`ClassRule::Unknown`] here,
@@ -92,15 +92,13 @@ pub(crate) fn iterator(serial: usize) -> Value {
     Value::Host(HostRef::new(HostKind::ServiceIterator, serial.to_string()))
 }
 
-/// The `Provider` for `provider` (internal name) of `service`, from the loader
-/// with serial `loader`.
-pub(crate) fn provider(service: &str, provider: &str, loader: i32) -> Value {
+/// The `Provider` for `provider` (internal name) of `service`.
+pub(crate) fn provider(service: &str, provider: &str) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::ServiceProvider,
         &[
             Value::Ref(Some(service.to_owned())),
             Value::Ref(Some(provider.to_owned())),
-            Value::Int(loader),
         ],
     ))
 }
@@ -118,7 +116,7 @@ fn provider_handle_parts(handle: &HostRef) -> Option<(String, String)> {
         return None;
     }
     match handle.values()?.as_slice() {
-        [Value::Ref(Some(service)), Value::Ref(Some(provider)), _] => {
+        [Value::Ref(Some(service)), Value::Ref(Some(provider))] => {
             Some((service.clone(), provider.clone()))
         }
         _ => None,

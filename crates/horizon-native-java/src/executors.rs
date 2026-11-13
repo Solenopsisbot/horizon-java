@@ -29,6 +29,12 @@ const SHUTDOWN_FIELD: &str = "#executorShutdown";
 const FUTURE_VALUE: &str = "#executorValue";
 
 const EXECUTOR: &str = "java/util/concurrent/Executor";
+/// The JDK executor classes a jar constructs with `new`.
+const JDK_EXECUTORS: &[&str] = &[
+    "java/util/concurrent/ThreadPoolExecutor",
+    "java/util/concurrent/ScheduledThreadPoolExecutor",
+    "java/util/concurrent/ForkJoinPool",
+];
 const EXECUTOR_SERVICE: &str = "java/util/concurrent/ExecutorService";
 const SCHEDULED_EXECUTOR_SERVICE: &str = "java/util/concurrent/ScheduledExecutorService";
 const SCHEDULED_FUTURE: &str = "java/util/concurrent/ScheduledFuture";
@@ -145,7 +151,8 @@ fn invoke_executors<H: Host>(
             "(Ljava/lang/Runnable;)Ljava/util/concurrent/Callable;"
             | "(Ljava/lang/Runnable;Ljava/lang/Object;)Ljava/util/concurrent/Callable;",
         ) => {
-            let Some(task) = args.first() else {
+            // `Executors.callable(null)`: `Objects.requireNonNull(task)`.
+            let Some(task) = args.first().filter(|task| **task != Value::Ref(None)) else {
                 return Err(native_npe());
             };
             let result = r
@@ -185,10 +192,22 @@ fn invoke_callable<H: Host>(
 /// The text an executor's or a future's state is kept under: a handle's
 /// allocation marker, or (as before) the marker of another object the call
 /// names; `Ok(None)` for another handle, `Err` for `null`.
-fn state_marker(receiver: Option<&Value>, kind: HostKind) -> Result<Option<String>, NativeError> {
+fn state_marker<H: Host>(
+    rt: &Runtime<'_, H>,
+    receiver: Option<&Value>,
+    kind: HostKind,
+) -> Result<Option<String>, NativeError> {
     match receiver {
         None | Some(Value::Ref(None)) => Err(native_npe()),
-        Some(Value::Ref(Some(marker))) => Ok(Some(marker.clone())),
+        // Only an object `new` built keeps its state under its text: a jar's
+        // own (`AbstractExecutorService` subclass) or a JDK executor a jar
+        // constructs (`new ThreadPoolExecutor(..)`). A `String` spelled like
+        // a pool's marker (`"executor#0"`) is no executor, so its call goes
+        // on to be counted, never reaching a real pool's state. (Allocation
+        // markers are still text until #156 P12.)
+        Some(Value::Ref(Some(marker))) => Ok(jvm_dispatch::constructed_object_class(marker)
+            .is_some_and(|class| rt.class(class).is_some() || JDK_EXECUTORS.contains(&class))
+            .then(|| marker.clone())),
         Some(value) => Ok(host_executors::allocation(value, kind).map(str::to_owned)),
     }
 }
@@ -199,7 +218,7 @@ fn invoke_executor<H: Host>(
     receiver: Option<&Value>,
     args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
-    let Some(marker) = state_marker(receiver, HostKind::Executor)? else {
+    let Some(marker) = state_marker(rt, receiver, HostKind::Executor)? else {
         return Ok(None);
     };
     let value = match (r.name.as_str(), r.descriptor.as_str()) {
@@ -294,7 +313,7 @@ fn invoke_future<H: Host>(
     r: &MethodRef,
     receiver: Option<&Value>,
 ) -> Result<Option<Value>, NativeError> {
-    let Some(marker) = state_marker(receiver, HostKind::ExecutorFuture)? else {
+    let Some(marker) = state_marker(rt, receiver, HostKind::ExecutorFuture)? else {
         return Ok(None);
     };
     Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {

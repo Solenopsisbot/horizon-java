@@ -3,10 +3,10 @@
 //! `loadProvider`, `getConstructor`, `ProviderImpl.newInstance`).
 //!
 //! Before this module the loader handed out each provider as its bare class
-//! name: `Provider.get` split the `service-provider/<service>/<provider>`
-//! marker at the first `/` (so a packaged service gave a wrong class name),
-//! and no provider was ever constructed, so its constructor and field
-//! initialisers never ran.
+//! name (its `Provider` was text split at the first `/`, so a packaged
+//! service gave a wrong class name), and no provider was ever constructed,
+//! so its constructor and field initialisers never ran. The loader, its
+//! iterators and providers are host handles now (`host_services.rs`).
 //!
 //! What the JDK does, and this module with it:
 //!
@@ -146,7 +146,7 @@ impl<H: Host> Runtime<'_, H> {
         handle: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let (service, serial) = host_services::loader_parts(handle).unwrap_or_default();
+        let (service, _) = host_services::loader_parts(handle).unwrap_or_default();
         let loader = host_services::state_key(handle)
             .unwrap_or_default()
             .to_owned();
@@ -193,7 +193,7 @@ impl<H: Host> Runtime<'_, H> {
                 let providers = self
                     .service_names(&service)
                     .into_iter()
-                    .map(|provider| host_services::provider(&service, &provider, serial))
+                    .map(|provider| host_services::provider(&service, &provider))
                     .collect();
                 Ok(Some(self.new_stream(
                     "java/util/ServiceLoader",

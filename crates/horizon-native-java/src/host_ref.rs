@@ -708,8 +708,8 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::host_services::provider_types,
         },
-        // A loader keeps one `Provider` per provider.
-        canonical: always_canonical,
+        // Equal keys are equal providers; `reload()` makes new objects.
+        canonical: never_canonical,
         methods: &crate::host_services::PROVIDER_METHODS,
     },
     KindInfo {

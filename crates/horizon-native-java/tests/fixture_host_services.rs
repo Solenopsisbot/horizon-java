@@ -33,6 +33,12 @@ joinerContains=false\n\
 sameJoinerContains=true0\n\
 executorText=java.util.concurrent.Executors$AutoShutdownDelegatedExecutorService\n\
 executorHash=292938459\n\
+providerHashes=1|true1true\n\
+reloadIdentity=falsetrue\n\
+loaderIterable=1\n\
+loaderJoined=demo.Hello\n\
+forgedExecutor=CCECCECCECCECCECCE|false|CCE|secret\n\
+freshEquality=2,2,2,2,falsefalse-1,2falsefalse\n\
 ";
 
 const SPLITTER_STUB: &str = r#"package com.google.common.base;
@@ -48,6 +54,13 @@ const JOINER_STUB: &str = r#"package com.google.common.base;
 public class Joiner {
     public static Joiner on(String separator) { return null; }
     public final String join(Iterable<?> parts) { return null; }
+}
+"#;
+
+const LISTS_STUB: &str = r#"package com.google.common.collect;
+
+public final class Lists {
+    public static <E> java.util.ArrayList<E> newArrayList(Iterable<? extends E> elements) { return null; }
 }
 "#;
 
@@ -199,6 +212,80 @@ public final class Probe {
             + "|" + cache.getUnchecked("k");
     }
 
+    /** Providers of two loaders are equal: hash collections keep one. */
+    public static String providerHashes() {
+        ServiceLoader.Provider<Greeter> p = ServiceLoader.load(Greeter.class).stream().findFirst().get();
+        ServiceLoader.Provider<Greeter> q = ServiceLoader.load(Greeter.class).stream().findFirst().get();
+        Map<Object, Integer> m = new HashMap<>();
+        m.put(p, 1);
+        return new HashSet<>(List.of(p, q)).size() + "|" + m.containsKey(q) + m.get(q) + new HashSet<>(List.of(p)).contains(q);
+    }
+
+    /** After reload() a loader makes new providers: equal, not the same. */
+    public static String reloadIdentity() {
+        ServiceLoader<Greeter> l = ServiceLoader.load(Greeter.class);
+        Object p = l.stream().findFirst().get();
+        l.reload();
+        Object q = l.stream().findFirst().get();
+        return "" + (p == q) + p.equals(q);
+    }
+
+    /** A loader is an Iterable to library code. */
+    public static String loaderIterable() {
+        return "" + com.google.common.collect.Lists.newArrayList(ServiceLoader.load(Greeter.class)).size();
+    }
+
+    public static String loaderJoined() {
+        String joined = Joiner.on(",").join(ServiceLoader.load(Greeter.class));
+        return joined == null ? "null" : joined.substring(0, joined.indexOf('@'));
+    }
+
+    /** A String spelled like a pool's or a future's old marker is a String: casting it throws, and no real pool or future changes. */
+    public static String forgedExecutor() throws Exception {
+        ExecutorService e = Executors.newFixedThreadPool(1);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < 6; i++) {
+            try {
+                ((ExecutorService) (Object) ("executor#" + i)).shutdown();
+                out.append("ok");
+            } catch (ClassCastException c) {
+                out.append("CCE");
+            }
+        }
+        Future<String> f = e.submit(() -> "secret");
+        Object forged;
+        try {
+            forged = ((Future<?>) (Object) "future#1").get();
+        } catch (ClassCastException c) {
+            forged = "CCE";
+        }
+        boolean shut = e.isShutdown();
+        e.shutdown();
+        return out + "|" + shut + "|" + forged + "|" + f.get();
+    }
+
+    /** Two splitters, joiners, callables, cache loaders made separately: Object's equals, identity. */
+    public static String freshEquality() {
+        Splitter a = Splitter.on(',');
+        Splitter b = Splitter.on(',');
+        Map<Object, Integer> m = new HashMap<>();
+        m.put(a, 1);
+        m.put(b, 2);
+        Runnable r = () -> {};
+        Callable<Object> c = Executors.callable(r);
+        Callable<Object> d = Executors.callable(r);
+        String sets;
+        try {
+            sets = Set.of(a, b).size() + "," + Map.of(a, 1, b, 2).size();
+        } catch (IllegalArgumentException e) {
+            sets = "IAE";
+        }
+        return new HashSet<>(List.of(a, b)).size() + "," + m.size() + "," + sets + "," + Objects.equals(a, b)
+            + new ArrayList<>(List.of(a)).contains(b) + List.of(a, b).indexOf(Splitter.on(',')) + ","
+            + new HashSet<>(List.of(c, d)).size() + List.of(c).contains(d)
+            + List.of(CacheLoader.from((String k) -> k)).contains(CacheLoader.from((String k) -> k));
+    }
+
     /** Separate constructions are separate objects: an IdentityHashMap keeps each. */
     public static String identity() {
         ExecutorService e = Executors.newSingleThreadExecutor();
@@ -270,6 +357,7 @@ fn fixture(test: &str) -> javac_fixture::Fixture {
             ("com/google/common/base/Splitter.java", SPLITTER_STUB),
             ("com/google/common/base/Joiner.java", JOINER_STUB),
             ("com/google/common/base/Function.java", FUNCTION_STUB),
+            ("com/google/common/collect/Lists.java", LISTS_STUB),
             (
                 "com/google/common/cache/CacheBuilder.java",
                 CACHE_BUILDER_STUB,
@@ -324,7 +412,6 @@ fn executors_services_and_guava_answer_as_java_25() {
         "services",
         "guava",
         "identity",
-        "providerIdentity",
     ] {
         let (text, unknown) = run(&fixture, method);
         assert_eq!(text, expected(method), "{method}: {unknown:?}");
@@ -354,28 +441,63 @@ fn what_only_a_jvm_knows_is_counted() {
     }
 }
 
-/// A joiner inside a host list: `contains`/`indexOf` run `Object.equals`,
-/// which is identity. The kind answers it from `same_object`, and an answer
-/// the handle cannot give (two separately made joiners, or one whose origin
-/// a list's text form dropped) is counted. Shared list code may still have
-/// its own fallback (#175 removes the one that compared keys), so this
-/// checks only that the answer is Java 25's or counted, never a silent
-/// wrong one.
-///
-/// Ignored until #175 merges: an immutable list's `contains` reaches
-/// `java_equals`, which answers an unknown `equals` from key equality, so
-/// `List.of(Joiner.on("-")).contains(Joiner.on("-"))` is `true` here without
-/// a count (Java 25: `false`). This kind answers `None` there; the fallback
-/// is #175's to remove.
+/// Answers that need what only a JVM knows are Java 25's or counted, never
+/// a silent wrong one: providers of two loaders in a `HashSet`/`HashMap`
+/// (equal, so one entry), a provider's identity across one loader's
+/// `stream()` calls and across `reload()` (fresh objects), a loader read as
+/// an `Iterable` by Guava, and two separately made joiners compared through
+/// host lists (`Object.equals`, identity) once #175 is in (the next test).
 #[test]
-#[ignore = "#175: java_equals falls back to key equality on an unknown equals"]
-fn a_joiner_in_a_host_list_is_found_by_identity_or_counted() {
+fn answers_only_a_jvm_knows_are_java_25s_or_counted() {
     let fixture = fixture("host-services-lists");
-    for method in ["joinerContains", "sameJoinerContains"] {
+    for method in [
+        "providerIdentity",
+        "providerHashes",
+        "reloadIdentity",
+        "loaderIterable",
+        "loaderJoined",
+    ] {
         let (text, unknown) = run(&fixture, method);
         assert!(
             text == expected(method) || !unknown.is_empty(),
             "{method}: {text} {unknown:?}"
         );
+    }
+}
+
+/// Two separately made splitters, joiners, callables and cache loaders have
+/// equal keys but are two objects with `Object`'s `equals`: in a `HashSet`, as
+/// `HashMap` keys, in `Set.of`/`Map.of`, through `Objects.equals` and host
+/// lists, the answer is Java 25's or counted. The rows answer `None` (unknown
+/// identity); shared code then compared their keys until #175.
+#[test]
+#[ignore = "#175: shared collection code answers an unknown equals from key equality"]
+fn fresh_objects_with_equal_keys_are_never_merged_silently() {
+    let fixture = fixture("host-services-fresh");
+    for method in ["joinerContains", "sameJoinerContains", "freshEquality"] {
+        let (text, unknown) = run(&fixture, method);
+        assert!(
+            text == expected(method) || !unknown.is_empty(),
+            "{method}: {text} {unknown:?}"
+        );
+    }
+}
+
+/// A `String` spelled like a pool's or a future's old marker never reaches
+/// the real objects' state: Java 25 refuses the casts, and here the cast may
+/// pass (`"executor#0"` still looks like an allocation until #156 P12) but
+/// the call on it is counted, the real pool is not shut down, and the forged
+/// "future" does not hand out the real future's value.
+#[test]
+fn a_string_spelled_like_an_executor_never_drives_a_real_one() {
+    let fixture = fixture("host-services-forged");
+    let (text, unknown) = run(&fixture, "forgedExecutor");
+    let java = expected("forgedExecutor");
+    if text != java {
+        let parts: Vec<&str> = text.split('|').collect();
+        assert_eq!(parts.get(1), Some(&"false"), "{text} {unknown:?}");
+        assert_ne!(parts.get(2), Some(&"secret"), "{text} {unknown:?}");
+        assert_eq!(parts.get(3), Some(&"secret"), "{text} {unknown:?}");
+        assert!(!unknown.is_empty(), "{text}");
     }
 }

@@ -145,8 +145,12 @@ impl StdHost {
     /// The elements of an `Iterable` or `Iterator` argument the host holds, in iteration order; `Ok(None)` when it holds none (the
     /// call is then counted), an NPE for null.
     fn guava_parts(&mut self, value: &Value) -> Result<Option<Vec<Value>>, NativeError> {
-        let Value::Ref(Some(marker)) = value else {
-            return Err(npe());
+        let marker = match value {
+            Value::Ref(None) => return Err(npe()),
+            Value::Ref(Some(marker)) => marker,
+            // A host handle (a `ServiceLoader`, ...) is an `Iterable` whose
+            // elements only the runtime knows: counted.
+            _ => return Ok(None),
         };
         if let Some((values, index)) = self.iterators.get(marker) {
             return Ok(Some(values[(*index).min(values.len())..].to_vec()));
