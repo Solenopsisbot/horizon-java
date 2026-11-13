@@ -970,27 +970,6 @@ impl<H: Host> GameHookHost<'_, H> {
                 }),
             );
         }
-        // An `Identifier` value: its text and parts, as vanilla prints them.
-        if let Some(id) = text.strip_prefix("identifier/")
-            && let Some((namespace, path)) = id.split_once(':')
-        {
-            let answer = match (r.name.as_str(), r.descriptor.as_str()) {
-                ("toString", "()Ljava/lang/String;") => Value::Ref(Some(id.to_owned())),
-                ("getNamespace", "()Ljava/lang/String;") => Value::Ref(Some(namespace.to_owned())),
-                ("getPath", "()Ljava/lang/String;") => Value::Ref(Some(path.to_owned())),
-                // `Identifier.hashCode`: `31 * namespace.hashCode() + path.hashCode()`.
-                ("hashCode", "()I") => Value::Int(
-                    stable_hash(namespace)
-                        .wrapping_mul(31)
-                        .wrapping_add(stable_hash(path)),
-                ),
-                ("equals", "(Ljava/lang/Object;)Z") => Value::Int(i32::from(
-                    args.first().and_then(expect_ref).is_some_and(|o| o == text),
-                )),
-                _ => return None,
-            };
-            return Some(Ok(answer));
-        }
         // `BuiltInRegistries.ITEM.getKey(item)` for an item the firing names.
         if text == "registry/minecraft:item"
             && r.name == "getKey"
@@ -1118,8 +1097,11 @@ impl<H: Host> Host for GameHookHost<'_, H> {
             let marker = marker.to_owned();
             return self.answer(&marker, r, args);
         }
+        // A host handle (an `Identifier`, a `ResourceKey`) is a value the
+        // bootstrap host models (`host_ids.rs`).
         if is_game_class(&r.owner)
             && !is_host_value_class(&r.owner)
+            && !matches!(receiver, Value::Host(_))
             && !expect_ref(receiver).is_some_and(|marker| is_host_value_marker(marker))
         {
             return Err(NativeError::Metadata(format!(
@@ -1413,6 +1395,7 @@ impl NativeJar {
         let mut initialized = state.initialized.clone();
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked,
             host: &mut wrapped,
             calls: 0,

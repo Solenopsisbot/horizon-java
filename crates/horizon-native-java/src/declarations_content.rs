@@ -189,8 +189,7 @@ fn codec_label(value: Option<&Value>) -> Option<String> {
 
 /// The `namespace:path` an `Identifier` argument names.
 fn identifier_id(value: &Value) -> Option<String> {
-    expect_ref(value)?;
-    let (namespace, path) = identifier_parts(value);
+    let (namespace, path) = crate::host_ids::identifier_key(value)?.split_once(':')?;
     (!namespace.is_empty() && !path.is_empty()).then(|| format!("{namespace}:{path}"))
 }
 

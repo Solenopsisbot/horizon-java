@@ -69,12 +69,7 @@ pub(crate) struct SavedDataState {
 }
 
 fn id_of(value: &Value) -> Option<String> {
-    let text = expect_ref(value)?.strip_prefix("identifier/")?;
-    Some(if text.contains(':') {
-        text.to_owned()
-    } else {
-        format!("minecraft:{text}")
-    })
+    crate::host_ids::identifier_key(value).map(str::to_owned)
 }
 
 impl SavedDataState {
@@ -304,7 +299,7 @@ mod tests {
     fn build(state: &mut SavedDataState, object: &str, id: &str) {
         let init = call(TYPE_CLASS, "<init>", TYPE_INIT);
         let args = [
-            marker(&format!("identifier/{id}")),
+            crate::host_ids::identifier_of_text(id),
             marker("@indy:demo/Data::new"),
             marker("codec/opaque"),
             Value::Ref(None),

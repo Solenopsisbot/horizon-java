@@ -193,18 +193,16 @@ pub enum HostKind {
     /// An event a host caller dispatches or posts: key its cancelled flag and
     /// name.
     PostedEvent,
-    /// `java.lang.invoke.MethodType`: key the method descriptor
-    /// (`host_invoke.rs`).
-    MethodType,
-    /// `java.lang.invoke.MethodHandles$Lookup`: key `[mode, class]`
-    /// (`host_invoke.rs`).
-    MethodHandlesLookup,
-    /// A `java.lang.invoke.MethodHandle`: key its combinator tree as JSON
-    /// (`method_handles.rs`).
-    MethodHandle,
-    /// The `CallSite` `LambdaMetafactory.metafactory` returns: key its target
-    /// handle's JSON (`method_handles.rs`).
-    CallSite,
+    /// `net.minecraft.resources.Identifier`: key `namespace:path` (`host_ids.rs`).
+    Identifier,
+    /// `net.minecraft.resources.ResourceKey`: key `registry|location`, or
+    /// `?…` when the host cannot name them (`host_ids.rs`).
+    ResourceKey,
+    /// `net.minecraft.tags.TagKey`: key `registry|location`, or `?…`.
+    TagKey,
+    /// `net.minecraft.references.BlockItemId`: key the block and item ids'
+    /// [`HostRef::of_values`].
+    BlockItemId,
 }
 
 /// How a kind's Java class follows from its key.
@@ -556,39 +554,35 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
     },
     KindInfo {
-        kind: HostKind::MethodType,
-        tag: "mtype",
-        class: ClassRule::Fixed(crate::runtime::host_invoke::METHOD_TYPE),
-        // Java interns method types: one object per descriptor.
+        kind: HostKind::Identifier,
+        tag: "id",
+        class: ClassRule::Fixed(crate::runtime::host_ids::IDENTIFIER),
+        // Not interned: two `Identifier.parse("a:x")` are two objects.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_ids::IDENTIFIER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ResourceKey,
+        tag: "rk",
+        class: ClassRule::Fixed(crate::runtime::host_ids::RESOURCE_KEY),
+        // Interned by `ResourceKey.create` (`host_ids.rs`).
         canonical: always_canonical,
-        methods: &crate::runtime::host_invoke::METHOD_TYPE_METHODS,
+        methods: &crate::runtime::host_ids::RESOURCE_KEY_METHODS,
     },
     KindInfo {
-        kind: HostKind::MethodHandlesLookup,
-        tag: "mhlk",
-        class: ClassRule::Fixed(crate::runtime::host_invoke::LOOKUP),
-        canonical: crate::runtime::host_invoke::lookup_canonical,
-        methods: &crate::runtime::host_invoke::LOOKUP_METHODS,
+        kind: HostKind::TagKey,
+        tag: "tk",
+        class: ClassRule::Fixed(crate::runtime::host_ids::TAG_KEY),
+        // Interned by `TagKey.create`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_ids::TAG_KEY_METHODS,
     },
     KindInfo {
-        kind: HostKind::MethodHandle,
-        tag: "mh",
-        // `DirectMethodHandle`, `BoundMethodHandle$Species_LL`, …: a
-        // `MethodHandle` of a class the runtime does not know.
-        class: ClassRule::Unknown {
-            declared: crate::runtime::method_handles::handle_types,
-        },
+        kind: HostKind::BlockItemId,
+        tag: "bii",
+        class: ClassRule::Fixed(crate::runtime::host_ids::BLOCK_ITEM_ID),
         canonical: never_canonical,
-        methods: &crate::runtime::method_handles::HANDLE_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::CallSite,
-        tag: "csite",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::method_handles::call_site_types,
-        },
-        canonical: never_canonical,
-        methods: &crate::runtime::method_handles::CALL_SITE_METHODS,
+        methods: &crate::runtime::host_ids::BLOCK_ITEM_ID_METHODS,
     },
 ];
 
