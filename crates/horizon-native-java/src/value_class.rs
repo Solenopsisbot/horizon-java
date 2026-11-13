@@ -38,10 +38,6 @@ const RETIRED_PREFIXES: &[&str] = &[
     "mixin-side/",
 ];
 
-/// Runtime markers with no `/`, `#`, `@` or `:` in them, which the shape rule
-/// of [`is_plain_string`] cannot tell from text.
-const SEPARATOR_FREE_MARKERS: &[&str] = &["guava-cache-builder"];
-
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
 /// is one of the types a string is an instance of.
 pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
@@ -73,10 +69,10 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     {
         return true;
     }
-    if marker.starts_with('@')
-        || host_array::is_array_descriptor(marker)
-        || SEPARATOR_FREE_MARKERS.contains(&marker)
-    {
+    // The last separator-free markers (`guava-cache-builder`,
+    // `mixin-environment`) became handles in #179 and #180, so a text with no
+    // `/`, `#`, `@` or `:` is never a runtime marker any more.
+    if marker.starts_with('@') || host_array::is_array_descriptor(marker) {
         return false;
     }
     if let Some((class, _)) = marker.split_once('#')
