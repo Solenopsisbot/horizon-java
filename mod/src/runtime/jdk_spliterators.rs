@@ -77,6 +77,7 @@ pub(crate) const JDK_SPLITERATOR: Methods = Methods {
         )
     },
     crosses_jars: |_, _| false,
+    compare_to: None,
 };
 
 /// The key of a modelled spliterator handle.

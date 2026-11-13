@@ -106,6 +106,7 @@ pub(crate) const STREAM_BUILDER: Methods = Methods {
         ))
     },
     crosses_jars: |_, _| false,
+    compare_to: None,
 };
 
 /// The `Sink` a push hands a jar spliterator (`HostKind::StreamSink`). Its
@@ -127,6 +128,7 @@ pub(crate) const STREAM_SINK: Methods = Methods {
         ))
     },
     crosses_jars: |_, _| false,
+    compare_to: None,
 };
 
 /// `Collector.of`'s object (`HostKind::Collector`): JDK 25's
@@ -156,6 +158,7 @@ pub(crate) const COLLECTOR_IMPL: Methods = Methods {
         ))
     },
     crosses_jars: |_, _| false,
+    compare_to: None,
 };
 
 /// The push and stage a sink handle names.
@@ -241,6 +244,10 @@ enum State {
     Seen(Value, Vec<Value>),
     /// `sorted`: the elements buffered until the source ends.
     Buffer(Vec<Value>),
+    /// `distinct` on a pipeline known `SORTED`: `DistinctOps` compares each
+    /// element with the last one passed (`equals`, no hash): whether a `null`
+    /// was passed, and the last element.
+    Adjacent(bool, Option<Value>),
 }
 
 /// The terminal sink of a push.
@@ -284,6 +291,12 @@ enum Terminal {
     /// The downstream of a `flatMap` or `concat`: the outer push and the
     /// stage its elements go to.
     Forward(u64, usize),
+    /// A `concat` side with stages under a short-circuiting push: JDK 25's
+    /// `WrappingSpliterator`. Each pulled source element runs through the
+    /// side's stages into this buffer (which never asks the side to stop),
+    /// and the outer push takes the buffered elements one at a time,
+    /// asking its own cancellation before each (`drain_wrap`).
+    Wrap(u64, usize, Vec<Value>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,6 +386,33 @@ pub(crate) struct Pipelines {
     view_origins: BTreeMap<String, ViewOrigin>,
     /// Streams a stage or terminal has used (`linkedOrConsumed`).
     used: BTreeSet<String>,
+}
+
+/// The marker of a new stream (a source or a stage). Streams are still
+/// marker text (#156's P15 moves them onto handles); the per-process random
+/// tag keeps a jar `String` constant from spelling a live stream, so a forged
+/// one is the `String` it is (`is_live_stream`).
+pub(crate) fn stream_marker(class: &str, method: &str, n: usize) -> String {
+    static TAG: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let tag = TAG.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    });
+    format!("stream/{class}/{method}/{n}~{tag:016x}")
+}
+
+/// The stream interfaces a `String` never is.
+pub(crate) fn is_stream_interface(class: &str) -> bool {
+    matches!(
+        class,
+        "java/util/stream/Stream"
+            | "java/util/stream/IntStream"
+            | "java/util/stream/LongStream"
+            | "java/util/stream/DoubleStream"
+            | "java/util/stream/BaseStream"
+    )
 }
 
 /// The single abstract method of a `java.util.function` interface.
@@ -545,7 +585,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     }
 
     fn lazy_marker(&mut self, class: &str, method: &str) -> String {
-        let marker = format!("stream/{class}/{method}/{}", self.next_stream);
+        let marker = stream_marker(class, method, self.next_stream);
         self.next_stream += 1;
         marker
     }
@@ -553,11 +593,57 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// Whether `value` is a stream this runtime made (a source or a stage).
     fn is_stream(&self, value: &Value) -> Option<String> {
         let marker = expect_ref(value)?;
-        (self.streams.contains_key(marker)
+        self.is_live_stream(marker).then(|| marker.clone())
+    }
+
+    /// Whether `marker` names a live stream of this runtime. A `stream/...`
+    /// text that does not is a jar `String` spelled like one.
+    pub(crate) fn is_live_stream(&self, marker: &str) -> bool {
+        self.streams.contains_key(marker)
             || self.pipelines.links.contains_key(marker)
             || self.pipelines.concats.contains_key(marker)
-            || self.pipelines.spliterators.contains_key(marker))
-        .then(|| marker.clone())
+            || self.pipelines.spliterators.contains_key(marker)
+    }
+
+    /// `text instanceof wanted` for a `stream/...` text that is no live
+    /// stream: the `String` it is.
+    pub(crate) fn forged_stream_instance_of(&self, text: &str, wanted: &str) -> bool {
+        text.starts_with("stream/")
+            && !self.is_live_stream(text)
+            && matches!(
+                wanted,
+                "java/lang/String"
+                    | "java/lang/Object"
+                    | "java/lang/CharSequence"
+                    | "java/lang/Comparable"
+                    | "java/io/Serializable"
+                    | "java/lang/constant/Constable"
+                    | "java/lang/constant/ConstantDesc"
+            )
+    }
+
+    /// `getClass()` on a `stream/...` text. A live stream's class is a
+    /// pipeline stage's own (`ReferencePipeline$Head`, `SortedOps$OfRef`...),
+    /// which is not modelled: counted. Any other such text is a `String`.
+    fn stream_get_class(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+    ) -> Result<Option<Value>, NativeError> {
+        if r.name != "getClass" || r.descriptor != "()Ljava/lang/Class;" {
+            return Ok(None);
+        }
+        let Some(text) = receiver
+            .and_then(expect_ref)
+            .filter(|text| text.starts_with("stream/"))
+        else {
+            return Ok(None);
+        };
+        if self.is_live_stream(text) {
+            self.host.unknown_operand_call(r)?;
+            return Ok(Some(Value::Ref(None)));
+        }
+        Ok(Some(Value::Ref(Some("java/lang/String".into()))))
     }
 
     /// Mark a new stream parallel (`Collection.parallelStream()`).
@@ -761,9 +847,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         if *spliterator == Value::Ref(None) {
             return Err(npe());
         }
-        let flags = self.characteristics_of(spliterator)?;
+        let mut flags = self.characteristics_of(spliterator)?;
         if flags & crate::jdk_spliterators::SORTED != 0 {
-            self.call_virtual(
+            let comparator = self.call_virtual(
                 crate::jdk_call::Site::Interface,
                 "java/util/Spliterator",
                 "getComparator",
@@ -771,6 +857,11 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 spliterator,
                 &[],
             )?;
+            // `StreamOpFlag.fromCharacteristics`: only a natural order is
+            // the stream's `SORTED`.
+            if comparator != Value::Ref(None) {
+                flags &= !crate::jdk_spliterators::SORTED;
+            }
         }
         let marker = self.lazy_marker(class, method);
         self.pipelines
@@ -784,7 +875,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
 
     /// Call `callback` as its functional `interface`'s method, dispatched the
     /// way a JDK body's `invokeinterface` would be.
-    fn call_sam(
+    pub(crate) fn call_sam(
         &mut self,
         interface: &str,
         callback: &Value,
@@ -814,6 +905,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        if let Some(value) = self.stream_get_class(r, receiver)? {
+            return Ok(Some(value));
+        }
         if let Some(value) = self.stream_builder_call(r, receiver, args)? {
             return Ok(Some(value));
         }
@@ -1060,7 +1154,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             },
             Terminal::Fold(_, _, value) | Terminal::Container(_, value) => value,
             Terminal::ToMap(state) => state.finish(),
-            Terminal::Collect(_) | Terminal::Forward(..) | Terminal::Supply(..) => Value::Void,
+            Terminal::Collect(_)
+            | Terminal::Forward(..)
+            | Terminal::Supply(..)
+            | Terminal::Wrap(..) => Value::Void,
         };
         Ok(Some(result))
     }
@@ -1131,22 +1228,50 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     ) -> Result<Terminal, NativeError> {
         let (source, stages) = self.chain(stream)?;
         let mut states = Vec::with_capacity(stages.len());
+        // `StreamOpFlag.SORTED` as it stands before each stage: a `TreeSet`
+        // source, a natural-order `sorted()`; a mapping or a comparator sort
+        // clears it.
+        let mut sorted = self.source_sorted(&source);
+        // `StreamOpFlag.DISTINCT`: a set's spliterator, or a `distinct()`;
+        // a mapping clears it.
+        let mut distinct = self.source_distinct(&source);
         for stage in &stages {
+            let (sorted_here, distinct_here) = (sorted, distinct);
+            distinct = match stage {
+                Stage::Distinct => true,
+                Stage::Map(..) | Stage::FlatMap(..) | Stage::Pass | Stage::Widen(_) => false,
+                _ => distinct,
+            };
+            sorted = match stage {
+                Stage::Sorted(comparator) => *comparator == Value::Ref(None),
+                Stage::Filter(..)
+                | Stage::Peek(..)
+                | Stage::Skip(_)
+                | Stage::Limit(_)
+                | Stage::Distinct => sorted,
+                Stage::Map(..) | Stage::FlatMap(..) | Stage::Pass | Stage::Widen(_) => false,
+            };
             states.push(match stage {
                 Stage::Skip(n) | Stage::Limit(n) => State::Left(*n),
+                // `DistinctOps` on a `DISTINCT` pipeline is the downstream
+                // sink itself.
+                Stage::Distinct if distinct_here => State::None,
+                Stage::Distinct if sorted_here => State::Adjacent(false, None),
                 // `DistinctOps`' sink makes its `HashSet` in `begin`.
                 Stage::Distinct => State::Seen(self.new_distinct_set()?, Vec::new()),
                 Stage::Sorted(_) => State::Buffer(Vec::new()),
                 _ => State::None,
             });
         }
-        let terminal = match outer {
-            Some((id, at)) => Terminal::Forward(id, at),
-            None => terminal,
+        let terminal = match (outer, terminal) {
+            (_, wrap @ Terminal::Wrap(..)) => wrap,
+            (Some((id, at)), _) => Terminal::Forward(id, at),
+            (None, terminal) => terminal,
         };
         let short = stages.iter().any(|stage| matches!(stage, Stage::Limit(_)))
             || match &terminal {
-                Terminal::Find(_) | Terminal::Match { .. } => true,
+                // `WrappingSpliterator` pulls one element at a time.
+                Terminal::Find(_) | Terminal::Match { .. } | Terminal::Wrap(..) => true,
                 Terminal::Forward(outer, _) => self
                     .pipelines
                     .drives
@@ -1173,7 +1298,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let result = self
             .begin(&source, id)
             .and_then(|()| self.feed(&source, id))
-            .and_then(|()| self.flush(id, 0));
+            .and_then(|()| self.flush(id, 0))
+            .and_then(|()| self.drain_wrap(id));
         let drive = self.pipelines.drives.remove(&id);
         result?;
         drive
@@ -1212,7 +1338,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 let origin = self.pipelines.origins.get(marker).cloned();
                 let Some(origin) = origin else {
                     for value in values {
-                        if self.cancelled(id, 0) {
+                        if self.stop_pulling(id)? {
                             break;
                         }
                         self.accept(id, 0, value)?;
@@ -1222,11 +1348,24 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 self.feed_collection(&origin, values, id)
             }
             Source::Concat(a, b) => {
+                let short = self
+                    .pipelines
+                    .drives
+                    .get(&id)
+                    .is_some_and(|drive| drive.short);
                 for side in [a, b] {
-                    if self.cancelled(id, 0) {
+                    if self.stop_pulling(id)? {
                         break;
                     }
-                    self.drive(side, Terminal::Collect(Vec::new()), Some((id, 0)))?;
+                    // `ConcatSpliterator` over each side's `spliterator()`: a
+                    // side with stages is a `WrappingSpliterator`, which a
+                    // short-circuiting push pulls through a buffer; a bare
+                    // source is pulled directly.
+                    if short && !self.chain(side)?.1.is_empty() {
+                        self.drive(side, Terminal::Wrap(id, 0, Vec::new()), None)?;
+                    } else {
+                        self.drive(side, Terminal::Collect(Vec::new()), Some((id, 0)))?;
+                    }
                 }
                 Ok(())
             }
@@ -1239,7 +1378,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                     .is_some_and(|drive| drive.short);
                 if short {
                     // `copyIntoWithCancel`: one `tryAdvance` per element.
-                    while !self.cancelled(id, 0) {
+                    while !self.stop_pulling(id)? {
                         let advanced = self.call_virtual(
                             crate::jdk_call::Site::Interface,
                             "java/util/Spliterator",
@@ -1330,7 +1469,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         // may now read a stale array.
         let mut structural = false;
         for (index, bound_value) in values.into_iter().enumerate() {
-            if self.cancelled(id, 0) {
+            if self.stop_pulling(id)? {
                 break;
             }
             // A list's spliterator reads each element from the live list
@@ -1383,6 +1522,82 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             }
         }
         Ok(())
+    }
+
+    /// Before the source hands push `id` its next element: pass on what a
+    /// `Wrap` terminal buffered from the previous one, then whether to stop
+    /// (the push's own `cancellationRequested()`, or for a `Wrap` side, the
+    /// outer push no longer pulling).
+    fn stop_pulling(&mut self, id: u64) -> Result<bool, NativeError> {
+        self.drain_wrap(id)?;
+        let outer = match self.pipelines.drives.get(&id).map(|drive| &drive.terminal) {
+            Some(Terminal::Wrap(outer, next, _)) => Some((*outer, *next)),
+            _ => None,
+        };
+        Ok(self.cancelled(id, 0) || outer.is_some_and(|(outer, next)| self.cancelled(outer, next)))
+    }
+
+    /// Hand a `Wrap` terminal's buffered elements to the outer push, one at a
+    /// time, while it does not cancel; the rest are dropped, as the JDK's
+    /// buffer is once the outer push stops calling `tryAdvance`.
+    fn drain_wrap(&mut self, id: u64) -> Result<(), NativeError> {
+        let Some(Terminal::Wrap(outer, next, buffer)) = self
+            .pipelines
+            .drives
+            .get_mut(&id)
+            .map(|drive| &mut drive.terminal)
+        else {
+            return Ok(());
+        };
+        let (outer, next, buffer) = (*outer, *next, std::mem::take(buffer));
+        for value in buffer {
+            if self.cancelled(outer, next) {
+                break;
+            }
+            self.accept(outer, next, value)?;
+        }
+        Ok(())
+    }
+
+    /// Whether a source's spliterator reports `DISTINCT`: a host set's.
+    fn source_distinct(&self, source: &Source) -> bool {
+        match source {
+            Source::Values(marker) => self.pipelines.origins.get(marker).is_some_and(|origin| {
+                matches!(
+                    origin.class.as_str(),
+                    "java/util/HashSet" | "java/util/LinkedHashSet" | "java/util/TreeSet"
+                )
+            }),
+            Source::Concat(..) => false,
+            Source::Spliterator(spliterator) => {
+                self.spliterator_flags(spliterator) & crate::jdk_spliterators::DISTINCT != 0
+            }
+        }
+    }
+
+    /// Whether a source's spliterator reports `SORTED`: a `TreeSet`'s.
+    fn source_sorted(&self, source: &Source) -> bool {
+        match source {
+            Source::Values(marker) => self
+                .pipelines
+                .origins
+                .get(marker)
+                .is_some_and(|origin| origin.class == "java/util/TreeSet"),
+            Source::Concat(..) => false,
+            Source::Spliterator(spliterator) => {
+                self.spliterator_flags(spliterator) & crate::jdk_spliterators::SORTED != 0
+            }
+        }
+    }
+
+    /// The stream flags a spliterator source was made with
+    /// (`stream_of_spliterator`).
+    fn spliterator_flags(&self, spliterator: &Value) -> i32 {
+        self.pipelines
+            .spliterators
+            .values()
+            .find(|(source, _)| source == spliterator)
+            .map_or(0, |(_, flags)| *flags)
     }
 
     /// `cancellationRequested()` of push `id`'s sink at stage `at`.
@@ -1477,6 +1692,34 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 Ok(())
             }
             Stage::Distinct => {
+                if let Some(State::None) = self.state(id, at) {
+                    return self.accept(id, next, value);
+                }
+                if let Some(State::Adjacent(seen_null, last)) = self.state(id, at) {
+                    // `if (t == null) { if (!seenNull) pass } else if
+                    // (lastSeen == null || !t.equals(lastSeen)) pass`.
+                    let (seen_null, last) = (*seen_null, last.clone());
+                    let passes = if value == Value::Ref(None) {
+                        !seen_null
+                    } else {
+                        match last {
+                            None => true,
+                            Some(last) => !self.java_equals(&value, &last)?,
+                        }
+                    };
+                    if passes {
+                        if let Some(State::Adjacent(seen_null, last)) = self.state(id, at) {
+                            if value == Value::Ref(None) {
+                                *seen_null = true;
+                                *last = None;
+                            } else {
+                                *last = Some(value.clone());
+                            }
+                        }
+                        self.accept(id, next, value)?;
+                    }
+                    return Ok(());
+                }
                 let Some(State::Seen(set, _)) = self.state(id, at) else {
                     return self.accept(id, next, value);
                 };
@@ -1658,6 +1901,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 let (outer, next) = (*outer, *next);
                 self.accept(outer, next, value)?;
             }
+            Terminal::Wrap(_, _, buffer) => buffer.push(value),
         }
         Ok(())
     }
@@ -1720,9 +1964,12 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        // `Stream.builder()` only: `IntStream`/`LongStream`/`DoubleStream`
+        // builders are other classes (`Streams$IntStreamBuilderImpl`, an
+        // `IntConsumer`), not modelled, and stay counted.
         if r.name == "builder"
-            && is_stream_owner(&r.owner)
-            && r.descriptor.starts_with("()Ljava/util/stream/")
+            && r.owner == "java/util/stream/Stream"
+            && r.descriptor == "()Ljava/util/stream/Stream$Builder;"
         {
             let key = self.pipelines.next_builder.to_string();
             self.pipelines.next_builder += 1;

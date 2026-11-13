@@ -19,7 +19,7 @@
 //!   logger configured to drop the mod's output does.
 //!
 //! The module also answers `Path.resolveSibling`, which the host's path model
-//! lacked. Paths stay virtual (`path:<text>`): no call in this file reads or
+//! lacked. Paths stay virtual (`host_path.rs`): no call in this file reads or
 //! writes the host filesystem.
 
 use crate::runtime::{MethodRef, NativeError, Value, expect_ref, expect_string};
@@ -114,7 +114,7 @@ pub(crate) fn static_field(owner: &str, name: &str) -> Option<Value> {
         // `name()`/`toString` agree.
         "java/nio/file/StandardWatchEventKinds" => match name {
             "ENTRY_CREATE" | "ENTRY_DELETE" | "ENTRY_MODIFY" | "OVERFLOW" => {
-                Some(Value::Ref(Some(format!("watch-kind/{name}"))))
+                Some(crate::runtime::host_watch::watch_kind(name))
             }
             _ => None,
         },
@@ -359,6 +359,13 @@ pub(crate) fn instance_call(
     if r.owner == "java/nio/file/Path" && r.name == "resolveSibling" {
         return resolve_sibling(r, receiver, args).map(Ok);
     }
+    if let Some(kind) = crate::runtime::host_watch::watch_key(receiver, crate::runtime::HostKind::WatchKind) {
+        return matches!(
+            (r.name.as_str(), r.descriptor.as_str()),
+            ("name", "()Ljava/lang/String;")
+        )
+        .then(|| Ok(Value::Ref(Some(kind.to_owned()))));
+    }
     let marker = expect_ref(receiver)?;
     if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
         return charset_call(r, canonical, args);
@@ -399,14 +406,6 @@ pub(crate) fn instance_call(
         // `newWatchService` is `watch_service.rs`'s.
         return match (r.name.as_str(), r.descriptor.as_str()) {
             ("getSeparator", "()Ljava/lang/String;") => Some(Ok(Value::Ref(Some("/".into())))),
-            _ => None,
-        };
-    }
-    if let Some(kind) = marker.strip_prefix("watch-kind/") {
-        return match (r.name.as_str(), r.descriptor.as_str()) {
-            ("name" | "toString", "()Ljava/lang/String;") => {
-                Some(Ok(Value::Ref(Some(kind.to_owned()))))
-            }
             _ => None,
         };
     }
@@ -452,10 +451,13 @@ fn resolve_sibling(r: &MethodRef, receiver: &Value, args: &[Value]) -> Option<Va
     ) {
         return None;
     }
-    let path = expect_ref(receiver)?;
-    let path = path.strip_prefix("path:").unwrap_or(path);
-    let other = args.first().map(expect_string).unwrap_or_default();
-    let other = other.strip_prefix("path:").unwrap_or(other);
+    let path = crate::runtime::host_path::path_key(receiver)?;
+    let other = args.first().map(crate::runtime::path_text).unwrap_or_default();
+    // Text a path is made of must encode (`host_path::encodable`); left to
+    // the caller, which counts it.
+    if !crate::runtime::host_path::encodable(other) {
+        return None;
+    }
     let parent = path
         .trim_end_matches('/')
         .rsplit_once('/')
@@ -466,7 +468,7 @@ fn resolve_sibling(r: &MethodRef, receiver: &Value, args: &[Value]) -> Option<Va
         }
         _ => other.to_owned(),
     };
-    Some(Value::Ref(Some(format!("path:{resolved}"))))
+    Some(crate::runtime::path_value(&resolved))
 }
 
 /// Elements one `StreamSupport.stream` source may yield before the runtime
@@ -500,6 +502,8 @@ pub(crate) struct ToMap {
     guava: bool,
     entries: Vec<(Value, Value)>,
     map: Option<Value>,
+    /// The 4-argument form's map supplier (`TreeMap::new`, ...).
+    supplier: Option<Value>,
 }
 
 impl ToMap {
@@ -519,9 +523,15 @@ impl ToMap {
             .into_iter()
             .map(|marker| super::parse_collection_value(&marker))
             .collect::<Result<Vec<_>, _>>()?;
-        let (key_fn, value_fn, merge_fn) = match functions.as_slice() {
-            [key, value] => (key.clone(), value.clone(), None),
-            [key, value, merge] => (key.clone(), value.clone(), Some(merge.clone())),
+        let (key_fn, value_fn, merge_fn, supplier) = match functions.as_slice() {
+            [key, value] => (key.clone(), value.clone(), None, None),
+            [key, value, merge] => (key.clone(), value.clone(), Some(merge.clone()), None),
+            [key, value, merge, supplier] if !guava => (
+                key.clone(),
+                value.clone(),
+                Some(merge.clone()),
+                Some(supplier.clone()),
+            ),
             _ => return Ok(None),
         };
         Ok(Some(Self {
@@ -531,6 +541,7 @@ impl ToMap {
             guava,
             entries: Vec::new(),
             map: None,
+            supplier,
         }))
     }
 
@@ -563,12 +574,17 @@ pub(crate) fn to_map_collector(r: &MethodRef, args: &[Value]) -> Option<Value> {
         "(Ljava/util/function/Function;Ljava/util/function/Function;)Ljava/util/stream/Collector;" => {
             2
         }
-        // The merge overload, and the one that also names the map supplier:
-        // the bounded map keeps insertion order whichever map type was asked
-        // for, so the supplier is not called.
-        "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;)Ljava/util/stream/Collector;"
-        | "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;Ljava/util/function/Supplier;)Ljava/util/stream/Collector;" => {
+        // The merge overload (`HashMap::new`).
+        "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;)Ljava/util/stream/Collector;" => {
             3
+        }
+        // The one that also names the map supplier: the supplier makes the
+        // map and each element is `map.merge(k, v, merge)` on it
+        // (`ToMap::supplier`).
+        "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;Ljava/util/function/Supplier;)Ljava/util/stream/Collector;"
+            if !guava =>
+        {
+            4
         }
         _ => return None,
     };
@@ -899,6 +915,7 @@ fn platform_supertypes(class: &str) -> &'static [&'static str] {
         "java/util/concurrent/ConcurrentHashMap" => CONCURRENT_MAP,
         "java/util/ArrayDeque" | "java/util/concurrent/ConcurrentLinkedDeque" => DEQUE,
         "java/util/PriorityQueue" | "java/util/concurrent/ConcurrentLinkedQueue" => QUEUE,
+        "java/io/File" => &["java/io/Serializable", "java/lang/Comparable"],
         _ => &[],
     }
 }
@@ -1292,13 +1309,9 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         }
         let mut values = Vec::with_capacity(found.len() + 1);
         if r.name == "walk" {
-            values.push(Value::Ref(Some(format!("path:{path}"))));
+            values.push(crate::runtime::path_value(path));
         }
-        values.extend(
-            found
-                .into_iter()
-                .map(|entry| Value::Ref(Some(format!("path:{entry}")))),
-        );
+        values.extend(found.into_iter().map(|entry| crate::runtime::path_value(&entry)));
         // `spliteratorUnknownSize` over the directory iterator: not `SIZED`.
         let stream = self.new_stream(class, method, values);
         self.mark_unsized_stream(&stream);
@@ -1328,7 +1341,18 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let Some(mut state) = ToMap::begin(collector)? else {
             return Ok(None);
         };
-        if !state.guava {
+        if let Some(supplier) = state.supplier.clone() {
+            // `mapFactory.get()` in the sink's `begin`.
+            let map = self.call_sam("java/util/function/Supplier", &supplier, &[])?;
+            if map == Value::Ref(None) {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: None,
+                    frame: None,
+                });
+            }
+            state.map = Some(map);
+        } else if !state.guava {
             state.map = Some(self.new_collector_hash_map()?);
         }
         Ok(Some(state))
@@ -1344,6 +1368,24 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         state: &mut ToMap,
         element: &Value,
     ) -> Result<(), NativeError> {
+        if let (Some(map), Some(merge)) = (
+            state.map.clone(),
+            state.supplier.as_ref().and(state.merge_fn.clone()),
+        ) {
+            // `toMap(k, v, merge, mapFactory)`'s accumulator:
+            // `map.merge(keyMapper.apply(t), valueMapper.apply(t), merge)`.
+            let key = self.apply_function(&state.key_fn, element)?;
+            let value = self.apply_function(&state.value_fn, element)?;
+            self.call_virtual(
+                crate::runtime::jdk_call::Site::Interface,
+                "java/util/Map",
+                "merge",
+                "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+                &map,
+                &[key, value, merge],
+            )?;
+            return Ok(());
+        }
         if let Some(map) = state.map.clone() {
             // `Collectors.toMap`: `putIfAbsent` or `merge` on the `HashMap`.
             return self.hash_map_collect_one(&map, state, element);
@@ -1607,26 +1649,23 @@ mod tests {
         );
         let cases = [
             (
-                "path:/horizon/config",
+                "/horizon/config",
                 "defaultconfigs",
-                "path:/horizon/defaultconfigs",
+                "/horizon/defaultconfigs",
             ),
-            (
-                "path:/horizon/config/a.json",
-                "b.json",
-                "path:/horizon/config/b.json",
-            ),
-            ("path:config", "other", "path:other"),
-            ("path:/top", "x", "path:/x"),
-            ("path:/horizon/config", "/abs", "path:/abs"),
+            ("/horizon/config/a.json", "b.json", "/horizon/config/b.json"),
+            ("config", "other", "other"),
+            ("/top", "x", "/x"),
+            ("/horizon/config", "/abs", "/abs"),
         ];
         for (path, other, expected) in cases {
+            let path = crate::runtime::path_value(path);
             assert_eq!(
-                instance_call(&sibling, &text(path), &[text(other)])
+                instance_call(&sibling, &path, &[text(other)])
                     .unwrap()
                     .unwrap(),
-                text(expected),
-                "{path} sibling {other}"
+                crate::runtime::path_value(expected),
+                "{path:?} sibling {other}"
             );
         }
     }

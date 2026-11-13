@@ -76,6 +76,8 @@ fn in_java_base(class: &str) -> bool {
         "java/net/",
         "java/time/",
         "java/text/",
+        // `sun.nio.fs.UnixPath`, the watch service's classes.
+        "sun/nio/",
     ];
     const ELSEWHERE: &[&str] = &[
         "java/lang/instrument/",
@@ -146,6 +148,15 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Err(class_cast_exception(&runtime_class, target));
         }
+        // A `stream/...` text that is no live stream is a jar `String`
+        // spelled like one (`stream_pipeline::stream_marker`): never a stream.
+        if crate::runtime::stream_pipeline::is_stream_interface(target)
+            && let Value::Ref(Some(text)) = value
+            && text.starts_with("stream/")
+            && !self.is_live_stream(text)
+        {
+            return Err(class_cast_exception("java/lang/String", target));
+        }
         let Some(target_file) = self.class(target) else {
             // A JDK or game target: the runtime models those values by marker
             // and keeps its previous behaviour.
@@ -204,6 +215,30 @@ impl<H: Host> Runtime<'_, H> {
             Some(class) => HostCast::Throws(class),
             None => HostCast::Unknown,
         })
+    }
+
+    /// `value instanceof wanted` for a host handle, by its kind's row with
+    /// this runtime's hierarchy, for every check that is not the opcode (a
+    /// type switch label, `Class.isInstance`): an answer the row cannot give
+    /// is counted as `wanted#<instanceof>`, and the host's answer stands.
+    pub(crate) fn handle_instance_of(
+        &mut self,
+        handle: &HostRef,
+        wanted: &str,
+    ) -> Result<bool, NativeError> {
+        if let Some(answer) = handle.instance_of(wanted, self) {
+            return Ok(answer);
+        }
+        let check = MethodRef {
+            owner: wanted.to_owned(),
+            name: "<instanceof>".into(),
+            descriptor: "(Ljava/lang/Object;)Z".into(),
+        };
+        let value = Value::Host(handle.clone());
+        Ok(matches!(
+            self.host.invoke(&check, std::slice::from_ref(&value))?,
+            Value::Int(flag) if flag != 0
+        ))
     }
 
     /// The exact class of a value that is no handle, where the runtime knows
@@ -338,6 +373,16 @@ impl<H: Host> Runtime<'_, H> {
             Value::Void | Value::Ref(None) => return (Verdict::Yes, None),
             Value::Ref(Some(marker)) => marker.as_str(),
         };
+        // A `stream/...` text that is no live stream is a jar `String`
+        // spelled like one (`stream_pipeline::stream_marker`).
+        if marker.starts_with("stream/") && !self.is_live_stream(marker) {
+            let verdict = if self.forged_stream_instance_of(marker, target) {
+                Verdict::Yes
+            } else {
+                Verdict::No
+            };
+            return (verdict, Some("java/lang/String".into()));
+        }
         if marker.starts_with("@indy:") {
             // A lambda is an instance of its functional interface only.
             return match target_is_interface {
@@ -374,13 +419,11 @@ impl<H: Host> Runtime<'_, H> {
                 Some(class.to_owned()),
             );
         }
-        // A JDK value the runtime builds itself (a collection, an
-        // optional, a stream, a path): JDK classes never extend or implement a
-        // jar type.
+        // A JDK value the runtime builds itself (a collection, a stream, a
+        // builder): JDK classes never extend or implement a jar type.
         let jdk_kind = [
             "string-builder/",
             "stream/",
-            "path:",
             "list/",
             "set/",
             "map/",

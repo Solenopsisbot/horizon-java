@@ -427,6 +427,27 @@ public final class Probe {
             + sp.characteristics() + "," + sp.getComparator());
     }
 
+    /// A jar key whose `hashCode`/`equals` log.
+    static final class HK {
+        final int id;
+        HK(int id) { this.id = id; }
+        @Override public int hashCode() { log("h" + id); return id; }
+        @Override public boolean equals(Object o) { log("q" + id); return o instanceof HK k && k.id == id; }
+    }
+
+    /// A naturally `SORTED` jar spliterator.
+    static final class SortedSplit extends Split {
+        SortedSplit(Object... items) { super(Spliterator.SORTED | Spliterator.ORDERED, items); }
+        @Override public Comparator<? super Object> getComparator() { log("cmp"); return null; }
+    }
+
+    public static String distinctOverFlaggedSpliterators() {
+        long a = StreamSupport.stream(new Split(Spliterator.DISTINCT, new HK(1), new HK(1)), false).distinct().count();
+        log("|");
+        long b = StreamSupport.stream(new SortedSplit(new HK(1), new HK(1), new HK(2)), false).distinct().count();
+        return take(a + "," + b);
+    }
+
     public static String randomAccessMembers() {
         Spliterator<Object> sp = new Row("a", "b").spliterator();
         log("split");
@@ -546,6 +567,12 @@ fn jdk_spliterators_run_as_jdk_25_does() {
         // sink are host handles (`HostKind::Spliterator`/`Collector`/
         // `StreamSink`): their classes, identity and `instanceof`.
         ("sinkSwitch", " => consumer,false"),
+        // A jar spliterator's flags: `DISTINCT` makes `distinct()` the
+        // downstream itself; a natural `SORTED` compares neighbours.
+        (
+            "distinctOverFlaggedSpliterators",
+            "characteristics characteristics tryAdvance0 tryAdvance1 tryAdvance2 | characteristics cmp characteristics tryAdvance0 tryAdvance1 q1 tryAdvance2 q2 tryAdvance3 => 2,2",
+        ),
         (
             "sortedSetSpliterator",
             "comparator => java.util.SortedSet$1,true,16469,null",
