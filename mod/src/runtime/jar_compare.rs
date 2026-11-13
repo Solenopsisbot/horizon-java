@@ -24,9 +24,11 @@ impl<H: Host> Runtime<'_, H> {
         if let Value::Host(handle) = a {
             // A kind known not to be `Comparable` (an array) fails the
             // `(Comparable)` cast, as `ComparableTimSort` does.
-            if handle.instance_of("java/lang/Comparable", self) == Some(false) {
+            if handle.instance_of("java/lang/Comparable", self) == Some(false)
+                && let Some(class) = handle.class()
+            {
                 return Err(crate::runtime::checkcast::class_cast_exception(
-                    handle.class(),
+                    class,
                     "java/lang/Comparable",
                 ));
             }

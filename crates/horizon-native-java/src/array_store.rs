@@ -145,10 +145,10 @@ impl<H: Host> Runtime<'_, H> {
     fn stored_class(&self, value: &Value) -> Option<String> {
         match value {
             // A shared empty array's exact class is unknown.
-            Value::Host(handle) if handle.kind() == HostKind::Array => {
+            Value::Host(_) if host_array::array_key(value).is_some() => {
                 host_array::exact_class(value).map(str::to_owned)
             }
-            Value::Host(handle) => Some(handle.class().to_owned()),
+            Value::Host(handle) => handle.class().map(str::to_owned),
             other => self.exact_class(other),
         }
     }

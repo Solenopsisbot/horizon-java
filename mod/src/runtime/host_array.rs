@@ -85,7 +85,15 @@ pub(crate) fn handle(key: impl Into<std::sync::Arc<str>>) -> Value {
 /// The empty array of `class` (`[Ljava/lang/String;`) the runtime answers
 /// where it has no array of its own to give (see the module notes).
 pub(crate) fn shared_empty(class: &str) -> Value {
-    handle(key_of_empty(class))
+    Value::Host(HostRef::new(HostKind::UnknownArray, key_of_empty(class)))
+}
+
+/// The types a shared empty array surely is, whatever its runtime class
+/// ([`HostKind::UnknownArray`]'s `ClassRule::Unknown`): every array's.
+/// Its declared array class is in the key, and the kind's `instance_of`
+/// reads it from there.
+pub(crate) fn surely(_key: &str) -> &'static [&'static str] {
+    &["java/lang/Object", "java/lang/Cloneable", "java/io/Serializable"]
 }
 
 fn key_of_empty(class: &str) -> String {
@@ -108,7 +116,11 @@ pub(crate) fn is_shared_empty(key: &str) -> bool {
 /// `String` spelled like an array is no array).
 pub(crate) fn array_key(value: &Value) -> Option<&str> {
     match value {
-        Value::Host(handle) if handle.kind() == HostKind::Array => Some(handle.key()),
+        Value::Host(handle)
+            if matches!(handle.kind(), HostKind::Array | HostKind::UnknownArray) =>
+        {
+            Some(handle.key())
+        }
         _ => None,
     }
 }
@@ -144,7 +156,7 @@ fn equals(
 /// `Cloneable` and `Serializable`, and to another array class when its
 /// components are (JLS 4.10.3: `String[]` is an `Object[]`, `int[]` is not).
 fn instance_of(handle: &HostRef, wanted: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
-    let answer = class_assignable(handle.class(), wanted, hierarchy);
+    let answer = class_assignable(class_of_key(handle.key()), wanted, hierarchy);
     if is_shared_empty(handle.key()) {
         // Only the declared type is known, not the exact class.
         return answer.filter(|fits| *fits);
@@ -251,7 +263,7 @@ mod tests {
                 handle.instance_of(wanted, &JdkHierarchy),
                 Some(expected),
                 "{} instanceof {wanted}",
-                handle.class()
+                class_of_key(handle.key())
             );
         }
     }

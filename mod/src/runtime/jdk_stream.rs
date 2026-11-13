@@ -194,9 +194,10 @@ pub(crate) fn natural_compare(a: &Value, b: &Value) -> Result<i32, NativeError> 
     // be `Comparable` (an array) fails the cast, as `ComparableTimSort` does.
     if let Value::Host(handle) = a
         && handle.instance_of("java/lang/Comparable", &crate::runtime::host_ref::JdkHierarchy) == Some(false)
+        && let Some(class) = handle.class()
     {
         return Err(crate::runtime::checkcast::class_cast_exception(
-            handle.class(),
+            class,
             "java/lang/Comparable",
         ));
     }
