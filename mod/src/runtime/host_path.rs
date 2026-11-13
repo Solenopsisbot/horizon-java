@@ -20,8 +20,17 @@
 //!   hash (counted). `get()` answers the virtual root the loader hands out
 //!   (`neoforge_loader.rs`).
 
+use crate::runtime::Value;
 use crate::runtime::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, instance_of_class};
-use crate::runtime::{Value, host_jdk::identity_equals};
+
+/// `self == other` as `Object.equals` answers it: `None` when only the JVM
+/// knows (equal keys of a kind that is not canonical, two constructions).
+pub(crate) fn identity_equals(handle: &HostRef, other: &Value) -> Option<bool> {
+    match other {
+        Value::Host(other) => handle.same_object(other),
+        _ => Some(false),
+    }
+}
 
 /// `UnixPath`'s supertypes (and itself), for `instanceof`/`checkcast`.
 const PATH_TYPES: &[&str] = &[
@@ -47,6 +56,15 @@ pub(crate) fn unix_normal(path: &str) -> String {
         normal.pop();
     }
     normal
+}
+
+/// Whether text a `Path` is made of encodes the same on every machine.
+/// `UnixPath` encodes it in `sun.jnu.encoding`, the machine's locale: Java 25
+/// threw `InvalidPathException` for `Path.of("/é")` under the POSIX locale and
+/// made the path under `C.UTF-8`. Only ASCII is the same everywhere, so the
+/// callers count a path made of anything else (and still answer it).
+pub(crate) fn encodable(text: &str) -> bool {
+    text.is_ascii()
 }
 
 /// `Path.of(text)`: a new path object.
@@ -81,6 +99,25 @@ fn path_hash(path: &str) -> Option<i32> {
     })
 }
 
+/// `UnixPath.compareTo`: the first differing byte's difference
+/// (`b & 0xff`), else the length difference. Bytes are `sun.jnu.encoding`'s,
+/// so only two ASCII paths compare the same everywhere; `None` (counted)
+/// otherwise, or for anything that is no path (Java's `ClassCastException`).
+fn path_compare(path: &str, other: &Value) -> Option<i32> {
+    let other = path_key(other)?;
+    if !path.is_ascii() || !other.is_ascii() {
+        return None;
+    }
+    Some(
+        path.bytes()
+            .zip(other.bytes())
+            .find(|(a, b)| a != b)
+            .map_or(path.len() as i32 - other.len() as i32, |(a, b)| {
+                i32::from(a) - i32::from(b)
+            }),
+    )
+}
+
 pub(crate) const PATH: Methods = Methods {
     to_string: |handle, _| Ok(Some(handle.key().to_owned())),
     hash_code: |handle, _| Ok(path_hash(handle.key())),
@@ -88,6 +125,7 @@ pub(crate) const PATH: Methods = Methods {
     equals: |handle, other, _| Ok(Some(path_key(other) == Some(handle.key()))),
     instance_of: |_, wanted, _| Some(PATH_TYPES.contains(&wanted)),
     crosses_jars: |_, _| true,
+    compare_to: Some(|handle, other, _| Ok(path_compare(handle.key(), other))),
 };
 
 /// `FMLPaths`.
@@ -112,6 +150,9 @@ pub(crate) const FML_PATHS: Methods = Methods {
     equals: |handle, other, _| Ok(identity_equals(handle, other)),
     instance_of: fml_paths_instance_of,
     crosses_jars: |_, _| true,
+    // `Enum.compareTo` is the ordinal difference; the model keeps no
+    // ordinals for `FMLPaths`: counted.
+    compare_to: None,
 };
 
 /// An enum constant: its class, `Enum` and `Enum`'s interfaces.

@@ -16,7 +16,7 @@
 //! Java 25 run (`tests/fixture_host_values_p2.rs`).
 
 use crate::Value;
-use crate::host_jdk::identity_equals;
+use crate::host_path::identity_equals;
 use crate::host_ref::{ClassHierarchy, HostKind, HostRef, Methods};
 
 /// `StandardWatchEventKinds.<name>`.
@@ -44,7 +44,7 @@ fn instance_of(handle: &HostRef, wanted: &str, _: &dyn ClassHierarchy) -> Option
         HostKind::WatchKey => &["sun/nio/fs/AbstractWatchKey", "java/nio/file/WatchKey"],
         _ => &["java/nio/file/WatchEvent"],
     };
-    Some(wanted == "java/lang/Object" || wanted == handle.class() || types.contains(&wanted))
+    Some(wanted == "java/lang/Object" || handle.class() == Some(wanted) || types.contains(&wanted))
 }
 
 pub(crate) const WATCH_KIND: Methods = Methods {
@@ -53,6 +53,7 @@ pub(crate) const WATCH_KIND: Methods = Methods {
     equals: |handle, other, _| Ok(identity_equals(handle, other)),
     instance_of,
     crosses_jars: |_, _| true,
+    compare_to: None,
 };
 
 /// A service, key or event: the run's own state.

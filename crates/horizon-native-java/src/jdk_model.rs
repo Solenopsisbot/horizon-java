@@ -13,17 +13,15 @@
 //!   charsets every JVM must ship (`StandardCharsets`) are known; any other
 //!   name raises `UnsupportedCharsetException`, as a JVM without that charset
 //!   would.
-//! * a logger (a `HostKind::Logger` handle, `host_jdk.rs`): log4j, slf4j,
-//!   `java.util.logging`, `System.Logger` or Mojang `LogUtils`. Nothing is
-//!   written anywhere: every level reports disabled and every logging call
-//!   returns without effect, which is what a logger configured to drop the
-//!   mod's output does.
+//! * `logger/<name>`: a log4j, slf4j, `java.util.logging` or Mojang
+//!   `LogUtils` logger. Nothing is written anywhere: every level reports
+//!   disabled and every logging call returns without effect, which is what a
+//!   logger configured to drop the mod's output does.
 //!
 //! The module also answers `Path.resolveSibling`, which the host's path model
 //! lacked. Paths stay virtual (`host_path.rs`): no call in this file reads or
 //! writes the host filesystem.
 
-use crate::host_jdk::logger_value;
 use crate::{MethodRef, NativeError, Value, expect_ref, expect_string};
 
 /// The canonical names of the charsets `java.nio.charset.StandardCharsets`
@@ -39,9 +37,15 @@ const STANDARD_CHARSETS: &[(&str, &str)] = &[
 
 /// Prefix of a modelled `Charset` marker.
 const CHARSET_PREFIX: &str = "charset/";
+/// Prefix of a modelled logger marker.
+const LOGGER_PREFIX: &str = "logger/";
 
 fn charset_value(canonical: &str) -> Value {
     Value::Ref(Some(format!("{CHARSET_PREFIX}{canonical}")))
+}
+
+fn logger_value(name: &str) -> Value {
+    Value::Ref(Some(format!("{LOGGER_PREFIX}{name}")))
 }
 
 /// The canonical name `Charset.forName` resolves `name` to, matching the
@@ -219,31 +223,24 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         ("org/apache/logging/log4j/LogManager", "getLogger" | "getFormatterLogger", descriptor)
             if descriptor.ends_with(")Lorg/apache/logging/log4j/Logger;") =>
         {
-            let api = if r.name == "getLogger" {
-                "log4j"
-            } else {
-                "log4j-formatter"
-            };
-            Some(Ok(logger_value(api, &logger_name(args))))
+            Some(Ok(logger_value(&logger_name(args))))
         }
-        ("org/apache/logging/log4j/LogManager", "getRootLogger", _) => {
-            Some(Ok(logger_value("log4j", "")))
-        }
+        ("org/apache/logging/log4j/LogManager", "getRootLogger", _) => Some(Ok(logger_value(""))),
         ("org/slf4j/LoggerFactory", "getLogger", descriptor)
             if descriptor.ends_with(")Lorg/slf4j/Logger;") =>
         {
-            Some(Ok(logger_value("slf4j", &logger_name(args))))
+            Some(Ok(logger_value(&logger_name(args))))
         }
         // Mojang's `LogUtils.getLogger()` names the caller's class through a
         // stack walk; the bounded runtime has no stack to walk, so the logger
         // is anonymous. Its name is never observable through a disabled logger.
         ("com/mojang/logging/LogUtils", "getLogger", "()Lorg/slf4j/Logger;") => {
-            Some(Ok(logger_value("mojang", "")))
+            Some(Ok(logger_value("")))
         }
         ("java/util/logging/Logger", "getLogger", descriptor)
             if descriptor.ends_with(")Ljava/util/logging/Logger;") =>
         {
-            Some(Ok(logger_value("jul", &logger_name(args))))
+            Some(Ok(logger_value(&logger_name(args))))
         }
         // `System.getLogger(String[, ResourceBundle])`: the JDK's
         // `System.Logger` is answered by the same disabled-logger model as
@@ -252,11 +249,14 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         ("java/lang/System", "getLogger", descriptor)
             if descriptor.ends_with(")Ljava/lang/System$Logger;") =>
         {
-            Some(Ok(logger_value("system", &logger_name(args))))
+            Some(Ok(logger_value(&logger_name(args))))
         }
-        ("java/util/logging/Logger", "getGlobal", _) => Some(Ok(logger_value("jul", "global"))),
-        ("java/util/logging/Logger", "getAnonymousLogger", _) => {
-            Some(Ok(logger_value("jul-anonymous", "")))
+        ("java/util/logging/Logger", "getGlobal" | "getAnonymousLogger", _) => {
+            Some(Ok(logger_value(if r.name == "getGlobal" {
+                "global"
+            } else {
+                ""
+            })))
         }
         // The single runtime object. `availableProcessors` and the memory
         // reads already answer on it (a single-threaded bounded runtime is one
@@ -359,11 +359,6 @@ pub(crate) fn instance_call(
     if r.owner == "java/nio/file/Path" && r.name == "resolveSibling" {
         return resolve_sibling(r, receiver, args).map(Ok);
     }
-    if let Some(name) = crate::host_jdk::logger_name(receiver)
-        && is_logger_owner(&r.owner)
-    {
-        return logger_call(r, name);
-    }
     if let Some(kind) = crate::host_watch::watch_key(receiver, crate::HostKind::WatchKind) {
         return matches!(
             (r.name.as_str(), r.descriptor.as_str()),
@@ -374,6 +369,11 @@ pub(crate) fn instance_call(
     let marker = expect_ref(receiver)?;
     if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
         return charset_call(r, canonical, args);
+    }
+    if let Some(name) = marker.strip_prefix(LOGGER_PREFIX)
+        && (is_logger_owner(&r.owner) || r.owner == "java/lang/Object")
+    {
+        return logger_call(r, name);
     }
     if let Some(kind) = marker.strip_prefix("fabric-resource-loader/") {
         return match (r.name.as_str(), r.descriptor.as_str()) {
@@ -453,6 +453,11 @@ fn resolve_sibling(r: &MethodRef, receiver: &Value, args: &[Value]) -> Option<Va
     }
     let path = crate::host_path::path_key(receiver)?;
     let other = args.first().map(crate::path_text).unwrap_or_default();
+    // Text a path is made of must encode (`host_path::encodable`); left to
+    // the caller, which counts it.
+    if !crate::host_path::encodable(other) {
+        return None;
+    }
     let parent = path
         .trim_end_matches('/')
         .rsplit_once('/')
@@ -696,146 +701,47 @@ impl crate::StdHost {
 /// value type: java/lang/Integer") refused values the JVM accepts. Only the
 /// public types a library tests for are listed.
 fn platform_supertypes(class: &str) -> &'static [&'static str] {
-    const NUMBER: &[&str] = &[
-        "java/lang/Number",
-        "java/lang/Comparable",
-        "java/io/Serializable",
-        "java/lang/constant/Constable",
-    ];
-    const COMPARABLE_VALUE: &[&str] = &[
-        "java/lang/Comparable",
-        "java/io/Serializable",
-        "java/lang/constant/Constable",
-    ];
-    const LIST: &[&str] = &[
-        "java/util/List",
-        "java/util/SequencedCollection",
-        "java/util/Collection",
-        "java/lang/Iterable",
-        "java/util/AbstractList",
-        "java/util/AbstractCollection",
-        "java/util/RandomAccess",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const LINKED_LIST: &[&str] = &[
-        "java/util/List",
-        "java/util/Deque",
-        "java/util/Queue",
-        "java/util/SequencedCollection",
-        "java/util/Collection",
-        "java/lang/Iterable",
-        "java/util/AbstractSequentialList",
-        "java/util/AbstractList",
-        "java/util/AbstractCollection",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const SET: &[&str] = &[
-        "java/util/Set",
-        "java/util/Collection",
-        "java/lang/Iterable",
-        "java/util/AbstractSet",
-        "java/util/AbstractCollection",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const SEQUENCED_SET: &[&str] = &[
-        "java/util/Set",
-        "java/util/SequencedSet",
-        "java/util/SequencedCollection",
+    // The classes the platform models answer for. Their supertypes are Java 25's, generated
+    // (`jdk_closure.rs`), not written by hand: the hand rows made `WeakHashMap` a `Cloneable`,
+    // `Hashtable` an `AbstractMap` and `CopyOnWriteArrayList` an `AbstractList` (#163).
+    const CLASSES: &[&str] = &[
+        "java/lang/Integer",
+        "java/lang/Long",
+        "java/lang/Short",
+        "java/lang/Byte",
+        "java/lang/Float",
+        "java/lang/Double",
+        "java/lang/Boolean",
+        "java/lang/Character",
+        "java/util/ArrayList",
+        "java/util/Vector",
+        "java/util/Stack",
+        "java/util/concurrent/CopyOnWriteArrayList",
+        "java/util/LinkedList",
         "java/util/HashSet",
-        "java/util/Collection",
-        "java/lang/Iterable",
-        "java/util/AbstractSet",
-        "java/util/AbstractCollection",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const SORTED_SET: &[&str] = &[
-        "java/util/Set",
-        "java/util/SortedSet",
-        "java/util/NavigableSet",
-        "java/util/SequencedSet",
-        "java/util/SequencedCollection",
-        "java/util/Collection",
-        "java/lang/Iterable",
-        "java/util/AbstractSet",
-        "java/util/AbstractCollection",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const MAP: &[&str] = &[
-        "java/util/Map",
-        "java/util/AbstractMap",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const SEQUENCED_MAP: &[&str] = &[
-        "java/util/Map",
-        "java/util/SequencedMap",
+        "java/util/concurrent/CopyOnWriteArraySet",
+        "java/util/LinkedHashSet",
+        "java/util/TreeSet",
+        "java/util/concurrent/ConcurrentSkipListSet",
         "java/util/HashMap",
-        "java/util/AbstractMap",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
+        "java/util/IdentityHashMap",
+        "java/util/WeakHashMap",
+        "java/util/EnumMap",
+        "java/util/Hashtable",
+        "java/util/LinkedHashMap",
+        "java/util/TreeMap",
+        "java/util/concurrent/ConcurrentSkipListMap",
+        "java/util/concurrent/ConcurrentHashMap",
+        "java/util/ArrayDeque",
+        "java/util/concurrent/ConcurrentLinkedDeque",
+        "java/util/PriorityQueue",
+        "java/util/concurrent/ConcurrentLinkedQueue",
+        "java/io/File",
     ];
-    const SORTED_MAP: &[&str] = &[
-        "java/util/Map",
-        "java/util/SortedMap",
-        "java/util/NavigableMap",
-        "java/util/SequencedMap",
-        "java/util/AbstractMap",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const CONCURRENT_MAP: &[&str] = &[
-        "java/util/Map",
-        "java/util/concurrent/ConcurrentMap",
-        "java/util/AbstractMap",
-        "java/io/Serializable",
-    ];
-    const DEQUE: &[&str] = &[
-        "java/util/Deque",
-        "java/util/Queue",
-        "java/util/SequencedCollection",
-        "java/util/Collection",
-        "java/lang/Iterable",
-        "java/util/AbstractCollection",
-        "java/lang/Cloneable",
-        "java/io/Serializable",
-    ];
-    const QUEUE: &[&str] = &[
-        "java/util/Queue",
-        "java/util/Collection",
-        "java/lang/Iterable",
-        "java/util/AbstractQueue",
-        "java/util/AbstractCollection",
-        "java/io/Serializable",
-    ];
-    match class {
-        "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
-        | "java/lang/Float" | "java/lang/Double" => NUMBER,
-        "java/lang/Boolean" | "java/lang/Character" => COMPARABLE_VALUE,
-        "java/util/ArrayList"
-        | "java/util/Vector"
-        | "java/util/Stack"
-        | "java/util/concurrent/CopyOnWriteArrayList" => LIST,
-        "java/util/LinkedList" => LINKED_LIST,
-        "java/util/HashSet" | "java/util/concurrent/CopyOnWriteArraySet" => SET,
-        "java/util/LinkedHashSet" => SEQUENCED_SET,
-        "java/util/TreeSet" | "java/util/concurrent/ConcurrentSkipListSet" => SORTED_SET,
-        "java/util/HashMap"
-        | "java/util/IdentityHashMap"
-        | "java/util/WeakHashMap"
-        | "java/util/EnumMap"
-        | "java/util/Hashtable" => MAP,
-        "java/util/LinkedHashMap" => SEQUENCED_MAP,
-        "java/util/TreeMap" | "java/util/concurrent/ConcurrentSkipListMap" => SORTED_MAP,
-        "java/util/concurrent/ConcurrentHashMap" => CONCURRENT_MAP,
-        "java/util/ArrayDeque" | "java/util/concurrent/ConcurrentLinkedDeque" => DEQUE,
-        "java/util/PriorityQueue" | "java/util/concurrent/ConcurrentLinkedQueue" => QUEUE,
-        "java/io/File" => &["java/io/Serializable", "java/lang/Comparable"],
-        _ => &[],
+    if CLASSES.contains(&class) {
+        crate::jdk_closure::below_object(class)
+    } else {
+        &[]
     }
 }
 
