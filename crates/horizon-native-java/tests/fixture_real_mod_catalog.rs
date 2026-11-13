@@ -370,7 +370,8 @@ version = "1.0"
         registration.key(),
         "deferred-register/minecraft:item/catalog-neo/sapphire"
     );
-    assert!(matches!(registration.value, Value::Ref(Some(_))));
+    // The value the supplier registers: a host handle (`registered`), never text.
+    assert!(matches!(registration.value, Value::Host(_)));
     assert!(registration.declaration.is_none(), "Java content is opaque");
 
     // The listener is recorded on the event bus and dispatched natively; the
@@ -540,7 +541,7 @@ version = "1.0"
         host.registrations()[0].key(),
         "deferred-register/item/catalog-legacy/emerald_shard"
     );
-    assert!(matches!(host.registrations()[0].value, Value::Ref(Some(_))));
+    assert!(matches!(host.registrations()[0].value, Value::Host(_)));
 
     // SimpleChannel is carried as a bounded bidirectional payload.
     assert_called!(&host, FORGE_CHANNEL, "registerMessage", 1);

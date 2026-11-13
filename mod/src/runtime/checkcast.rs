@@ -216,11 +216,15 @@ impl<H: Host> Runtime<'_, H> {
                 None => HostCast::Unknown,
             });
         }
+        // A String spelled like a registry, holder or builder once was.
+        if let Some(class) = crate::runtime::host_registry::retired_marker_cast(value, target) {
+            return Some(HostCast::Throws(class));
+        }
         // An array class's objects are array handles only (`host_array.rs`).
         if !target.starts_with('[') {
             HostKind::of_class(target)?;
         }
-        if *value == Value::Ref(None) || crate::runtime::host_ids::text_is_a(value, target) {
+        if *value == Value::Ref(None) {
             return Some(HostCast::Fits);
         }
         Some(match self.exact_class(value) {
