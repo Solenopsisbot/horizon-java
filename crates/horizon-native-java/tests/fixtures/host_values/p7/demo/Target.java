@@ -5,4 +5,5 @@ public final class Target {
   public static void run() {}
   public static void hash() {}
   public static void twice() {}
+  public static int strict() { return 6; }
 }

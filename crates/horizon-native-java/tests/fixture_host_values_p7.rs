@@ -9,8 +9,9 @@
 //! printed on Java 25 (OpenJDK 25.0.5, `javac --release 21`, two runs alike)
 //! against the real libraries: cloth-config 26.3.159, yet_another_config_lib_v3
 //! 3.9.7, supermartijn642configlib 1.1.8a, sponge-mixin 0.17.5+mixin.0.8.7
-//! (`demo/Main.java` is that run's driver; for a callback it builds the object
-//! Mixin's injector builds for the target). Each method is either answered as
+//! (`demo/Main.java` and `demo/MixinMain.java` are that run's drivers; for a
+//! callback the second builds the object Mixin's injector builds for the
+//! target). Each method is either answered as
 //! Java 25 does, uncounted, or counted with exactly the calls named.
 
 #[path = "support/javac_fixture.rs"]
@@ -107,6 +108,12 @@ const SOURCES: &[(&str, &str)] = &[
         ),
     ),
     (
+        "org/spongepowered/asm/mixin/injection/callback/CancellationException.java",
+        include_str!(
+            "fixtures/host_values/p7/stubs/org/spongepowered/asm/mixin/injection/callback/CancellationException.java"
+        ),
+    ),
+    (
         "org/spongepowered/asm/mixin/injection/callback/Cancellable.java",
         include_str!(
             "fixtures/host_values/p7/stubs/org/spongepowered/asm/mixin/injection/callback/Cancellable.java"
@@ -149,29 +156,55 @@ fn run(fixture: &Fixture, class: &str, method: &str) -> (String, Vec<(String, us
     (text, host.unknown_host_calls())
 }
 
-/// Run the Mixin injections on `demo/Target.<name>`: the marks the callbacks
-/// left (`log/Probe.mark`) and the calls they counted.
-fn inject(fixture: &Fixture, name: &str, descriptor: &str) -> (Vec<String>, Vec<(String, usize)>) {
+/// What the Mixin injections on `demo/Target.<name>` left: the callbacks'
+/// marks (`log/Probe.mark`), the objects they were handed (`log/Probe.see`),
+/// the calls they counted and the target's result.
+struct Injected {
+    marks: Vec<String>,
+    seen: Vec<Value>,
+    unknown: Vec<(String, usize)>,
+    result: Value,
+}
+
+fn inject(fixture: &Fixture, name: &str, descriptor: &str) -> Injected {
     let mut host = StdHost::new();
     let target = MethodRef {
         owner: "demo/Target".into(),
         name: name.into(),
         descriptor: descriptor.into(),
     };
-    fixture
+    let report = fixture
         .jar
         .execute_discovered_mixins(&target, None, &[], &mut host)
         .unwrap_or_else(|error| panic!("{name} failed: {error}"));
-    let marks = host
-        .invocations()
-        .iter()
-        .filter(|invocation| invocation.method.owner == "log/Probe")
-        .filter_map(|invocation| match invocation.args.first() {
-            Some(Value::Ref(Some(text))) => Some(text.clone()),
+    let probed = |method: &str| -> Vec<Value> {
+        host.invocations()
+            .iter()
+            .filter(|invocation| {
+                invocation.method.owner == "log/Probe" && invocation.method.name == method
+            })
+            .filter_map(|invocation| invocation.args.first().cloned())
+            .collect()
+    };
+    let marks = probed("mark")
+        .into_iter()
+        .filter_map(|value| match value {
+            Value::Ref(Some(text)) => Some(text),
             _ => None,
         })
         .collect();
-    (marks, host.unknown_host_calls())
+    let seen = probed("see");
+    let unknown = host
+        .unknown_host_calls()
+        .into_iter()
+        .filter(|(call, _)| !call.starts_with("log/Probe#"))
+        .collect();
+    Injected {
+        marks,
+        seen,
+        unknown,
+        result: report.target_result,
+    }
 }
 
 /// `(class, method, Java 25's answer)`: answered exactly, nothing counted.
@@ -266,32 +299,58 @@ fn no_string_spells_a_config_or_mixin_object_and_they_answer_as_java_25() {
 
 /// The `CallbackInfo` an injection point hands its callbacks, as each callback
 /// observes it, against the object Mixin's injector builds for the target on
-/// Java 25: a `CallbackInfoReturnable` for `count()I`, a `CallbackInfo` for
-/// `run()V`; `cancel()`/`isCancelled()` act on it; two callbacks at one point
-/// get one object. Its `hashCode` is the identity hash: counted.
+/// Java 25 (`demo/MixinMain.java`): a `CallbackInfoReturnable` for `count()I`,
+/// a `CallbackInfo` for `run()V`; `cancel()`/`isCancelled()` act on it. On an
+/// `@Inject` that is not cancellable, `cancel()` and `setReturnValue` throw
+/// Mixin's `CancellationException` (a `RuntimeException`) and the target's
+/// result stays. Its `hashCode` is the identity hash: counted.
 #[test]
 fn a_callback_info_answers_as_the_one_mixin_builds() {
     let fixture = fixture("p7-mixin");
-    let probe = ("log/Probe#mark(Ljava/lang/String;)V".to_owned(), 0);
-    let without_probe = |unknown: Vec<(String, usize)>| {
-        unknown
-            .into_iter()
-            .filter(|(call, _)| *call != probe.0)
-            .collect::<Vec<_>>()
-    };
-    let (marks, unknown) = inject(&fixture, "count", "()I");
-    assert_eq!(marks, ["truetruetruetruetruefalsefalse", "truefalse"]);
-    assert_eq!(without_probe(unknown), []);
-    let (marks, unknown) = inject(&fixture, "run", "()V");
-    assert_eq!(marks, ["truefalsetruetruefalse"]);
-    assert_eq!(without_probe(unknown), []);
-    let (marks, unknown) = inject(&fixture, "twice", "()V");
-    assert_eq!(marks, ["1", "1"]);
-    assert_eq!(without_probe(unknown), []);
-    let (marks, unknown) = inject(&fixture, "hash", "()V");
-    assert_eq!(marks, ["true"]);
+    let count = inject(&fixture, "count", "()I");
+    assert_eq!(count.marks, ["truetruetruetruetruefalsefalse", "truefalse"]);
+    assert_eq!(count.unknown, []);
+    let run = inject(&fixture, "run", "()V");
     assert_eq!(
-        without_probe(unknown),
+        run.marks,
+        [
+            "truefalsetruetruefalse",
+            "org.spongepowered.asm.mixin.injection.callback.CancellationException:The call run is not cancellable.",
+            "runtime:true",
+            "false",
+        ]
+    );
+    assert_eq!(run.unknown, []);
+    let strict = inject(&fixture, "strict", "()I");
+    assert_eq!(
+        strict.marks,
+        ["6", "The call strict is not cancellable.", "false6"]
+    );
+    assert_eq!(strict.unknown, []);
+    assert_eq!(strict.result, Value::Int(6));
+    let hash = inject(&fixture, "hash", "()V");
+    assert_eq!(hash.marks, ["true"]);
+    assert_eq!(
+        hash.unknown,
         [("java/lang/Object#hashCode()I".to_owned(), 2)]
     );
+}
+
+/// Mixin keeps one `CallbackInfo` per `@Inject` (`CallbackInjector`'s
+/// `callbackInfoVar`, sponge-mixin 0.17.5), so the two injectors on
+/// `twice()V` are handed two objects (Java 25: `first == second` is `false`).
+/// A jar static does not yet carry from one callback to the next in one
+/// execution, so the objects are compared as the callbacks hand them to a
+/// host call: two handles with different keys, which `==`,
+/// `IdentityHashMap` and `equals` answer as two objects.
+#[test]
+fn each_inject_gets_its_own_callback_info() {
+    let fixture = fixture("p7-twice");
+    let twice = inject(&fixture, "twice", "()V");
+    assert_eq!(twice.unknown, []);
+    let [Value::Host(first), Value::Host(second)] = twice.seen.as_slice() else {
+        panic!("two callback infos, got {:?}", twice.seen);
+    };
+    assert_eq!(first.kind(), second.kind());
+    assert_ne!(first.key(), second.key());
 }

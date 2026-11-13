@@ -15,10 +15,13 @@ public abstract class InfoMixin {
   private static void runHead(CallbackInfo info) { Observe.plain(info); }
 
   @Inject(method = "twice()V", at = @At("HEAD"))
-  private static void twiceFirst(CallbackInfo info) { Observe.collect(info); }
+  private static void twiceFirst(CallbackInfo info) { Observe.twice(info); }
 
   @Inject(method = "twice()V", at = @At("HEAD"))
-  private static void twiceSecond(CallbackInfo info) { Observe.collect(info); }
+  private static void twiceSecond(CallbackInfo info) { Observe.twice(info); }
+
+  @Inject(method = "strict()I", at = @At("RETURN"))
+  private static void strictReturn(CallbackInfoReturnable<Integer> info) { Observe.strict(info); }
 
   @Inject(method = "hash()V", at = @At("HEAD"))
   private static void hashHead(CallbackInfo info) { Observe.hashed(info); }

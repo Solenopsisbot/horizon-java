@@ -18,7 +18,7 @@
 //!
 //! | kind | key | surely a | identity |
 //! |---|---|---|---|
-//! | [`HostKind::CallbackInfo`] | target owner, name, returns a value | `CallbackInfoReturnable` for a target with a result, else `CallbackInfo`; both a `Cancellable` | a new object per injection point call |
+//! | [`HostKind::CallbackInfo`] | target owner, name, returns a value; cancellable; the injector's handler | `CallbackInfoReturnable` for a target with a result, else `CallbackInfo`; both a `Cancellable` | a new object per injector per call of the target |
 //! | [`HostKind::MixinClassNode`] | the target class | `org.objectweb.asm.tree.ClassNode` | one per apply |
 //! | [`HostKind::MixinInfo`] | the Mixin class | `IMixinInfo` (Mixin's `MixinInfo`) | one per Mixin |
 //! | [`HostKind::MixinEnvironment`] | none | `MixinEnvironment` (final), an `ITokenProvider` | one per phase |
@@ -28,8 +28,10 @@
 //! but an exact `getClass()` needs an exact `Class` surface (#174), so every
 //! kind is `ClassRule::Unknown` for now: `getClass()` is counted, and
 //! `instanceof` is exact for the declared types and their supertypes.
-//! `CallbackInfo.toString()` prints its `cancellable` flag, which the handle
-//! does not keep, and the others are identity based: all counted. `equals` is
+//! `CallbackInfo.toString()` prints its class's simple name, and the others
+//! are identity based: all counted. `cancel()` and `setReturnValue` on a
+//! callback info whose `@Inject` is not cancellable throw Mixin's
+//! `CancellationException`, as Mixin's do. `equals` is
 //! identity (`Enum.equals` for a side). A side compares by ordinal
 //! (`Enum.compareTo`).
 
@@ -54,9 +56,11 @@ fn values_of(value: &Value, kind: HostKind) -> Option<Vec<Value>> {
     }
 }
 
-/// The key of the `CallbackInfo` an injection point on `owner.name` hands
-/// its callbacks; `returns` when the target has a result (Mixin then makes a
-/// `CallbackInfoReturnable`). The runtime's callback-info table is keyed by it.
+/// The runtime's callback-info table key for the target `owner.name`;
+/// `returns` when the target has a result (Mixin then makes a
+/// `CallbackInfoReturnable`). The cancel and return state is the target's,
+/// kept under this key; each handle names its own object
+/// ([`callback_info`]).
 pub(crate) fn callback_info_key(owner: &str, name: &str, returns: bool) -> String {
     HostRef::of_values(
         HostKind::CallbackInfo,
@@ -66,18 +70,67 @@ pub(crate) fn callback_info_key(owner: &str, name: &str, returns: bool) -> Strin
     .to_owned()
 }
 
-/// A handle on the callback info with `key` ([`callback_info_key`]).
-pub(crate) fn callback_info(key: &str) -> Value {
-    Value::Host(HostRef::new(HostKind::CallbackInfo, key))
+/// The `CallbackInfo` the injector whose handler is `injector` hands it at
+/// the target with table key `table_key` ([`callback_info_key`]),
+/// `cancellable` as its `@Inject` declares. Mixin keeps one per injector
+/// (`CallbackInjector.callbackInfoVar`, sponge-mixin 0.17.5), so two
+/// `@Inject`s on one target get two objects: their keys differ.
+pub(crate) fn callback_info(
+    table_key: &str,
+    injector: &crate::MethodRef,
+    cancellable: bool,
+) -> Value {
+    let mut values = HostRef::new(HostKind::CallbackInfo, table_key)
+        .values()
+        .unwrap_or_default();
+    values.extend([
+        Value::Int(i32::from(cancellable)),
+        text(&injector.owner),
+        text(&injector.name),
+        text(&injector.descriptor),
+    ]);
+    Value::Host(HostRef::of_values(HostKind::CallbackInfo, &values))
 }
 
 /// The table key of a callback info handle; `None` for any other value (a
 /// woven class's own `CallbackInfo` is a jar object, and a string spelled
 /// like the old marker is a string).
-pub(crate) fn callback_info_key_of(value: &Value) -> Option<&str> {
-    match value {
-        Value::Host(handle) if handle.kind() == HostKind::CallbackInfo => Some(handle.key()),
+pub(crate) fn callback_info_key_of(value: &Value) -> Option<String> {
+    match values_of(value, HostKind::CallbackInfo)?.as_slice() {
+        [
+            Value::Ref(Some(owner)),
+            Value::Ref(Some(name)),
+            Value::Int(returns),
+            ..,
+        ] => Some(callback_info_key(owner, name, *returns != 0)),
         _ => None,
+    }
+}
+
+/// Whether a callback info handle's `@Inject` is cancellable, and the target
+/// method's name (the one its `CancellationException` names).
+pub(crate) fn callback_info_cancellable(value: &Value) -> Option<(bool, String)> {
+    match values_of(value, HostKind::CallbackInfo)?.as_slice() {
+        [_, Value::Ref(Some(name)), _, Value::Int(cancellable), ..] => {
+            Some((*cancellable != 0, name.clone()))
+        }
+        _ => None,
+    }
+}
+
+/// Mixin's `CancellationException`, a `RuntimeException`.
+pub(crate) const CANCELLATION_EXCEPTION: &str =
+    "org/spongepowered/asm/mixin/injection/callback/CancellationException";
+
+/// What `CallbackInfo.cancel()` throws on a callback info that is not
+/// cancellable, and `CallbackInfoReturnable.setReturnValue` too (it calls
+/// `cancel()` first): `The call <name> is not cancellable.` (sponge-mixin
+/// 0.17.5's bytecode).
+pub(crate) fn not_cancellable(name: &str) -> crate::NativeError {
+    crate::NativeError::UncaughtException {
+        class: CANCELLATION_EXCEPTION.into(),
+        message: Some(format!("The call {name} is not cancellable.")),
+        frame: None,
     }
 }
 
@@ -257,8 +310,17 @@ mod tests {
                         parts,
                         [text(owner), text(name), Value::Int(i32::from(returns))]
                     );
-                    let handle = callback_info(&key);
-                    assert_eq!(callback_info_key_of(&handle), Some(key.as_str()));
+                    let injector = crate::MethodRef {
+                        owner: owner.into(),
+                        name: name.into(),
+                        descriptor: "()V".into(),
+                    };
+                    let handle = callback_info(&key, &injector, returns);
+                    assert_eq!(callback_info_key_of(&handle), Some(key.clone()));
+                    assert_eq!(
+                        callback_info_cancellable(&handle),
+                        Some((returns, name.to_owned()))
+                    );
                     // The declared types follow the target's result only.
                     let Value::Host(info) = handle else {
                         unreachable!()
