@@ -14,8 +14,14 @@
 //! real classes): `getModContainer(id)` is `modMap.get(id)` and `getAllMods`
 //! lists the same objects, so there is one `ModContainerImpl` per id; its
 //! `getMetadata`, `getOrigin`, and the metadata's `getAuthors`, `getContact`
-//! and `getCustomValue` hand back the objects they hold. So every handle here
-//! is one object per key: canonical. None of these classes overrides
+//! and `getCustomValue` hand back the objects they hold. Some of those are
+//! shared across mods: a metadata or object author without `contact`, a
+//! string author (`SimplePerson.getContact`) and every built-in hold the one
+//! `ContactInformation.EMPTY`; `CustomValueImpl.readCustomValue` answers its
+//! `BOOLEAN_TRUE`, `BOOLEAN_FALSE` and `NULL` constants for every JSON
+//! `true`, `false` and `null`. Those get one key each, without a mod id or
+//! pointer, so every handle here is one object per key: canonical. None of
+//! these classes overrides
 //! `equals`/`hashCode` (identity, and an identity hash: counted);
 //! `ModContainerImpl.toString` is `String.format("%s %s", id, version)` and
 //! `ModOriginImpl.toString` the origin's text, the rest `Object`'s (counted).
@@ -28,7 +34,9 @@
 //! * metadata: the id;
 //! * origin: its kind (`path`, `nested`, `unknown`) and argument;
 //! * person, contact, custom value: the id and the JSON pointer into its
-//!   `fabric.mod.json`.
+//!   `fabric.mod.json`;
+//! * `ContactInformation.EMPTY`: no values;
+//! * the `true`/`false`/`null` custom values: `1`/`0`/`null` alone.
 //!
 //! The classes are implementations (`ModContainerImpl`, `V1ModMetadata`,
 //! `BuiltinModMetadata`, `SimplePerson`, `ContactInformationImpl`,
@@ -164,6 +172,44 @@ pub(crate) fn pointed_parts(value: &Value, what: Pointed) -> Option<(String, Str
     }
 }
 
+/// `ContactInformation.EMPTY`, the one contact every metadata, author and
+/// built-in without a `contact` holds.
+pub(crate) fn empty_contact() -> Value {
+    Value::Host(HostRef::of_values(HostKind::FabricContact, &[]))
+}
+
+/// Whether `value` is [`empty_contact`].
+pub(crate) fn is_empty_contact(value: &Value) -> bool {
+    matches!(value, Value::Host(handle)
+        if handle.kind() == HostKind::FabricContact && handle.values().is_some_and(|values| values.is_empty()))
+}
+
+/// The custom value at `pointer` in mod `id`'s `fabric.mod.json`, whose JSON
+/// is `json`: `CustomValueImpl`'s shared constant for `true`, `false` and
+/// `null`, else the value's own handle.
+pub(crate) fn custom_value(id: &str, pointer: &str, json: &serde_json::Value) -> Value {
+    let constant = match json {
+        serde_json::Value::Bool(flag) => Value::Int(i32::from(*flag)),
+        serde_json::Value::Null => Value::Ref(None),
+        _ => return pointed(Pointed::CustomValue, id, pointer),
+    };
+    Value::Host(HostRef::of_values(HostKind::FabricCustomValue, &[constant]))
+}
+
+/// The JSON of a `true`/`false`/`null` constant handle ([`custom_value`]).
+pub(crate) fn constant_custom_value(value: &Value) -> Option<serde_json::Value> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::FabricCustomValue => {
+            match handle.values()?.as_slice() {
+                [Value::Int(flag)] => Some(serde_json::Value::Bool(*flag != 0)),
+                [Value::Ref(None)] => Some(serde_json::Value::Null),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// `Object.equals`: identity, which the canonical key decides.
 fn identity_equals(
     handle: &HostRef,
@@ -256,6 +302,17 @@ mod tests {
             let Value::Host(handle) = pointed(Pointed::CustomValue, id, pointer) else {
                 panic!("{id:?}")
             };
+            for json in [
+                serde_json::json!(true),
+                serde_json::json!(false),
+                serde_json::Value::Null,
+            ] {
+                let constant = custom_value(id, pointer, &json);
+                assert_eq!(constant, custom_value("other", "/x", &json));
+                assert_eq!(constant_custom_value(&constant), Some(json));
+                assert_eq!(pointed_parts(&constant, Pointed::CustomValue), None);
+            }
+            assert!(!is_empty_contact(&pointed(Pointed::Contact, id, pointer)));
             let parts = (id.clone(), pointer.clone());
             if let Some(other) = seen.insert(handle.key().to_owned(), parts.clone()) {
                 assert_eq!(other, parts);

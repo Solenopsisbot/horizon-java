@@ -272,3 +272,57 @@ fn identity_hashes_object_text_and_classes_are_counted() {
         );
     }
 }
+
+/// What `IdentityOracle` printed on Java 25 for `Identity.shared` and
+/// `Identity.sharedSets`, on the same real objects plus the built-ins'
+/// `BuiltinModMetadata.Builder` metadata (`minecraft` named, neither given a
+/// contact, as `MinecraftGameProvider` builds them). Two runs printed the same.
+const SHARED_ORACLE: &str = "truetruefalsefalsefalsefalsetruetruetruefalse|truetruetruetruetruetruetruefalsefalsefalsefalse|truetruetruefalsetruefalseBOOLEANNULL|true0falsetrue";
+const SHARED_SETS_ORACLE: &str = "1,2,IAEIAE,x";
+
+/// Objects Fabric Loader 0.19.5 shares across mods are one object here too:
+/// `ContactInformation.EMPTY` (beta's metadata, a string author, both
+/// built-ins, the static field) and `CustomValueImpl`'s `true`/`false`/`null`
+/// constants (two mods' and an array's), while a contact or value with its own
+/// JSON stays its own. `==`, `equals` and host lists answer as Java 25 does,
+/// with nothing counted; hash-based and identity collections answer as Java
+/// 25 does or count what needs an identity hash.
+#[test]
+fn shared_contacts_and_constant_custom_values_are_one_object() {
+    let run = build("shared");
+    let mut host = host(&run, Some("26.3"));
+    assert_eq!(text(&run, &mut host, "shared"), SHARED_ORACLE);
+    assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());
+    let mut host = self::host(&run, Some("26.3"));
+    let sets = text(&run, &mut host, "sharedSets");
+    assert!(
+        sets == SHARED_SETS_ORACLE || !host.unknown_host_calls().is_empty(),
+        "{sets}"
+    );
+}
+
+/// `getModContainer(id)` is `modMap.get(id)` and `isModLoaded(id)`
+/// `modMap.containsKey(id)` (Fabric Loader 0.19.5 bytecode), over the
+/// containers `getAllMods` lists: every listed id finds that same container
+/// and is loaded, including the Fabric API modules Horizon reports; an id
+/// nothing provides is absent.
+#[test]
+fn get_mod_container_finds_every_listed_container() {
+    let run = build("agree");
+    let mut host = host(&run, Some("26.3"));
+    let answer = text(&run, &mut host, "containersAgree");
+    let (listed, absent) = answer.rsplit_once(',').unwrap();
+    assert_eq!(absent, "false");
+    let ids = listed
+        .split(',')
+        .map(|entry| {
+            let (id, found) = entry.split_once('=').unwrap();
+            assert_eq!(found, "truetrue", "{id}");
+            id
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&"fabric-api") && ids.contains(&"mixinextras"),
+        "{ids:?}"
+    );
+}

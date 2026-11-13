@@ -218,6 +218,19 @@ impl StdHost {
         }
     }
 
+    /// Whether `getModContainer(id)` and `isModLoaded(id)` find mod `id`: Fabric
+    /// Loader answers both from `modMap`, the containers `getAllMods` lists,
+    /// so every id [`Self::fabric_containers`] lists is present. The host
+    /// also counts the run's mods (and the dependencies a running jar
+    /// requires, which a real loader would have had to find) and the loaders
+    /// it always reports as loaded.
+    pub(crate) fn fabric_mod_present(&self, id: &str) -> bool {
+        self.mods.contains_key(id)
+            || is_always_loaded_mod(id)
+            || self.fabric_metadata.contains_key(id)
+            || Self::builtin_fabric_mod(id)
+    }
+
     /// The one `ModContainer` for mod `id` (`host_fabric_loader.rs`): every
     /// call that hands one out builds it here, so its key is the same.
     pub(crate) fn fabric_container(&self, id: &str) -> Value {
@@ -260,19 +273,25 @@ impl StdHost {
                             .to_owned(),
                         other => other.as_str().unwrap_or_default().to_owned(),
                     })),
-                    "getContact" => Ok(loader::pointed(
-                        Pointed::Contact,
-                        &id,
-                        &child(&pointer, "contact"),
-                    )),
+                    // `SimplePerson` (a string) and an object without
+                    // `contact` answer `ContactInformation.EMPTY`.
+                    "getContact" => Ok(if person.get("contact").is_some() {
+                        loader::pointed(Pointed::Contact, &id, &child(&pointer, "contact"))
+                    } else {
+                        loader::empty_contact()
+                    }),
                     _ => self.unknown_host_call(r),
                 })
             }
             (CONTACT, ..) => {
-                let (id, pointer) = loader::pointed_parts(receiver, Pointed::Contact)?;
-                let contact = self
-                    .fabric_document(&id)
-                    .and_then(|document| document.pointer(&pointer).cloned());
+                // `ContactInformation.EMPTY` has no entries.
+                let contact = if loader::is_empty_contact(receiver) {
+                    None
+                } else {
+                    let (id, pointer) = loader::pointed_parts(receiver, Pointed::Contact)?;
+                    self.fabric_document(&id)
+                        .and_then(|document| document.pointer(&pointer).cloned())
+                };
                 Some(match (r.name.as_str(), r.descriptor.as_str()) {
                     ("get", "(Ljava/lang/String;)Ljava/util/Optional;") => {
                         let key = expect_string(Self::argument(r, args, 0).ok()?);
@@ -288,6 +307,11 @@ impl StdHost {
                 })
             }
             (CUSTOM_VALUE | CV_OBJECT | CV_ARRAY, ..) => {
+                // A shared `true`/`false`/`null` constant: no object or array
+                // below it, so no pointer is needed.
+                if let Some(value) = loader::constant_custom_value(receiver) {
+                    return Some(self.custom_value_call(r, "", "", &value, args));
+                }
                 let (id, pointer) = loader::pointed_parts(receiver, Pointed::CustomValue)?;
                 let value = self.fabric_document(&id)?.pointer(&pointer)?.clone();
                 Some(self.custom_value_call(r, &id, &pointer, &value, args))
@@ -323,6 +347,9 @@ impl StdHost {
     /// `ModEnvironment` and `CvType` constants, the markers the answers above
     /// hand out, so `==` against them holds.
     pub(crate) fn fabric_mods_static(r: &MethodRef) -> Option<Value> {
+        if r.owner == CONTACT && r.name == "EMPTY" {
+            return Some(loader::empty_contact());
+        }
         let constants = match r.owner.as_str() {
             MOD_ENVIRONMENT => ENVIRONMENTS,
             CV_TYPE => CV_TYPES,
@@ -391,8 +418,13 @@ impl StdHost {
                     .collect::<Vec<_>>();
                 Ok(collection_value("list", &people))
             }
+            // `V1ModMetadata` holds `ContactInformation.EMPTY` without one.
             ("getContact", "()Lnet/fabricmc/loader/api/metadata/ContactInformation;") => {
-                Ok(loader::pointed(Pointed::Contact, id, "/contact"))
+                Ok(if field("contact").is_some() {
+                    loader::pointed(Pointed::Contact, id, "/contact")
+                } else {
+                    loader::empty_contact()
+                })
             }
             ("getLicense", "()Ljava/util/Collection;") => {
                 Ok(collection_value("list", &strings("license")))
@@ -410,12 +442,11 @@ impl StdHost {
                 "(Ljava/lang/String;)Lnet/fabricmc/loader/api/metadata/CustomValue;",
             ) => {
                 let key = expect_string(Self::argument(r, args, 0)?);
-                let present = field("custom").is_some_and(|custom| custom.get(key).is_some());
-                Ok(if present {
-                    loader::pointed(Pointed::CustomValue, id, &child("/custom", key))
-                } else {
-                    Value::Ref(None)
-                })
+                Ok(field("custom")
+                    .and_then(|custom| custom.get(key))
+                    .map_or(Value::Ref(None), |value| {
+                        loader::custom_value(id, &child("/custom", key), value)
+                    }))
             }
             ("getIconPath", "(I)Ljava/util/Optional;") if field("icon").is_none() => {
                 Ok(empty_optional())
@@ -459,9 +490,7 @@ impl StdHost {
                 "()Ljava/util/Collection;",
             ) => Some(collection_value("list", &[])),
             ("getContact", "()Lnet/fabricmc/loader/api/metadata/ContactInformation;") => {
-                // A pointer into no document: every `get` is empty, as on
-                // `ContactInformation.EMPTY`.
-                Some(loader::pointed(Pointed::Contact, id, "/contact"))
+                Some(loader::empty_contact())
             }
             ("containsCustomValue", "(Ljava/lang/String;)Z") => Some(Value::Int(0)),
             (
@@ -514,11 +543,9 @@ impl StdHost {
                 serde_json::Value::Object(entries),
             ) => {
                 let key = expect_string(Self::argument(r, args, 0)?);
-                Ok(if entries.contains_key(key) {
-                    marker(child(pointer, key))
-                } else {
-                    Value::Ref(None)
-                })
+                Ok(entries.get(key).map_or(Value::Ref(None), |value| {
+                    loader::custom_value(id, &child(pointer, key), value)
+                }))
             }
             (
                 "get",
@@ -530,7 +557,11 @@ impl StdHost {
                     .ok()
                     .filter(|index| *index < items.len())
                 {
-                    Some(index) => Ok(marker(child(pointer, &index.to_string()))),
+                    Some(index) => Ok(loader::custom_value(
+                        id,
+                        &child(pointer, &index.to_string()),
+                        &items[index],
+                    )),
                     // `ArrayList.get` out of range.
                     None => Err(NativeError::UncaughtException {
                         class: "java/lang/IndexOutOfBoundsException".into(),

@@ -8898,16 +8898,10 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Int(0)),
                 };
-                // The loader itself and the game are always loaded; a jar's
-                // platform probe asks for them before it asks for anything the
-                // metadata could name.
-                // Horizon's Fabric API façade stands in for the `fabric-api`
-                // jar wherever it answers a Fabric jar's calls.
-                let fabric_api =
-                    id == "fabric-api" && !self.fabric_entrypoint_containers.is_empty();
-                Ok(Value::Int(
-                    (self.mods.contains_key(id) || is_always_loaded_mod(id) || fabric_api) as i32,
-                ))
+                // `modMap.containsKey(id)`: what `getModContainer` finds and
+                // `getAllMods` lists, including the loader, the game and the
+                // Fabric API modules Horizon's façade stands in for.
+                Ok(Value::Int(self.fabric_mod_present(id) as i32))
             }
             (
                 "net/neoforged/fml/ModList" | "net/minecraftforge/fml/ModList",
@@ -8958,10 +8952,10 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Ref(None)),
                 };
-                // The loader and the game are present in every runtime even
-                // though no jar declares them as a dependency. The container
-                // is the one `getAllMods` lists (`host_fabric_loader.rs`).
-                let present = self.mods.contains_key(id) || is_always_loaded_mod(id);
+                // Present exactly when `getAllMods` lists it (or the run
+                // knows it otherwise: `fabric_mod_present`), as the same
+                // container (`host_fabric_loader.rs`).
+                let present = self.fabric_mod_present(id);
                 let id = id.clone();
                 Ok(optional_wrap(if present {
                     self.fabric_container(&id)

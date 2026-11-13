@@ -77,4 +77,28 @@ public final class Probe {
         Object type = FabricLoader.getInstance().getModContainer("alpha").get().getClass();
         return String.valueOf(type);
     }
+
+    /** Objects the loader shares ({@link Identity#shared}). */
+    public static String shared() {
+        FabricLoader loader = FabricLoader.getInstance();
+        return Identity.shared(loader.getModContainer("alpha").get(), loader.getModContainer("beta").get(),
+            loader.getModContainer("minecraft").get().getMetadata(), loader.getModContainer("java").get().getMetadata());
+    }
+
+    public static String sharedSets() {
+        FabricLoader loader = FabricLoader.getInstance();
+        return Identity.sharedSets(loader.getModContainer("alpha").get(), loader.getModContainer("beta").get());
+    }
+
+    /** {@code getModContainer} finds every container {@code getAllMods} lists, and only those of this run. */
+    public static String containersAgree() {
+        FabricLoader loader = FabricLoader.getInstance();
+        StringBuilder out = new StringBuilder();
+        for (ModContainer container : loader.getAllMods()) {
+            String id = container.getMetadata().getId();
+            out.append(id).append('=').append(loader.getModContainer(id).map(found -> found == container).orElse(false))
+                .append(loader.isModLoaded(id)).append(',');
+        }
+        return out.append(loader.getModContainer("nosuchmod").isPresent()).toString();
+    }
 }

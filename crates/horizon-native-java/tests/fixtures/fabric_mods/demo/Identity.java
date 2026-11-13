@@ -2,7 +2,11 @@ package demo;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import net.fabricmc.loader.api.ModContainer;
 import net.fabricmc.loader.api.metadata.ContactInformation;
 import net.fabricmc.loader.api.metadata.CustomValue;
@@ -53,5 +57,63 @@ public final class Identity {
             map.put(t, "s");
         }
         return out.append(map.size()).append(map.get("hfmm:ralpha")).toString();
+    }
+
+    /**
+     * Objects Fabric Loader shares: {@code ContactInformation.EMPTY} (a metadata without {@code contact}, a string
+     * author, a built-in) and the {@code true}/{@code false}/{@code null} custom values. {@code a}/{@code b} are
+     * alpha's and beta's containers, {@code mc}/{@code java} the built-ins' metadata.
+     */
+    public static String shared(ModContainer a, ModContainer b, ModMetadata mc, ModMetadata java) {
+        ModMetadata m = a.getMetadata();
+        ModMetadata mb = b.getMetadata();
+        Iterator<Person> people = m.getAuthors().iterator();
+        Person ann = people.next();
+        Person bob = people.next();
+        ContactInformation empty = mb.getContact();
+        CustomValue t = mb.getCustomValue("t");
+        CustomValue u = mb.getCustomValue("u");
+        CustomValue f = mb.getCustomValue("f");
+        CustomValue n = mb.getCustomValue("n");
+        CustomValue nothing = m.getCustomValue("nothing");
+        CustomValue note = m.getCustomValue("note");
+        CustomValue.CvArray arr = mb.getCustomValue("arr").getAsArray();
+        CustomValue mixinA = m.getCustomValue("lithium:options").getAsObject().get("mixin.a");
+        CustomValue mixinB = m.getCustomValue("lithium:options").getAsObject().get("mixin.b");
+        return "" + (empty == ann.getContact()) + empty.equals(ann.getContact()) + (ann.getContact() == bob.getContact())
+            + bob.getContact().equals(empty) + (m.getContact() == empty) + m.getContact().equals(empty)
+            + (mc.getContact() == java.getContact()) + (mc.getContact() == empty) + (ContactInformation.EMPTY == empty)
+            + empty.get("email").isPresent()
+            + "|" + (t == u) + t.equals(u) + (t == mixinB) + (f == mixinA) + mixinA.equals(f) + (n == nothing)
+            + n.equals(nothing) + (t == f) + t.equals(f) + (t == note) + note.equals(t)
+            + "|" + (arr.get(0) == t) + (arr.get(1) == n) + (arr.get(2) == arr.get(2)) + arr.get(2).equals(note)
+            + t.getAsBoolean() + f.getAsBoolean() + t.getType().name() + n.getType().name()
+            + "|" + List.of(t, f).contains(u) + List.of(t).indexOf(mixinB) + List.of(note).contains(t)
+            + List.of(empty).contains(ann.getContact());
+    }
+
+    /** The shared objects in hash-based and identity collections. */
+    public static String sharedSets(ModContainer a, ModContainer b) {
+        ContactInformation empty = b.getMetadata().getContact();
+        ContactInformation annContact = a.getMetadata().getAuthors().iterator().next().getContact();
+        CustomValue t = b.getMetadata().getCustomValue("t");
+        CustomValue u = b.getMetadata().getCustomValue("u");
+        CustomValue f = b.getMetadata().getCustomValue("f");
+        String values;
+        try {
+            values = "" + Set.of(t, u).size();
+        } catch (IllegalArgumentException e) {
+            values = "IAE";
+        }
+        String contacts;
+        try {
+            contacts = "" + Set.of(empty, annContact).size();
+        } catch (IllegalArgumentException e) {
+            contacts = "IAE";
+        }
+        IdentityHashMap<Object, String> identity = new IdentityHashMap<>();
+        identity.put(t, "x");
+        return new HashSet<>(List.of(empty, annContact)).size() + "," + new HashSet<>(List.of(t, u, f)).size() + ","
+            + values + contacts + "," + identity.get(u);
     }
 }
