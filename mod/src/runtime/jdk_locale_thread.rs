@@ -16,21 +16,18 @@
 //!   constructs keeps a stable id of its own, because it never runs (nothing
 //!   here starts a thread) and two distinct objects must not compare equal.
 //!
-//! `Thread.currentThread()` already answers that main marker through the host;
-//! this module only gives it an id.
+//! `Thread.currentThread()` already answers that main thread through the
+//! host (`host_jdk.rs`); this module only gives it an id.
 
 use crate::runtime::{MethodRef, NativeError, StdHost, Value, expect_ref};
 
-/// The marker `Thread.currentThread()` answers.
-const MAIN_THREAD: &str = "thread/main";
-
-/// Whether `marker` is a thread this runtime knows: the main thread, or a
+/// Whether `thread` is a thread this runtime knows: the main thread, or a
 /// `Thread` object a jar constructed (`java/lang/Thread#<n>`).
-fn thread_id(marker: &str) -> Option<i64> {
-    if marker == MAIN_THREAD {
+fn thread_id(thread: &Value) -> Option<i64> {
+    if crate::runtime::host_jdk::is_main_thread(thread) {
         return Some(1);
     }
-    let object = marker.strip_prefix("java/lang/Thread#")?;
+    let object = expect_ref(thread)?.strip_prefix("java/lang/Thread#")?;
     // `new_object` numbers every object of the invocation, so the id is
     // distinct from the main thread's 1 and stable for the object's lifetime.
     object.parse::<i64>().ok().map(|id| id.saturating_add(2))
@@ -179,8 +176,7 @@ impl StdHost {
         ) {
             return None;
         }
-        let marker = receiver.and_then(expect_ref)?;
-        let id = thread_id(marker)?;
+        let id = thread_id(receiver?)?;
         Some(Ok(Value::Long(id)))
     }
 }

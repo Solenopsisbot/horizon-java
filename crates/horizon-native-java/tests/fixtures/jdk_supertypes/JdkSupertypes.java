@@ -6,7 +6,8 @@ import java.util.TreeSet;
 /**
  * Prints `src/jdk_supertypes_25.txt`: for each class the runtime's JDK hierarchy answers for, its
  * flags and every supertype (getSuperclass/getInterfaces, transitively, the class itself left out),
- * then every package of every system module (a JDK class's supertypes can only come from these).
+ * then every package of every system module and the module that holds it (a JDK class's
+ * supertypes can only come from these).
  * Run on OpenJDK 25: `java JdkSupertypes.java > ../../../src/jdk_supertypes_25.txt`.
  */
 public final class JdkSupertypes {
@@ -30,6 +31,10 @@ public final class JdkSupertypes {
     "java.lang.Object", "java.lang.String", "java.lang.Class", "java.lang.Record", "java.lang.Enum",
     "java.lang.Number", "java.util.Optional", "java.util.OptionalInt", "java.util.OptionalLong",
     "java.util.OptionalDouble",
+    // host_jdk's kinds (#156 P2)
+    "java.lang.Thread", "java.lang.StackWalker", "java.lang.StackFrameInfo",
+    "java.lang.StackTraceElement", "java.lang.Module", "java.util.logging.Logger",
+    "java.lang.System$Logger",
     // host_invoke's and method_handles' kinds (#156 P10b), and CharSequence for getMethod's
     // most specific return type
     "java.lang.invoke.MethodType", "java.lang.invoke.MethodHandle",
@@ -56,9 +61,10 @@ public final class JdkSupertypes {
       String flags = c.isInterface() ? "interface" : Modifier.isFinal(c.getModifiers()) ? "final" : "class";
       System.out.println("class\t" + c.getName().replace('.', '/') + "\t" + flags + "\t" + String.join(" ", supers));
     }
+    // Each system package with the module that holds it (`Class.getModule()` of a JDK class).
     Set<String> packages = new TreeSet<>();
     ModuleFinder.ofSystem().findAll().forEach(m -> m.descriptor().packages()
-        .forEach(p -> packages.add(p.replace('.', '/'))));
+        .forEach(p -> packages.add(p.replace('.', '/') + "\t" + m.descriptor().name())));
     for (String p : packages) System.out.println("package\t" + p);
   }
 }
