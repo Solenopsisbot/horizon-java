@@ -103,6 +103,50 @@ public final class HostGameEvents {
     return "" + e.getClass();
   }
 
+  /** A Class rendered by a collection or a method reference: Java's Class.toString. */
+  public static String classInArrayList(Object e) {
+    List<Object> l = new ArrayList<>();
+    l.add(e.getClass());
+    return l.toString();
+  }
+
+  public static String classInListOf(Object e) {
+    return List.of(e.getClass()).toString();
+  }
+
+  public static String classInMapOf(Object e) {
+    return Map.of(e.getClass(), 1).toString();
+  }
+
+  public static String classToStringRef(Object e) {
+    java.util.function.Function<Object, String> f = Object::toString;
+    return f.apply(e.getClass());
+  }
+
+  public static String classValueOfRef(Object e) {
+    java.util.function.Function<Object, String> f = String::valueOf;
+    return f.apply(e.getClass());
+  }
+
+  /** Class.forName of the event's own name is that class. */
+  public static String classForName(Object e) {
+    try {
+      Class<?> c = Class.forName(e.getClass().getName());
+      return "" + (c == e.getClass()) + c.equals(e.getClass()) + c.getName();
+    } catch (Throwable x) {
+      return "EXC:" + x.getClass().getName();
+    }
+  }
+
+  public static String classForNameNoInit(Object e) {
+    try {
+      Class<?> c = Class.forName(e.getClass().getName(), false, HostGameEvents.class.getClassLoader());
+      return "" + (c == e.getClass()) + c.getSuperclass().getName();
+    } catch (Throwable x) {
+      return "EXC:" + x.getClass().getName();
+    }
+  }
+
   public static String classSimple(Object e) {
     return e.getClass().getSimpleName();
   }

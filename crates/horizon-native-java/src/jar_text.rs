@@ -208,10 +208,7 @@ impl<H: Host> Runtime<'_, H> {
         };
         // A class name a family kind owns may be a `Class` (an event's `getClass()`, text until
         // #156 P13) or a String spelled like it: which text Java prints is not known. Counted.
-        if HostKind::owning_class(&marker.replace('.', "/"))
-            .and_then(HostKind::class_side)
-            .is_some()
-        {
+        if self.owned_class_side(marker).is_some() {
             return self
                 .host
                 .unknown_operand_call(&object_to_string())

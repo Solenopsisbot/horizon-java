@@ -26,7 +26,25 @@ const EXACT_ELSEWHERE: &[(&str, &str)] = &[
     ("equals", "(Ljava/lang/Object;)Z"),
 ];
 
+/// Whether `text` is a class name (internal form, the text a `Class` is until #156 P13) a family
+/// kind owns. A path that prints a value cannot tell such a `Class` from a String spelled like it,
+/// and Java prints the two differently (`class X` vs the text): it counts.
+pub(crate) fn owned_class_name(text: &str) -> bool {
+    HostKind::owning_class(text)
+        .and_then(HostKind::class_side)
+        .is_some()
+}
+
 impl<H: Host> Runtime<'_, H> {
+    /// The class side that answers for `class`, unless the run holds a class file of that name: a
+    /// jar's own copy (CreativeCore's bundled bus-7 `Event` on Fabric) always wins.
+    pub(crate) fn owned_class_side(&self, class: &str) -> Option<&'static host_ref::ClassSide> {
+        if self.class(class).is_some() {
+            return None;
+        }
+        HostKind::owning_class(class).and_then(HostKind::class_side)
+    }
+
     /// A `Class` call on a class name a family kind owns: its answer, or counted. `None` for any
     /// other call (or a member the generic model answers exactly).
     pub(crate) fn invoke_owned_class(
@@ -43,7 +61,7 @@ impl<H: Host> Runtime<'_, H> {
         else {
             return Ok(None);
         };
-        let Some(side) = HostKind::owning_class(&class).and_then(HostKind::class_side) else {
+        let Some(side) = self.owned_class_side(&class) else {
             return Ok(None);
         };
         let descriptor = r.descriptor.as_str();
@@ -91,10 +109,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(class) = expect_ref(value).map(|name| name.replace('.', "/")) else {
             return Ok(None);
         };
-        if HostKind::owning_class(&class)
-            .and_then(HostKind::class_side)
-            .is_none()
-        {
+        if self.owned_class_side(&class).is_none() {
             return Ok(None);
         }
         let to_string = MethodRef {

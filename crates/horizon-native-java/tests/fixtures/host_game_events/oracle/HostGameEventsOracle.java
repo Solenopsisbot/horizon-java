@@ -23,6 +23,13 @@ public final class HostGameEventsOracle {
     print("classExactTick", HostGameEvents.classExact(tick));
     print("classExactSetup", HostGameEvents.classExact(setup));
     print("classConcat", HostGameEvents.classConcat(tick));
+    print("classInArrayList", HostGameEvents.classInArrayList(tick));
+    print("classInListOf", HostGameEvents.classInListOf(tick));
+    print("classInMapOf", HostGameEvents.classInMapOf(tick));
+    print("classToStringRef", HostGameEvents.classToStringRef(tick));
+    print("classValueOfRef", HostGameEvents.classValueOfRef(tick));
+    print("classForName", HostGameEvents.classForName(tick));
+    print("classForNameNoInit", HostGameEvents.classForNameNoInit(tick));
     print("classSimpleTick", HostGameEvents.classSimple(tick));
     print("classSimpleSetup", HostGameEvents.classSimple(setup));
     print("classCanonicalTick", HostGameEvents.classCanonical(tick));

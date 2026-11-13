@@ -349,6 +349,11 @@ pub(crate) struct Methods {
 /// class names the reflective `Class` surface can reach has one ([`CLASS_SIDES`]); a `Fixed` kind
 /// is found by [`HostKind::of_class`], an `Unknown` one never (its declared types are not its
 /// class).
+///
+/// Two rules every row keeps: **a class file the run holds wins** (a jar's own copy of an owned
+/// class answers from that file: the runtime asks `Runtime::owned_class_side`, which defers to
+/// it), and **one owner per name** (no two rows, nor a row and a fixed class, own one name: checked
+/// over every row by a unit test, and by `owning_class` in debug builds).
 pub(crate) struct ClassSide {
     /// Whether this kind answers for the class name `class` (its handles' classes and their
     /// family's supertypes). No two kinds own one class.
@@ -360,6 +365,9 @@ pub(crate) struct ClassSide {
     pub(crate) superclass: fn(&str) -> Option<String>,
     /// Whether `class` is an interface, when known; `None` = counted.
     pub(crate) is_interface: fn(&str) -> Option<bool>,
+    /// Every class name `owns` accepts (its family's table), so that "one owner per name" can be
+    /// checked over every row.
+    pub(crate) classes: fn() -> Vec<String>,
 }
 
 /// [`ClassSide::instance_of`].
@@ -679,6 +687,14 @@ impl HostKind {
     /// counted; it never falls to "a class the runtime does not hold".
     pub(crate) fn owning_class(class: &str) -> Option<Self> {
         Self::of_class(class).or_else(|| {
+            debug_assert!(
+                CLASS_SIDES
+                    .iter()
+                    .filter(|(_, side)| (side.owns)(class))
+                    .count()
+                    <= 1,
+                "two kinds own {class}"
+            );
             CLASS_SIDES
                 .iter()
                 .find(|(_, side)| (side.owns)(class))
@@ -924,6 +940,28 @@ mod tests {
             ),
             Some(Some(true))
         );
+    }
+
+    /// One owner per class name, over every class-side row (not a list of
+    /// kinds): each name a row enumerates is owned by that row alone, and by
+    /// no fixed-class kind.
+    #[test]
+    fn every_class_name_has_one_owner() {
+        for (kind, side) in CLASS_SIDES {
+            assert!(kind.class_side().is_some(), "{kind:?}");
+            let classes = (side.classes)();
+            assert!(!classes.is_empty(), "{kind:?} enumerates no class");
+            for class in classes {
+                assert!((side.owns)(&class), "{kind:?} does not own its own {class}");
+                let owners: Vec<HostKind> = CLASS_SIDES
+                    .iter()
+                    .filter(|(_, other)| (other.owns)(&class))
+                    .map(|(kind, _)| *kind)
+                    .collect();
+                assert_eq!(owners, [*kind], "{class}");
+                assert_eq!(HostKind::of_class(&class), None, "{class}");
+            }
+        }
     }
 
     /// A kind's `instance_of` asks the hierarchy it is handed, so a family

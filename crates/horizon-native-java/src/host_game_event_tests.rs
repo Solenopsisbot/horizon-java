@@ -189,6 +189,27 @@ fn game_and_lifecycle_events_answer_as_java_25_or_count() {
         // A `Class` concatenated goes through `String.valueOf(Object)`, where a class name is a
         // `Class` or a `String` spelled like one (Java: `class …ServerTickEvent$Post`): counted.
         ("classConcat", vec![tick.clone()], Counted),
+        // ... and so is a `Class` element of a collection's text, and the `Object::toString` and
+        // `String::valueOf` method references (Java: `[class …$Post]`, `{class …$Post=1}`,
+        // `class …$Post`), never the internal name.
+        ("classInArrayList", vec![tick.clone()], Counted),
+        ("classInListOf", vec![tick.clone()], Counted),
+        ("classInMapOf", vec![tick.clone()], Counted),
+        ("classToStringRef", vec![tick.clone()], Counted),
+        ("classValueOfRef", vec![tick.clone()], Counted),
+        // `Class.forName` of an event's name: whether the run's loader provides it (NeoForge) is
+        // not known here, so it is counted, and the class answered (Java:
+        // `truetrue…$Post`, `true…ServerTickEvent`), never a silent `ClassNotFoundException`.
+        (
+            "classForName",
+            vec![tick.clone()],
+            CountedAs("truetruenet.neoforged.neoforge.event.tick.ServerTickEvent$Post"),
+        ),
+        (
+            "classForNameNoInit",
+            vec![tick.clone()],
+            CountedAs("truenet.neoforged.neoforge.event.tick.ServerTickEvent"),
+        ),
         (
             "classSimple",
             vec![setup.clone()],
@@ -372,4 +393,97 @@ fn class_sides_agree_with_the_handles() {
         panic!("not a handle")
     };
     assert_eq!(setup.instance_of("demo/Accessor", &Mixed), Some(false));
+}
+
+/// A class file the jar holds always wins over a class side: a jar shipping its own
+/// `net.neoforged.bus.api.Event` (CreativeCore bundles bus-7.2.0 on Fabric) answers the `Class`
+/// surface from that file. Expected values: `tests/fixtures/host_game_events_bundled` run on
+/// OpenJDK 25.0.5+8 with only that jar on the class path (two runs alike).
+#[test]
+fn a_held_class_file_wins_over_a_class_side() {
+    use std::io::Write;
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixtures = [
+        manifest.join("tests/fixtures/host_game_events_bundled"),
+        manifest.join("../crates/horizon-native-java/tests/fixtures/host_game_events_bundled"),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("demo/Bundled.java").is_file())
+    .expect("the bundled-class fixture");
+    let scratch = std::env::temp_dir().join(format!(
+        "horizon-native-java-host-game-events-bundled-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let classes = scratch.join("classes");
+    std::fs::create_dir_all(&classes).unwrap();
+    let mut sources = Vec::new();
+    java_files(&fixtures, &mut sources);
+    let javac = std::env::var_os("JAVA_HOME")
+        .map(|home| PathBuf::from(home).join("bin/javac"))
+        .unwrap_or_else(|| "javac".into());
+    assert!(
+        Command::new(javac)
+            .args(["--release", "21", "-nowarn", "-d"])
+            .arg(&classes)
+            .args(&sources)
+            .status()
+            .expect("javac runs")
+            .success()
+    );
+    // Every class ships, `net/neoforged/bus/api/Event` included.
+    let mut files = Vec::new();
+    java_files_of(&classes, &mut files);
+    let mut bytes = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        for path in files {
+            let name = path
+                .strip_prefix(&classes)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&std::fs::read(&path).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    let jar = NativeJar::from_bytes(&bytes).unwrap();
+    for (method, expected) in [
+        ("superOf", "demo.Base"),
+        (
+            "walk",
+            "demo.Sub>net.neoforged.bus.api.Event>demo.Base>java.lang.Object>",
+        ),
+        ("method", "mine"),
+        ("assignable", "truetruefalsetrue"),
+    ] {
+        let mut host = StdHost::new();
+        let answer = jar
+            .invoke_method_with_args(
+                "demo/Bundled",
+                method,
+                "()Ljava/lang/String;",
+                None,
+                &[],
+                &mut host,
+            )
+            .map_err(|error| error.to_string());
+        assert_eq!(answer, Ok(Value::Ref(Some(expected.into()))), "{method}");
+        assert_eq!(host.unknown_host_calls(), Vec::new(), "{method}");
+    }
+}
+
+/// Every `.class` file under `dir`.
+fn java_files_of(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            java_files_of(&path, out);
+        } else if path.extension().is_some_and(|e| e == "class") {
+            out.push(path);
+        }
+    }
 }

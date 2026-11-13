@@ -871,6 +871,23 @@ const SUBSCRIBE_EVENT: &[&str] = &[
     "Lnet/minecraftforge/eventbus/api/SubscribeEvent;",
 ];
 
+/// Every class [`bus_event`] names, both loaders.
+pub(crate) fn bus_event_classes() -> Vec<String> {
+    let mut classes = Vec::new();
+    for (roots, table) in [
+        ([NEOFORGE_EVENT_ROOT, FORGE_EVENT_ROOT], BUS_EVENTS),
+        (
+            [NEOFORGE_CLIENT_EVENT_ROOT, FORGE_CLIENT_EVENT_ROOT],
+            CLIENT_BUS_EVENTS,
+        ),
+    ] {
+        for root in roots {
+            classes.extend(table.iter().map(|(rest, _)| format!("{root}{rest}")));
+        }
+    }
+    classes
+}
+
 /// The game event and loader an event class names, if the game fires it.
 pub(crate) fn bus_event(class: &str) -> Option<(GameEvent, EventLoader)> {
     let client = class

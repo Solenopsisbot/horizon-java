@@ -5619,6 +5619,15 @@ impl Host for StdHost {
                         method: r.name.clone(),
                     })
             }
+            ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;")
+                if Self::argument(r, args, 0)
+                    .ok()
+                    .and_then(expect_ref)
+                    .is_some_and(|text| owned_class::owned_class_name(text)) =>
+            {
+                // A `Class` of a family kind, or a String spelled like it (`owned_class.rs`).
+                self.unknown_host_call(r)
+            }
             ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;") => {
                 // A model object prints its own `toString`, not its marker.
                 let value = Self::argument(r, args, 0)?;
@@ -8435,6 +8444,13 @@ impl Host for StdHost {
                     Some(text) => Ok(Value::Ref(Some(text))),
                     None => self.unknown_host_call(r),
                 }
+            }
+            // `Object::toString` on a `Class` of a family kind, or a String spelled like it
+            // (`owned_class.rs`).
+            ("java/lang/Object", "toString", "()Ljava/lang/String;")
+                if expect_ref(receiver).is_some_and(|text| owned_class::owned_class_name(text)) =>
+            {
+                self.unknown_host_call(r)
             }
             ("java/lang/String", "toString", "()Ljava/lang/String;")
             | ("java/lang/Object", "toString", "()Ljava/lang/String;") => {
@@ -11624,6 +11640,11 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
                 host_text(value)
             }
         },
+        // A `Class` of a family kind, or a String spelled like it (`owned_class.rs`): counted.
+        Value::Ref(Some(marker)) if owned_class::owned_class_name(marker) => {
+            let _ = host.unknown_host_call(&jar_text::object_to_string());
+            marker.clone()
+        }
         Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
             // An object no model prints (a jar object, an identity hash)
             // is counted; the element keeps its marker in the text.
@@ -20418,6 +20439,13 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Ok(Value::Ref(Some(internal)));
         }
+        // A class a family kind owns (an event's `getClass().getName()`): the run's loader may
+        // provide it (NeoForge) or not (Java's `ClassNotFoundException` on Fabric), which is not
+        // known here. Counted; the class is the answer a caller can go on with.
+        if owned_class::owned_class_name(&internal) {
+            self.host.unknown_operand_call(r)?;
+            return Ok(Value::Ref(Some(internal)));
+        }
         // The JVM throws for an absent class, and a platform probe relies on
         // its `catch (ClassNotFoundException)` to try the next loader. A null
         // answer would turn the probe's `getConstructor` into an NPE.
@@ -20561,7 +20589,7 @@ impl<H: Host> Runtime<'_, H> {
             .map(|marker| marker.replace('.', "/"))?;
         // A host kind's class: its row knows its supertypes, not which are
         // declared directly. Left to the host, which counts it.
-        if HostKind::owning_class(&name).is_some() {
+        if self.class(&name).is_none() && HostKind::owning_class(&name).is_some() {
             return None;
         }
         let interfaces = self
@@ -20955,8 +20983,11 @@ impl<H: Host> Runtime<'_, H> {
         {
             let target = reflection_class_name(receiver, r)?.replace('.', "/");
             let source = reflection_class_name(args.first(), r)?.replace('.', "/");
-            // A host kind's class (`getClass()` of a handle): its row.
-            if let Some(answer) = HostKind::class_instance_of(&source, &target, self) {
+            // A host kind's class (`getClass()` of a handle): its row, unless
+            // the run holds that class file (a jar's own copy wins).
+            if self.class(&source).is_none()
+                && let Some(answer) = HostKind::class_instance_of(&source, &target, self)
+            {
                 return match answer {
                     Some(answer) => Ok(Some(Value::Int(i32::from(answer)))),
                     None => self.host.unknown_operand_call(r).map(Some),
@@ -20998,7 +21029,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             // A host kind's class: its row knows its supertypes, not which
             // one is the direct superclass. Counted.
-            if HostKind::owning_class(&class).is_some() {
+            if self.class(&class).is_none() && HostKind::owning_class(&class).is_some() {
                 return self.host.unknown_operand_call(r).map(Some);
             }
             let parent = self

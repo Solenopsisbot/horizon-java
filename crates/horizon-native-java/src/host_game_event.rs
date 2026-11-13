@@ -227,15 +227,42 @@ fn table_class(class: &str) -> Option<bool> {
     crate::neoforge_bus::table_superclass(class).map(|_| false)
 }
 
+/// The game events' class names: the event table's classes and the classes the game fires, but
+/// the loading stages'.
+fn game_family_classes() -> Vec<String> {
+    let mut classes: Vec<String> = crate::neoforge_event_classes::EVENT_CLASSES
+        .iter()
+        .map(|(class, _, _)| (*class).to_owned())
+        .chain(crate::events::bus_event_classes())
+        .filter(|class| !stage_class(class))
+        .collect();
+    classes.sort();
+    classes.dedup();
+    classes
+}
+
+fn stage_classes() -> Vec<String> {
+    let mut classes: Vec<String> = LoadingStage::ALL
+        .iter()
+        .flat_map(|stage| [stage.event(true), stage.event(false)])
+        .map(str::to_owned)
+        .collect();
+    classes.sort();
+    classes.dedup();
+    classes
+}
+
 pub(crate) const EVENT_CLASS_SIDE: ClassSide = ClassSide {
     owns: game_family,
     instance_of: class_side_instance_of,
     superclass: table_superclass,
     is_interface: table_class,
+    classes: game_family_classes,
 };
 
 pub(crate) const LIFECYCLE_CLASS_SIDE: ClassSide = ClassSide {
     owns: stage_class,
+    classes: stage_classes,
     ..EVENT_CLASS_SIDE
 };
 
