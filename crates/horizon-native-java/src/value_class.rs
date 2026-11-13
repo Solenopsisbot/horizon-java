@@ -28,8 +28,7 @@ pub(crate) const STRING_TYPES: &[&str] = &[
 
 /// Runtime markers with no `/`, `#`, `@` or `:` in them, which the shape rule
 /// of [`is_plain_string`] cannot tell from text.
-const SEPARATOR_FREE_MARKERS: &[&str] =
-    &["guava-cache-builder", "mixin-environment", "stack-walker"];
+const SEPARATOR_FREE_MARKERS: &[&str] = &["mixin-environment"];
 
 /// The marker families that moved onto handles (#156): no runtime value is
 /// text with one of these prefixes any more.
@@ -206,8 +205,9 @@ mod tests {
             // Spelled like the boxes once were; boxes are no longer text.
             "integer:5",
             "true",
-            // Spelled like a path once was (#156 P2).
+            // Spelled like a path and the stack walker once were (#156 P2).
             "path:/horizon/game",
+            "stack-walker",
             // Spelled like a `Lookup` once was (#156 P10b).
             "method-handles-lookup",
         ] {

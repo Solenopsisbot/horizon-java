@@ -446,6 +446,10 @@ const EXACT: &[(&str, &str)] = &[
         "arraycopies",
         "ArrayIndexOutOfBoundsException:arraycopy: last source index 5 out of bounds for object array[1]|ok|ArrayStoreException:arraycopy: type mismatch: can not copy java.lang.Integer[] into java.lang.String[]|ArrayStoreException:arraycopy: type mismatch: can not copy java.lang.CharSequence[] into java.lang.Integer[]|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.Stringaqr|ArrayIndexOutOfBoundsException:arraycopy: last source index 5 out of bounds for object array[1]|okb|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, [J|ok|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of demo.ArrayValues$Base[] to the type of the destination array, demo.ArrayValues$Sub",
     ),
+    // The current thread into an array of a jar class: the thread is a host
+    // handle of class `java/lang/Thread` (#156 P2b), so the store throws
+    // exactly (it was counted while the thread was text).
+    ("storeUnknown", "ArrayStoreException:java.lang.Thread"),
 ];
 
 /// The methods whose answer the runtime does not have: Java 25's answer, and
@@ -542,12 +546,6 @@ const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
             ),
             ("java/lang/Class#getSigners()[Ljava/lang/Object;", 1),
         ],
-    ),
-    // A store of a value whose class the runtime does not know (the current thread) into an array of a jar class: counted, then stored, as `checkcast` counts the same cast.
-    (
-        "storeUnknown",
-        "ArrayStoreException:java.lang.Thread",
-        &[("[Ldemo/ArrayValues$Base;#<aastore>(Ljava/lang/Object;)V", 1)],
     ),
     // A `HashSet`'s `toArray(T[])` store failure: its message and partial writes are its own class's, so the call is counted.
     (

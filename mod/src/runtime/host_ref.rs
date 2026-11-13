@@ -242,6 +242,45 @@ pub enum HostKind {
     GameEvent,
     /// The event a NeoForge loading stage posts: key its class and container.
     LifecycleEvent,
+    /// An `ExecutorService`: key its allocation marker (`host_executors.rs`).
+    Executor,
+    /// A `Future` an executor answered: key its allocation marker.
+    ExecutorFuture,
+    /// `Executors.callable(task[, result])`: key the values it holds.
+    ExecutorCallable,
+    /// `Executors.defaultThreadFactory()`: key its allocation marker.
+    ThreadFactory,
+    /// A `ServiceLoader`: key its service and load serial (`host_services.rs`).
+    ServiceLoader,
+    /// A `ServiceLoader` iterator: key its serial.
+    ServiceIterator,
+    /// A `ServiceLoader.Provider`: key its service, class and loader serial.
+    ServiceProvider,
+    /// Guava `Splitter.on`: key its separator (`host_guava.rs`).
+    GuavaSplitter,
+    /// Guava `Joiner.on`: key its separator.
+    GuavaJoiner,
+    /// Guava `CacheBuilder`: key its allocation marker.
+    GuavaCacheBuilder,
+    /// Guava `CacheLoader.from(function)`: key the function.
+    GuavaCacheLoader,
+    /// The thread callbacks run on (`host_jdk.rs`): key `main`.
+    Thread,
+    /// A logger: key `of_values([api, name])`.
+    Logger,
+    /// A `StackWalker`: key `""` for `getInstance()`'s, `options` otherwise.
+    StackWalker,
+    /// A `StackWalker.StackFrame` / `StackTraceElement` of a jar frame: key
+    /// `of_values([class, method])`.
+    StackFrame,
+    StackTraceElement,
+    /// A `java.lang.Module`: key `unnamed` or `java.base`.
+    Module,
+    /// A NeoForge `AttachmentType`: key a serial minted per allocation
+    /// (`host_attachment.rs`).
+    AttachmentType,
+    /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
+    AttachmentBuilder,
     /// The command surface (`host_brigadier.rs`): Brigadier's
     /// `CommandDispatcher` a registration callback receives (no key).
     BrigadierDispatcher,
@@ -437,6 +476,14 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::LifecycleEvent,
         &crate::runtime::host_game_event::LIFECYCLE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentType,
+        &crate::runtime::host_attachment::TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentBuilder,
+        &crate::runtime::host_attachment::BUILDER_CLASS_SIDE,
     ),
 ];
 
@@ -802,6 +849,175 @@ const KINDS: &[KindInfo] = &[
         // A stage posts one event per container.
         canonical: always_canonical,
         methods: &crate::runtime::host_game_event::LIFECYCLE_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::Executor,
+        tag: "exe",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::executor_types,
+        },
+        // One per `Executors.newX()` call.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ExecutorFuture,
+        tag: "fut",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::future_types,
+        },
+        // One per `submit`/`schedule`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ExecutorCallable,
+        tag: "xcall",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::callable_types,
+        },
+        // A fresh `RunnableAdapter` per call: equal keys may be two objects.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ThreadFactory,
+        tag: "tfac",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::thread_factory_types,
+        },
+        // One per `defaultThreadFactory()` call.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceLoader,
+        tag: "svl",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_services::loader_types,
+        },
+        // One per `ServiceLoader.load`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_services::LOADER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceIterator,
+        tag: "svi",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_services::iterator_types,
+        },
+        // One per `iterator()`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceProvider,
+        tag: "svp",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_services::provider_types,
+        },
+        // Equal keys are equal providers; `reload()` makes new objects.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_services::PROVIDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaSplitter,
+        tag: "gsplit",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::splitter_types,
+        },
+        // A fresh `Splitter` per `on`.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaJoiner,
+        tag: "gjoin",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::joiner_types,
+        },
+        // A fresh `Joiner` per `on`.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaCacheBuilder,
+        tag: "gcb",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::cache_builder_types,
+        },
+        // One per `newBuilder()`; setters answer it.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaCacheLoader,
+        tag: "gcl",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::cache_loader_types,
+        },
+        // A fresh loader per `from`.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Thread,
+        tag: "thr",
+        class: ClassRule::FromKey(|_| "java/lang/Thread"),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_jdk::THREAD,
+    },
+    KindInfo {
+        kind: HostKind::Logger,
+        tag: "log",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_jdk::logger_declared,
+        },
+        canonical: crate::runtime::host_jdk::logger_canonical,
+        methods: &crate::runtime::host_jdk::LOGGER,
+    },
+    KindInfo {
+        kind: HostKind::StackWalker,
+        tag: "walker",
+        class: ClassRule::Fixed("java/lang/StackWalker"),
+        canonical: canonical_when_empty,
+        methods: &crate::runtime::host_jdk::STACK_WALKER,
+    },
+    KindInfo {
+        kind: HostKind::StackFrame,
+        tag: "frame",
+        class: ClassRule::Fixed("java/lang/StackFrameInfo"),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_jdk::STACK_FRAME,
+    },
+    KindInfo {
+        kind: HostKind::StackTraceElement,
+        tag: "ste",
+        class: ClassRule::FromKey(|_| "java/lang/StackTraceElement"),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_jdk::STACK_TRACE_ELEMENT,
+    },
+    KindInfo {
+        kind: HostKind::Module,
+        tag: "module",
+        class: ClassRule::Fixed("java/lang/Module"),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_jdk::MODULE,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentType,
+        tag: "natt",
+        class: ClassRule::FromKey(crate::runtime::host_attachment::type_class),
+        // One serial per allocation.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_attachment::TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentBuilder,
+        tag: "nattb",
+        class: ClassRule::FromKey(crate::runtime::host_attachment::builder_class),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_attachment::BUILDER_METHODS,
     },
     // The command surface (`host_brigadier.rs`). An exact `getClass()` would
     // need a class side for brigadier's classes (#174's `ClassSide`): until

@@ -66,18 +66,23 @@ mod hash_table;
 mod heap;
 mod hook_shapes;
 mod host_array;
+mod host_attachment;
 mod host_brigadier;
 mod host_entry;
 mod host_events;
+mod host_executors;
 mod host_game_event;
+mod host_guava;
 mod host_ids;
 mod host_invoke;
+mod host_jdk;
 mod host_list_iterator;
 mod host_optional;
 mod host_path;
 mod host_ref;
 mod host_reflect;
 mod host_registry;
+mod host_services;
 mod host_watch;
 mod immutable_collections;
 mod iteration_guard;
@@ -4919,7 +4924,12 @@ impl Host for StdHost {
                 if !self.merged_service_providers(&service).is_empty()
                     || !host_models_class(&service)
                 {
-                    Ok(Value::Ref(Some(format!("service-loader/{service}"))))
+                    // The interpreter makes each load its own loader
+                    // (`service_loader.rs`); this host-only one shares its
+                    // iterator counter for a serial.
+                    let loader = host_services::loader(&service, self.next_iterator);
+                    self.next_iterator = self.next_iterator.saturating_add(1);
+                    Ok(loader)
                 } else {
                     Err(NativeError::Metadata(format!(
                         "java/util/ServiceLoader has no explicitly seeded providers for {service}; host classpath scanning is disabled"
@@ -5908,7 +5918,7 @@ impl Host for StdHost {
                 Ok(self.resource_enumeration(name))
             }
             ("java/lang/Thread", "currentThread", "()Ljava/lang/Thread;") => {
-                Ok(Value::Ref(Some("thread/main".into())))
+                Ok(host_jdk::main_thread())
             }
             (
                 "net/fabricmc/loader/api/FabricLoader",
@@ -6221,12 +6231,22 @@ impl Host for StdHost {
             }
         }
         if r.owner == "java/lang/Thread" {
-            let marker = expect_ref(receiver)
-                .ok_or_else(|| NativeError::Metadata("malformed java/lang/Thread marker".into()))?;
             // A jar may construct its own thread for a shutdown hook; that
-            // object keeps its `java/lang/Thread#<n>` identity and the main
-            // marker is the one `currentThread` answers.
-            let is_thread = marker == "thread/main" || marker.starts_with("java/lang/Thread#");
+            // object keeps its `java/lang/Thread#<n>` identity, and the main
+            // thread is the handle `currentThread` answers (`host_jdk.rs`).
+            // `main` names it in the parked-thread table, whose other keys
+            // are `java/lang/Thread#<n>` markers.
+            let marker = match receiver {
+                receiver if host_jdk::is_main_thread(receiver) => "main".to_owned(),
+                Value::Ref(Some(marker)) => marker.clone(),
+                _ => {
+                    return Err(NativeError::Metadata(
+                        "malformed java/lang/Thread marker".into(),
+                    ));
+                }
+            };
+            let marker = &marker;
+            let is_thread = marker == "main" || marker.starts_with("java/lang/Thread#");
             if !is_thread {
                 return Err(NativeError::Metadata(
                     "unsupported java/lang/Thread marker".into(),
@@ -6262,10 +6282,10 @@ impl Host for StdHost {
                 ("getContextClassLoader", "()Ljava/lang/ClassLoader;") => {
                     Ok(Value::Ref(Some("classloader/bootstrap".into())))
                 }
-                _ => Err(NativeError::MissingMethod(format!(
-                    "java/lang/Thread#{}{}",
-                    r.name, r.descriptor
-                ))),
+                // Any other `Thread` member (`isAlive`, `getPriority`,
+                // `getState`, `setName`...) is not modelled: counted, never a
+                // run stopper.
+                _ => self.unknown_host_call(r),
             };
         }
         if r.owner == "java/lang/Runtime" {
@@ -7475,14 +7495,11 @@ impl Host for StdHost {
             }
         }
         if r.owner == "java/util/ServiceLoader$Provider" {
-            let marker = receiver_marker.as_deref().ok_or_else(|| {
-                NativeError::Metadata("malformed java/util/ServiceLoader$Provider marker".into())
-            })?;
             // The interpreter answers a provider (`service_loader.rs`); this
             // is the host's nominal fallback, the class name.
-            let Some((_, provider)) = service_loader::provider_parts(marker) else {
+            let Some((_, provider)) = host_services::provider_parts(receiver) else {
                 return Err(NativeError::Metadata(
-                    "unsupported java/util/ServiceLoader$Provider marker".into(),
+                    "unsupported java/util/ServiceLoader$Provider receiver".into(),
                 ));
             };
             return match (r.name.as_str(), r.descriptor.as_str()) {
@@ -7495,13 +7512,10 @@ impl Host for StdHost {
                 ))),
             };
         }
-        if r.owner == "java/util/ServiceLoader" {
-            let marker = receiver_marker.as_deref().ok_or_else(|| {
-                NativeError::Metadata("malformed java/util/ServiceLoader marker".into())
-            })?;
-            let service = service_loader::loader_service(marker).ok_or_else(|| {
-                NativeError::Metadata("unsupported java/util/ServiceLoader marker".into())
-            })?;
+        if r.owner == "java/util/ServiceLoader"
+            && let Some((service, _)) = host_services::loader_parts(receiver)
+        {
+            let service = service.as_str();
             if r.name == "iterator" && r.descriptor == "()Ljava/util/Iterator;" {
                 let providers = self.merged_service_providers(service);
                 if providers.is_empty() && host_models_class(service) {
@@ -20935,6 +20949,19 @@ impl<H: Host> Runtime<'_, H> {
             if assignable || self.class(&source).is_some() {
                 return Ok(Some(Value::Int(i32::from(assignable))));
             }
+            // A JDK class of Java 25's generated table (`jdk_closure.rs`;
+            // a `FromKey` kind's class, `java/lang/Thread`): its whole
+            // supertype set is known, and a `false` stands only when proved.
+            if crate::jdk_closure::class(&source).is_some() {
+                return match host_ref::ClassHierarchy::is_instance(
+                    &host_ref::JdkHierarchy,
+                    &source,
+                    &target,
+                ) {
+                    Some(answer) => Ok(Some(Value::Int(i32::from(answer)))),
+                    None => self.host.unknown_operand_call(r).map(Some),
+                };
+            }
         }
         if let Some(value) = self.invoke_reflect_enum(r, receiver)? {
             return Ok(Some(value));
@@ -31965,10 +31992,7 @@ mandatory = true
         let loader = host
             .invoke(&load, &[Value::Ref(Some("demo.Provider".into()))])
             .unwrap();
-        assert_eq!(
-            loader,
-            Value::Ref(Some("service-loader/demo/Provider".into()))
-        );
+        assert_eq!(loader, host_services::loader("demo/Provider", 0));
         let iterator = host
             .invoke_instance(
                 &MethodRef {
@@ -35419,7 +35443,7 @@ mandatory = true
             descriptor: "()Ljava/lang/Thread;".into(),
         };
         let thread = host.invoke(&current_thread, &[]).unwrap();
-        assert_eq!(thread, Value::Ref(Some("thread/main".into())));
+        assert_eq!(thread, host_jdk::main_thread());
 
         for (name, descriptor, expected) in [
             (
