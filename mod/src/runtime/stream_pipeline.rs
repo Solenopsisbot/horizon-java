@@ -106,6 +106,7 @@ pub(crate) const STREAM_BUILDER: Methods = Methods {
         ))
     },
     crosses_jars: |_, _| false,
+    compare_to: None,
 };
 
 /// The builder number a `Stream.Builder` handle carries.
