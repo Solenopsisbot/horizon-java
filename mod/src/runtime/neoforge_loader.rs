@@ -181,10 +181,9 @@ impl StdHost {
                 "net/neoforged/neoforge/registries/NeoForgeRegistries",
                 "ATTACHMENT_TYPES",
                 "Lnet/minecraft/core/Registry;",
-            ) => Some(Value::Ref(Some(format!(
-                "registry/{}",
-                crate::runtime::neoforge_attachments::ATTACHMENT_TYPES_REGISTRY
-            )))),
+            ) => Some(crate::runtime::host_registry::registry(
+                crate::runtime::neoforge_attachments::ATTACHMENT_TYPES_REGISTRY,
+            )),
             _ => None,
         }
     }
@@ -220,9 +219,14 @@ impl StdHost {
                     .get(1)
                     .and_then(expect_ref)
                     .map_or("default", String::as_str);
-                Some(Value::Ref(Some(format!(
-                    "deferred-register/data-component-type/{namespace}"
-                ))))
+                let marker = format!("deferred-register/data-component-type/{namespace}");
+                let registry_key = args.first().cloned().unwrap_or(Value::Ref(None));
+                self.record_deferred_register(
+                    &marker,
+                    &registry_key,
+                    args.get(1).and_then(expect_ref),
+                );
+                Some(Value::Ref(Some(marker)))
             }
             // The real game reports the running client's own version; the
             // host answers the version it was seeded with, and nothing when

@@ -216,8 +216,8 @@ impl<H: Host> Runtime<'_, H> {
         match self.equality_of(value) {
             Equality::Null | Equality::Platform | Equality::Identity => true,
             Equality::Host => {
-                // An identifier compares and hashes by its text.
-                expect_ref(value).is_some_and(|marker| marker.starts_with("identifier/"))
+                // A game id compares and hashes by its key (`host_ids.rs`).
+                crate::runtime::host_ids::pure_equality(value)
                     || is_map_entry(value)
                         && map_entry_parts(value).is_ok_and(|(key, entry)| {
                             self.pure_equality_at(&key, depth + 1)
@@ -299,7 +299,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// The hash of a host-modelled value: a list, set or map by the JDK's
-    /// formula over its elements, an identifier by `Identifier.hashCode`.
+    /// formula over its elements, a handle by its kind's row.
     fn host_value_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         // A handle's `hashCode` is its kind's row, a held value's own
         // `hashCode` run here (`host_ref.rs`).
@@ -309,9 +309,6 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
-        if let Some(id) = marker.strip_prefix("identifier/") {
-            return Ok(Some(hash_map_order::identifier_hash(id)));
-        }
         if let Some(path) = self.file_path(value) {
             return Ok(Some(file_hash(path)));
         }
@@ -401,11 +398,22 @@ impl<H: Host> Runtime<'_, H> {
             }
             Equality::Host => {
                 // A handle's `equals` is its kind's row, a held value's own
-                // `equals` run here (`host_ref.rs`).
+                // `equals` run here (`host_ref.rs`). An answer the row cannot
+                // give (two equal keys from different constructions of an
+                // identity-`equals` kind) is counted and never replaced by
+                // key equality: the two stay distinct (§2.1).
                 if let Value::Host(handle) = a {
-                    return Ok(handle
-                        .equals(b, &mut RuntimeNested::new(self))?
-                        .unwrap_or(a == b));
+                    return match handle.equals(b, &mut RuntimeNested::new(self))? {
+                        Some(equal) => Ok(equal),
+                        None => {
+                            self.host.unknown_operand_call(&MethodRef {
+                                owner: "java/lang/Object".into(),
+                                name: "equals".into(),
+                                descriptor: EQUALS.into(),
+                            })?;
+                            Ok(false)
+                        }
+                    };
                 }
                 if is_map_entry(a) {
                     // `Map.Entry.equals`: an entry with `Objects.equals` keys
@@ -434,7 +442,7 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `Objects.equals(a, b)`: `a == b || a != null && a.equals(b)`.
     pub(crate) fn objects_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
-        if a == b && !matches!(a, Value::Float(_)) {
+        if identical(a, b) {
             return Ok(true);
         }
         if *a == Value::Ref(None) {
@@ -866,14 +874,24 @@ impl<H: Host> Runtime<'_, H> {
 /// and text as the JVM runs them, a jar object's own bodies included.
 /// `class` and `method` name the calling frame, for a library model's
 /// `toString` that runs a callback.
-struct RuntimeNested<'a, 'r, 'f, H: Host> {
+pub(crate) struct RuntimeNested<'a, 'r, 'f, H: Host> {
     runtime: &'a mut Runtime<'r, H>,
     class: &'f str,
     method: &'f str,
 }
 
+/// `a == b` as a collection's shortcut reads it: two handles only where the
+/// same object is proved (`HostRef::same_object`), since equal keys may be two
+/// objects; any other value by equality (a `float` never, for `NaN`).
+pub(crate) fn identical(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Host(left), Value::Host(right)) => left.same_object(right) == Some(true),
+        _ => a == b && !matches!(a, Value::Float(_)),
+    }
+}
+
 impl<'a, 'r, H: Host> RuntimeNested<'a, 'r, 'static, H> {
-    fn new(runtime: &'a mut Runtime<'r, H>) -> Self {
+    pub(crate) fn new(runtime: &'a mut Runtime<'r, H>) -> Self {
         Self {
             runtime,
             class: "",

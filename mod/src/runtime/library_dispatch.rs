@@ -6,6 +6,7 @@
 //! by a mod's name.
 
 use super::*;
+use crate::runtime::host_jdk::{self, JAVA_BASE_MODULE, UNNAMED_MODULE};
 
 impl<H: Host> Runtime<'_, H> {
     /// The library and JDK calls this module answers, or `None` to leave the
@@ -18,6 +19,10 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        // Loggers named after a class (`jdk_model.rs`).
+        if let Some(value) = self.invoke_logger_factory(r, args)? {
+            return Ok(Some(value));
+        }
         // `Files.readAttributes`/`isDirectory` (`file_attributes.rs`), also
         // as a method reference (`filter(Files::isDirectory)`).
         if let Some(value) = self.invoke_file_attributes(r, receiver, args)? {
@@ -58,7 +63,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_reflect_proxy(r, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_array_class(r, receiver) {
+        if let Some(value) = self.invoke_array_class(r, receiver)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_guava(r, receiver, args)? {
@@ -67,7 +72,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_filter_stream(r, receiver, args, class, method)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_byte_streams(r, receiver, args, class, method)? {
+        if let Some(value) = self.invoke_byte_streams(r, receiver, args)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_reflect_generic(r, receiver)? {
@@ -82,7 +87,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_array_views(r, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_module(r, receiver, args) {
+        if let Some(value) = self.invoke_module(r, receiver, args)? {
             return Ok(Some(value));
         }
         if let Some(value) = unboxed_to_string(r, receiver) {
@@ -125,10 +130,12 @@ impl<H: Host> Runtime<'_, H> {
             ) => {
                 let marker = expect_ref(receiver?)?.clone();
                 // The default id comes first in `DefaultedMappedRegistry`.
+                // Its registry key (`ResourceKey[minecraft:root / <id>]`).
                 let key = args
                     .iter()
                     .find(|value| {
-                        expect_ref(value).is_some_and(|key| key.starts_with("registry/"))
+                        crate::runtime::host_ids::named_id(value).is_some()
+                            && crate::runtime::host_ids::is_resource_key(value)
                     })?
                     .clone();
                 self.fields.insert(format!("{marker}{KEY_FIELD}"), key);
@@ -136,13 +143,14 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("net/fabricmc/fabric/api/event/registry/FabricRegistryBuilder", "from") => {
                 let registry = expect_ref(args.first()?)?;
-                let Some(Value::Ref(Some(key))) =
-                    self.fields.get(&format!("{registry}{KEY_FIELD}"))
-                else {
-                    return None;
-                };
-                let id = key.strip_prefix("registry/")?;
-                Some(Value::Ref(Some(format!("fabric-registry-builder/{id}"))))
+                let key = self.fields.get(&format!("{registry}{KEY_FIELD}"))?;
+                let id = crate::runtime::host_ids::named_id(key)?;
+                // A `MappedRegistry` (or its defaulted subclass) the jar built:
+                // `buildAndRegister` answers the registry handle for its id
+                // (not the jar's own object: #177 review P4, filed).
+                Some(crate::runtime::fabric_registry::builder(
+                    crate::runtime::host_registry::built_registry(crate::runtime::host_registry::MAPPED, &id),
+                ))
             }
             _ => None,
         }
@@ -440,10 +448,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
-        if !marker.contains('#')
-            && !marker.starts_with("typetoken/")
-            && !marker.starts_with("method-type/")
-        {
+        if !marker.contains('#') && !marker.starts_with("typetoken/") {
             return Ok(None);
         }
         let to_string = MethodRef {
@@ -472,6 +477,10 @@ impl<H: Host> Runtime<'_, H> {
         // answer is `instance_of_is_guess`'s to count.
         if let Value::Host(handle) = value {
             return handle.instance_of(wanted, self) == Some(true);
+        }
+        // Every array is a handle: no other value is one, however spelled.
+        if wanted.starts_with('[') {
+            return false;
         }
         unboxed_instance_of(value, wanted)
             || expect_ref(value).is_some_and(|marker| {
@@ -593,22 +602,34 @@ impl<H: Host> Runtime<'_, H> {
         r: &MethodRef,
         receiver: Option<&Value>,
         args: &[Value],
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
         if r.owner == "java/lang/Class"
             && r.name == "getModule"
             && r.descriptor == "()Ljava/lang/Module;"
         {
-            let class = expect_ref(receiver?)?;
-            let java_base = class.starts_with("java/")
-                || class.starts_with('[')
-                || PRIMITIVE_CLASSES.contains(&class.as_str());
-            return Some(Value::Ref(Some(
-                if java_base && !self.has_class(class) {
-                    JAVA_BASE_MODULE
-                } else {
-                    UNNAMED_MODULE
-                }
-                .into(),
+            let Some(class) = expect_ref(receiver) else {
+                return Ok(None);
+            };
+            // An array is in its element type's module, a primitive (and a
+            // primitive array) in `java.base`, a JDK class in the module
+            // Java 25 puts its package in (`jdk_closure::module_of`).
+            let element = if class.starts_with('[') {
+                erased_field_type(class.trim_start_matches('['))
+            } else {
+                class.clone()
+            };
+            let module = if PRIMITIVE_CLASSES.contains(&element.as_str()) {
+                Some(JAVA_BASE_MODULE)
+            } else if self.has_class(&element) {
+                None
+            } else {
+                crate::runtime::jdk_closure::module_of(&element)
+            };
+            return Ok(Some(host_jdk::module_value(
+                module.unwrap_or(UNNAMED_MODULE),
             )));
         }
         // A primitive's package is `java.lang` and an array's is its
@@ -618,7 +639,9 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getPackageName"
             && r.descriptor == "()Ljava/lang/String;"
         {
-            let class = expect_ref(receiver?)?;
+            let Some(class) = expect_ref(receiver) else {
+                return Ok(None);
+            };
             let element = class.trim_start_matches('[');
             let element = if class.starts_with('[') {
                 erased_field_type(element)
@@ -626,42 +649,50 @@ impl<H: Host> Runtime<'_, H> {
                 element.to_owned()
             };
             if PRIMITIVE_CLASSES.contains(&element.as_str()) {
-                return Some(Value::Ref(Some("java.lang".into())));
+                return Ok(Some(Value::Ref(Some("java.lang".into()))));
             }
             if class.starts_with('[') {
                 let package = element.rsplit_once('/').map_or("", |(package, _)| package);
-                return Some(Value::Ref(Some(package.replace('/', "."))));
+                return Ok(Some(Value::Ref(Some(package.replace('/', ".")))));
             }
-            return None;
+            return Ok(None);
         }
         if r.owner != "java/lang/Module" {
-            return None;
+            return Ok(None);
         }
-        let module = expect_ref(receiver?)?.clone();
-        let named = module == JAVA_BASE_MODULE;
-        if !named && module != UNNAMED_MODULE {
-            return None;
-        }
-        Some(match (r.name.as_str(), r.descriptor.as_str()) {
+        let Some(name) = host_jdk::module_name(receiver).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let named = name != UNNAMED_MODULE;
+        let java_base = name == JAVA_BASE_MODULE;
+        Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("isNamed", "()Z") => Value::Int(i32::from(named)),
-            ("getName", "()Ljava/lang/String;") => {
-                Value::Ref(named.then(|| "java.base".to_owned()))
-            }
+            ("getName", "()Ljava/lang/String;") => Value::Ref(named.then_some(name)),
+            // Every system module is in the boot layer; an unnamed module is
+            // in none.
             ("getLayer", "()Ljava/lang/ModuleLayer;") => {
                 Value::Ref(named.then(|| "module-layer/boot".to_owned()))
             }
+            // A named module's descriptor is an object the runtime does not
+            // model: counted. An unnamed module has none.
+            ("getDescriptor", "()Ljava/lang/module/ModuleDescriptor;") if named => {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
             ("getDescriptor", "()Ljava/lang/module/ModuleDescriptor;") => Value::Ref(None),
-            ("getClassLoader", "()Ljava/lang/ClassLoader;") => {
-                Value::Ref((!named).then(|| "classloader/bootstrap".to_owned()))
+            // `java.base` is the bootstrap loader's (`null`); another system
+            // module may be the platform loader's: counted.
+            ("getClassLoader", "()Ljava/lang/ClassLoader;") if java_base => Value::Ref(None),
+            ("getClassLoader", "()Ljava/lang/ClassLoader;") if !named => {
+                Value::Ref(Some("classloader/bootstrap".to_owned()))
             }
             (
                 "isExported" | "isOpen",
                 "(Ljava/lang/String;)Z" | "(Ljava/lang/String;Ljava/lang/Module;)Z",
-            ) => {
+            ) if java_base || !named => {
                 // `java.base` exports `java.*`; it opens none of them to an
-                // unnamed module.
+                // unnamed module. An unnamed module exports and opens all.
                 let package = args.first().and_then(expect_ref).map(String::as_str);
-                Value::Int(i32::from(if named {
+                Value::Int(i32::from(if java_base {
                     r.name == "isExported"
                         && package.is_some_and(|package| package.starts_with("java."))
                 } else {
@@ -669,16 +700,12 @@ impl<H: Host> Runtime<'_, H> {
                 }))
             }
             ("canRead", "(Ljava/lang/Module;)Z") => Value::Int(1),
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(
-                if named {
-                    "module java.base"
-                } else {
-                    "unnamed module"
-                }
-                .into(),
-            )),
-            _ => return None,
-        })
+            // Another system module's loader and exports are not modelled.
+            ("getClassLoader" | "isExported" | "isOpen", _) => {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
+            _ => return Ok(None),
+        }))
     }
 
     /// A jar subclass of `java.io.FilterInputStream` reads through the
@@ -800,9 +827,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_io(&inner, Some(&wrapped), args, class, method)? {
             return Ok(Some(value));
         }
-        if let Some(value) =
-            self.invoke_byte_streams(&inner, Some(&wrapped), args, class, method)?
-        {
+        if let Some(value) = self.invoke_byte_streams(&inner, Some(&wrapped), args)? {
             return Ok(Some(value));
         }
         // A wrapped jar stream runs its own body.
@@ -832,8 +857,6 @@ impl<H: Host> Runtime<'_, H> {
         r: &MethodRef,
         receiver: Option<&Value>,
         args: &[Value],
-        class: &str,
-        method: &str,
     ) -> Result<Option<Value>, NativeError> {
         const BAIS: &str = "java/io/ByteArrayInputStream";
         if !matches!(
@@ -847,10 +870,10 @@ impl<H: Host> Runtime<'_, H> {
         };
         let field = |name: &str, descriptor: &str| format!("{marker}|{BAIS}#{name}{descriptor}");
         if r.owner == BAIS && r.name == "<init>" {
-            let Some(array) = args.first().and_then(expect_ref).cloned() else {
+            let Some(array) = args.first().cloned() else {
                 return Ok(None);
             };
-            let Some(length) = self.arrays.get(&array).map(Vec::len) else {
+            let Some(length) = self.owned_array(&array).map(Vec::len) else {
                 return Ok(None);
             };
             let (offset, count) = match r.descriptor.as_str() {
@@ -862,8 +885,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 _ => return Ok(None),
             };
-            self.fields
-                .insert(field("buf", "[B"), Value::Ref(Some(array)));
+            self.fields.insert(field("buf", "[B"), array);
             self.fields
                 .insert(field("pos", "I"), Value::Int(offset as i32));
             self.fields
@@ -874,10 +896,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // What the stream yields next: the array-backed stream's slice, or the
         // host resource stream's bytes.
-        let array_stream = match self.fields.get(&field("buf", "[B")) {
-            Some(Value::Ref(Some(array))) => Some(array.clone()),
-            _ => None,
-        };
+        let array_stream = self.fields.get(&field("buf", "[B")).cloned();
         let take = |this: &mut Self, limit: Option<usize>| -> Option<Vec<u8>> {
             match &array_stream {
                 Some(array) => {
@@ -889,7 +908,7 @@ impl<H: Host> Runtime<'_, H> {
                         Some(Value::Int(count)) => (*count).max(0) as usize,
                         _ => 0,
                     };
-                    let values = this.arrays.get(array)?;
+                    let values = this.owned_array(array)?;
                     let end = limit.map_or(count, |limit| pos.saturating_add(limit).min(count));
                     let bytes = values
                         .get(pos.min(end)..end)
@@ -912,7 +931,7 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(bytes) = take(self, None) else {
                     return Ok(None);
                 };
-                self.io_bytes_array(bytes, class, method)
+                self.io_bytes_array(bytes)
             }
             ("readNBytes", "(I)[B") => {
                 let wanted = args.first().and_then(boxed_integer).unwrap_or(0);
@@ -926,7 +945,7 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(bytes) = take(self, Some(wanted as usize)) else {
                     return Ok(None);
                 };
-                self.io_bytes_array(bytes, class, method)
+                self.io_bytes_array(bytes)
             }
             ("read", "()I") if array_stream.is_some() => {
                 let bytes = take(self, Some(1)).unwrap_or_default();
@@ -944,12 +963,18 @@ impl<H: Host> Runtime<'_, H> {
                 Value::Int((count - pos).max(0))
             }
             ("read", "([B)I" | "([BII)I") => {
-                let Some(target) = args.first().and_then(expect_ref).cloned() else {
-                    return Err(NativeError::UncaughtException {
-                        class: "java/lang/NullPointerException".into(),
-                        message: None,
-                        frame: None,
-                    });
+                let target = match args.first() {
+                    None | Some(Value::Ref(None)) => {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
+                    Some(target) => match host_array::array_key(target) {
+                        Some(key) => key.to_owned(),
+                        None => return Ok(None),
+                    },
                 };
                 let Some(capacity) = self.arrays.get(&target).map(Vec::len) else {
                     return Ok(None);
@@ -1014,9 +1039,10 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "asList"
             && r.descriptor == "([Ljava/lang/Object;)Ljava/util/List;"
         {
-            let Some(array) = args.first().filter(|value| {
-                expect_ref(value).is_some_and(|marker| self.arrays.contains_key(marker))
-            }) else {
+            let Some(array) = args
+                .first()
+                .filter(|value| self.owned_array(value).is_some())
+            else {
                 return Ok(None);
             };
             let values = self.array(array)?.clone();
@@ -1044,11 +1070,59 @@ impl<H: Host> Runtime<'_, H> {
             .iter()
             .map(|item| parse_collection_value(item))
             .collect::<Result<Vec<_>, _>>()?;
+        // `toArray(IntFunction)` is `toArray(generator.apply(0))`
+        // (`Collection`'s default): the generated array names the class.
+        let target = match r.descriptor.as_str() {
+            "()[Ljava/lang/Object;" => None,
+            "([Ljava/lang/Object;)[Ljava/lang/Object;" => args.first().cloned(),
+            _ => {
+                let Some(generator) = args.first() else {
+                    return Ok(None);
+                };
+                self.invoke_callback(generator, &[Value::Int(0)])?
+            }
+        };
+        let class = match &target {
+            None => "[Ljava/lang/Object;".to_owned(),
+            Some(target) => match host_array::exact_class(target) {
+                Some(class) => class.to_owned(),
+                None => return Ok(None),
+            },
+        };
+        // Each element is stored into a `T[]` (`array_store.rs`).
+        // `ArrayList.toArray(a)` copies its `Object[]` with
+        // `System.arraycopy`: into `a` itself, up to the first element that
+        // does not fit, when `a` is large enough. Another collection's
+        // message and partial writes are its own: counted.
+        if let Some(component) = value_class::component_of_array_class(&class)
+            && let Some(misfit) = self.first_misfit(&class, &component, &values)?
+        {
+            let array_list = expect_ref(receiver)
+                .and_then(|marker| crate::runtime::jar_text::object_marker_class(marker))
+                == Some("java/util/ArrayList");
+            let error = array_list
+                .then(|| self.arraycopy_store_exception("java/lang/Object", &component))
+                .flatten();
+            let Some(error) = error else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
+            if let Some(target) = &target
+                && let Some(slots) =
+                    host_array::array_key(target).and_then(|key| self.arrays.get_mut(key))
+                && slots.len() >= values.len()
+            {
+                for (slot, value) in slots.iter_mut().zip(&values[..misfit]) {
+                    *slot = value.clone();
+                }
+            }
+            return Err(error);
+        }
         // `toArray(T[] a)` fills `a` when it is large enough and nulls the
-        // slot after the last element, as the JDK's `AbstractCollection` does.
-        if r.descriptor == "([Ljava/lang/Object;)[Ljava/lang/Object;"
-            && let Some(target) = args.first().and_then(expect_ref).cloned()
-            && let Some(slots) = self.arrays.get_mut(&target)
+        // slot after the last element, as the JDK's `AbstractCollection` does;
+        // otherwise it answers a new array of `a`'s class.
+        if let Some(target) = target
+            && let Some(slots) =
+                host_array::array_key(&target).and_then(|key| self.arrays.get_mut(key))
             && slots.len() >= values.len()
         {
             let length = values.len();
@@ -1058,11 +1132,9 @@ impl<H: Host> Runtime<'_, H> {
             if let Some(after) = slots.get_mut(length) {
                 *after = Value::Ref(None);
             }
-            return Ok(Some(Value::Ref(Some(target))));
+            return Ok(Some(target));
         }
-        let marker = self.new_array("java/lang/Object", "toArray");
-        self.arrays.insert(marker.clone(), values);
-        Ok(Some(Value::Ref(Some(marker))))
+        Ok(Some(self.new_array_value(&class, values)))
     }
 
     /// `Throwable.getStackTrace()` / `Thread.getStackTrace()` and the
@@ -1075,24 +1147,20 @@ impl<H: Host> Runtime<'_, H> {
     /// has no Java frames below the entrypoint, so frames past the jar's own
     /// are not invented. `Thread.getStackTrace` lists its own JDK frame
     /// first, as the JVM does. Line numbers are not tracked (`-1`, the JVM's
-    /// "unknown"), and the file name is null.
+    /// "unknown"), and the file name is null; `toString`, which prints both,
+    /// is counted (`host_jdk.rs`).
     fn invoke_stack_trace(&mut self, r: &MethodRef, receiver: Option<&Value>) -> Option<Value> {
         if r.owner == "java/lang/StackTraceElement" {
-            let marker = receiver.and_then(expect_ref)?;
-            let rest = marker.strip_prefix(STACK_TRACE_ELEMENT_PREFIX)?;
-            let (method, class) = rest.split_once('@')?;
+            let (class, method) = host_jdk::frame_parts(receiver?, HostKind::StackTraceElement)?;
             let binary = class.replace('/', ".");
             return Some(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("getClassName", "()Ljava/lang/String;") => Value::Ref(Some(binary)),
-                ("getMethodName", "()Ljava/lang/String;") => Value::Ref(Some(method.to_owned())),
+                ("getMethodName", "()Ljava/lang/String;") => Value::Ref(Some(method)),
                 ("getLineNumber", "()I") => Value::Int(-1),
                 ("getFileName" | "getModuleName" | "getModuleVersion", "()Ljava/lang/String;") => {
                     Value::Ref(None)
                 }
                 ("isNativeMethod", "()Z") => Value::Int(0),
-                ("toString", "()Ljava/lang/String;") => {
-                    Value::Ref(Some(format!("{binary}.{method}(Unknown Source)")))
-                }
                 _ => return None,
             });
         }
@@ -1120,9 +1188,7 @@ impl<H: Host> Runtime<'_, H> {
                 .iter()
                 .map(|(class, method)| stack_trace_element(class, method)),
         );
-        let array = self.new_array("java/lang/StackTraceElement", "getStackTrace");
-        self.arrays.insert(array.clone(), frames);
-        Some(Value::Ref(Some(array)))
+        Some(self.new_array_value("[Ljava/lang/StackTraceElement;", frames))
     }
 
     /// `Paths.get(first, more...)` / `Path.of(first, more...)`: the parts
@@ -1154,7 +1220,7 @@ impl<H: Host> Runtime<'_, H> {
             }
         };
         let more = match args.get(1) {
-            Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+            Some(value @ Value::Host(_)) => self.array(value)?.clone(),
             _ => Vec::new(),
         };
         let mut parts = vec![first];
@@ -1309,10 +1375,9 @@ impl<H: Host> Runtime<'_, H> {
                     values.push(path_value(&full(rest)));
                 }
                 values.extend(found.iter().map(|relative| path_value(&full(relative))));
-                // `spliteratorUnknownSize` over the directory iterator: not `SIZED`.
-                let stream = self.new_stream(class, method, values);
-                self.mark_unsized_stream(&stream);
-                stream
+                // `spliteratorUnknownSize` over the directory iterator: not
+                // `SIZED` (never `mark_sized`).
+                self.new_stream(class, method, values)
             }
             _ => return Ok(None),
         }))
@@ -1489,18 +1554,8 @@ const PRIMITIVE_CLASSES: &[&str] = &[
     "boolean", "byte", "char", "short", "int", "long", "float", "double", "void",
 ];
 
-/// The class loader's unnamed module every jar class is in.
-const UNNAMED_MODULE: &str = "module/unnamed";
-/// The JDK's `java.base` module.
-const JAVA_BASE_MODULE: &str = "module/java.base";
-
-/// Prefix of one `StackTraceElement`: `stack-trace-element/<method>@<class>`.
-const STACK_TRACE_ELEMENT_PREFIX: &str = "stack-trace-element/";
-
 fn stack_trace_element(class: &str, method: &str) -> Value {
-    Value::Ref(Some(format!(
-        "{STACK_TRACE_ELEMENT_PREFIX}{method}@{class}"
-    )))
+    host_jdk::frame_value(HostKind::StackTraceElement, class, method)
 }
 
 /// Where `ModContainer.getRootPaths()` puts each mod's root in the virtual

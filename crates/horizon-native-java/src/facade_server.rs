@@ -106,9 +106,6 @@ const REGISTRY: &str = "game/registry/";
 const LAYERED: &str = "game/registries/layered";
 /// `MinecraftServer.getCommands()`.
 const COMMANDS: &str = "game/commands";
-/// The marker `Thread.currentThread()` answers: callbacks run on the server
-/// thread, so it is also the server's running thread.
-const THREAD: &str = "thread/main";
 const GAME_RULE: &str = "game-rule/";
 const LEVEL_RESOURCE: &str = "level-resource/";
 
@@ -240,7 +237,9 @@ pub(crate) fn server_member(
         ("getDataStorage", "()Lnet/minecraft/world/level/storage/SavedDataStorage;") => {
             Ok(marker(crate::facade_saved_data::STORAGE))
         }
-        ("getRunningThread", "()Ljava/lang/Thread;") => Ok(marker(THREAD)),
+        // `Thread.currentThread()`: callbacks run on the server thread, so it
+        // is also the server's running thread.
+        ("getRunningThread", "()Ljava/lang/Thread;") => Ok(crate::host_jdk::main_thread()),
         // The server's folder: the one the world folder sits in, as a
         // dedicated server's `<level-name>` sits in its working directory.
         ("getServerDirectory", "()Ljava/nio/file/Path;") => {
@@ -284,24 +283,16 @@ pub(crate) fn player_member(
     }
 }
 
-/// The id a registry key argument names: `registry/<id>` (a `Registries`
-/// static) or `resource-key/minecraft:root/<id>`.
-fn registry_key(value: &Value) -> Option<&str> {
-    let text = expect_ref(value)?;
-    text.strip_prefix("registry/").or_else(|| {
-        text.strip_prefix("resource-key/minecraft:root/")
-            .map(|id| id.strip_prefix("identifier/").unwrap_or(id))
-    })
+/// The id a registry key argument names: a `ResourceKey` in
+/// `minecraft:root` (`Registries.X`).
+fn registry_key(value: &Value) -> Option<String> {
+    let (registry, id) = crate::host_ids::resource_key_parts(value)?;
+    (registry == "minecraft:root").then_some(id)
 }
 
 /// The `namespace:path` an `Identifier` argument names.
 fn identifier_text(value: &Value) -> Option<String> {
-    let text = expect_ref(value)?.strip_prefix("identifier/")?;
-    Some(if text.contains(':') {
-        text.to_owned()
-    } else {
-        format!("minecraft:{text}")
-    })
+    crate::host_ids::identifier_key(value).map(str::to_owned)
 }
 
 /// Answer one call on a marker [`owns`] says is this module's.
@@ -383,7 +374,7 @@ pub(crate) fn answer(
                 "lookupOrThrow",
                 "(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/HolderLookup$RegistryLookup;",
             ) => match args.first().and_then(registry_key) {
-                Some(id) if facts.registries.contains_key(id) => {
+                Some(id) if facts.registries.contains_key(&id) => {
                     Ok(marker(format!("{REGISTRY}{id}")))
                 }
                 _ => refuse(r),
@@ -752,7 +743,7 @@ mod tests {
             &facts,
             &access,
             &lookup,
-            &[marker("registry/minecraft:block")],
+            &[crate::host_ids::registry_key_of("minecraft:block")],
         )
         .unwrap();
         let blocks = expect_ref(&blocks).unwrap().clone();
@@ -768,7 +759,7 @@ mod tests {
                 &facts,
                 &blocks,
                 &contains,
-                &[marker("identifier/minecraft:dirt")]
+                &[crate::host_ids::identifier_of_text("minecraft:dirt")]
             )
             .unwrap(),
             Value::Int(1)
@@ -778,7 +769,7 @@ mod tests {
                 &facts,
                 &blocks,
                 &contains,
-                &[marker("identifier/minecraft:glass")]
+                &[crate::host_ids::identifier_of_text("minecraft:glass")]
             )
             .unwrap(),
             Value::Int(0)
@@ -789,7 +780,7 @@ mod tests {
                 &facts,
                 &access,
                 &lookup,
-                &[marker("registry/minecraft:worldgen/biome")]
+                &[crate::host_ids::registry_key_of("minecraft:worldgen/biome")]
             )
             .is_err()
         );
@@ -880,7 +871,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            channel_of(&marker("identifier/demo:sync"), |_| None).as_deref(),
+            channel_of(&crate::host_ids::identifier_of_text("demo:sync"), |_| None).as_deref(),
             Some("demo:sync")
         );
     }

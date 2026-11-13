@@ -146,7 +146,7 @@ fn invoke_files<H: Host>(
     {
         return Ok(Some(rt.host.unknown_operand_call(r)?));
     }
-    let Some(elements) = expect_ref(options).and_then(|marker| rt.arrays.get(marker)) else {
+    let Some(elements) = rt.owned_array(options) else {
         return Ok(Some(rt.host.unknown_operand_call(r)?));
     };
     match check(elements) {

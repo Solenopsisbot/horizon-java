@@ -201,10 +201,21 @@ impl StdHost {
         if of && args.iter().any(|value| matches!(value, Value::Ref(None))) {
             return Some(Err(throw("java/lang/NullPointerException", None)));
         }
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = std::collections::BTreeMap::new();
         let step = if kind == "map" { 2 } else { 1 };
         for key in args.iter().step_by(step) {
-            if of && kind != "list" && !seen.insert(crate::runtime::value_marker(key)) {
+            // Equal text is a duplicate, but for two handles only the proved
+            // same object is (`HostRef::same_object`): equal keys may be two
+            // objects, whose `equals` the runtime asked (and counted) already.
+            let duplicate = match seen.insert(crate::runtime::value_marker(key), key) {
+                Some(Value::Host(first)) => match key {
+                    Value::Host(second) => first.same_object(second) == Some(true),
+                    _ => true,
+                },
+                Some(_) => true,
+                None => false,
+            };
+            if of && kind != "list" && duplicate {
                 let what = if kind == "map" { "key" } else { "element" };
                 let text = crate::runtime::value_text(key);
                 return Some(Err(throw(

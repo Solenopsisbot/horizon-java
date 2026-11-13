@@ -27,7 +27,51 @@ public class Refl {
   public static class Super {
     public int sf = 7;
     public static final String TAG = "t";
+    public String foo() { return "super-foo"; }
   }
+
+  public static class Base { public Object get() { return "b"; } }
+
+  public static class Cov extends Base { public String get() { return "c"; } }
+
+  public static class Cmp implements Comparable<Cmp> { public int compareTo(Cmp o) { return 0; } }
+
+  public static String fmt(String format, Object... args) { return String.format(format, args); }
+
+  // #169 review: return-type ranking, virtual dispatch, getMethods/getFields.
+  public interface ISeq { CharSequence seq(); }
+  public interface IStr { String seq(); }
+  public abstract static class SeqStr implements ISeq, IStr {}
+  public abstract static class StrSeq implements IStr, ISeq {}
+  public interface ISb { StringBuilder seq(); }
+  public abstract static class SeqSb implements ISeq, ISb {}
+  public interface IArrO { Object[] arr(); }
+  public interface IArrS { String[] arr(); }
+  public abstract static class ArrBoth implements IArrO, IArrS {}
+  public interface IHeld { Super get(); }
+  public interface IHeldSub { Sub get(); }
+  public abstract static class HeldBoth implements IHeld, IHeldSub {}
+
+  public static class Leaf extends Sub { public String foo() { return "leaf-foo"; } public String name() { return "leaf"; } }
+  public abstract static class Abs implements Api {}
+  public static class AbsLeaf extends Abs { public String name() { return "absleaf"; } public int size() { return 7; } }
+  public static class Over { public String f(long x) { return "long"; } }
+  public static class OverSub extends Over { public String f(long x) { return "sub-long"; } }
+  public interface I1 { default String d() { return "i1"; } }
+  public interface I2 extends I1 { default String d() { return "i2"; } }
+  public static class Dia implements I1, I2 {}
+  public static class PrivBase { private String p() { return "base"; } }
+  public static class PrivSub extends PrivBase { private String p() { return "sub"; } }
+  public static class StaticBase { public static String s() { return "base-static"; } }
+  public static class StaticSub extends StaticBase { public static String s() { return "sub-static"; } }
+
+  public interface Consts { int K = 1; String S = "s"; }
+  public static class FBase implements Consts { public int a; public static int sa; protected int hidden; }
+  public static class FSub extends FBase { public int b; }
+  public interface GI { default String g() { return "gi"; } }
+  public interface GJ extends GI { default String g() { return "gj"; } }
+  public static class GBase implements GJ {}
+  public static class GSub extends GBase implements GI {}
 
   public static class Sub extends Super implements Api {
     public String name() { return "sub"; }
@@ -171,8 +215,7 @@ public class Refl {
         .map(f -> Map.entry(-f.getName().length(), f))
         .sorted(Comparator.comparingInt(Map.Entry::getKey))
         .map(Map.Entry::getValue)
-        .map(f -> { f.setAccessible(true); try { return f.getName() + "=" + f.get(holder); } catch (Exception e) { return e.toString(); } })
-        .map(s -> s.startsWith("names=") ? "names=array" : s)
+        .map(f -> { f.setAccessible(true); try { Object v = f.get(holder); return f.getName() + "=" + (v instanceof String[] a ? "array" + a.length : v); } catch (Exception e) { return e.toString(); } })
         .collect(java.util.stream.Collectors.joining(","));
   }
 
@@ -257,8 +300,124 @@ public class Refl {
     return Integer.class.getField("MAX_VALUE").getDeclaringClass().getName();
   }
 
+  static String getMethodOf(Class<?> c, String name, Class<?>... parameters) {
+    try {
+      Method m = c.getMethod(name, parameters);
+      return m.getDeclaringClass().getName() + ":" + m;
+    } catch (NoSuchMethodException e) {
+      return "NSME:" + e.getMessage();
+    }
+  }
+
+  /** getMethod: public members only, inherited from superclasses, superinterfaces and Object. */
+  public static String getMethodRules() throws Exception {
+    Method foo = Sub.class.getMethod("foo");
+    return getMethodOf(Refl.class, "hidden") + "|" + getMethodOf(Sub.class, "foo") + "|" + foo.equals(Super.class.getMethod("foo"))
+        + (foo.hashCode() == Super.class.getMethod("foo").hashCode()) + foo.invoke(new Sub())
+        + "|" + getMethodOf(Sub.class, "size") + "=" + Sub.class.getMethod("size").invoke(new Sub())
+        + "|" + Sub.class.getMethod("hashCode").getDeclaringClass().getName() + "," + Sub.class.getMethod("wait", long.class, int.class).getDeclaringClass().getName()
+        + "|" + getMethodOf(Sub.class, "nope") + "|" + getMethodOf(Api.class, "hashCode") + "|" + getMethodOf(Sub.class, "util")
+        + "|" + getMethodOf(Api.class, "util") + "|" + getMethodOf(Refl.class, "target", long.class)
+        + "|" + Cov.class.getMethod("get").getReturnType().getName() + "," + Cov.class.getMethod("get").getDeclaringClass().getName();
+  }
+
+  /** getModifiers keeps the bridge, varargs and synthetic flags. */
+  public static String methodModifiers() throws Exception {
+    Method bridge = Cmp.class.getDeclaredMethod("compareTo", Object.class);
+    return bridge.getModifiers() + "," + bridge.isBridge() + bridge.isSynthetic() + "," + Cmp.class.getMethod("compareTo", Object.class).isBridge()
+        + "," + Refl.class.getMethod("fmt", String.class, Object[].class).getModifiers()
+        + "," + Cmp.class.getDeclaredMethod("compareTo", Cmp.class).getModifiers();
+  }
+
+  /** A JDK method has no body in the run: counted. */
+  public static String jdkInvoke() throws Exception {
+    return "" + String.class.getMethod("length").invoke("abcd");
+  }
+
+  /** A JDK constructor has no body in the run: counted. */
+  public static String jdkNewInstance() throws Exception {
+    return "" + StringBuilder.class.getConstructor(String.class).newInstance("xy").append('z');
+  }
+
+  static String declaring(Class<?> c, String name) {
+    try {
+      Method m = c.getMethod(name);
+      return m.getDeclaringClass().getName() + ":" + m.getReturnType().getName();
+    } catch (NoSuchMethodException e) {
+      return "NSME:" + e.getMessage();
+    }
+  }
+
+  /** getMethod's most specific return type among JDK types of Java 25's generated table: exact. */
+  public static String returnJdk() { return declaring(SeqStr.class, "seq") + "|" + declaring(StrSeq.class, "seq"); }
+
+  /** ... and among JDK types outside it (StringBuilder): counted. */
+  public static String returnJdkUnknown() { return declaring(SeqSb.class, "seq"); }
+
+  /** ... among arrays (by element type) and held classes: exact. */
+  public static String returnKnown() { return declaring(ArrBoth.class, "arr") + "|" + declaring(HeldBoth.class, "get"); }
+
+  /** Method.invoke selects the receiver's override, as invokevirtual/invokeinterface do. */
+  public static String virtualInvoke() throws Exception {
+    PrivBase privSub = new PrivSub();
+    Method p = PrivBase.class.getDeclaredMethod("p");
+    return Sub.class.getMethod("foo").invoke(new Leaf()) + "," + Super.class.getMethod("foo").invoke(new Leaf())
+        + "," + Abs.class.getMethod("size").invoke(new AbsLeaf()) + "," + Abs.class.getMethod("name").invoke(new AbsLeaf())
+        + "," + Api.class.getMethod("name").invoke(new Sub()) + "," + Api.class.getMethod("size").invoke(new Sub())
+        + "," + Over.class.getMethod("f", long.class).invoke(new OverSub(), 3L) + "," + I1.class.getMethod("d").invoke(new Dia())
+        + "," + GI.class.getMethod("g").invoke(new GSub()) + "," + p.invoke(privSub)
+        + "," + StaticBase.class.getMethod("s").invoke(new StaticSub()) + "," + Sub.class.getMethod("foo").invoke(new Sub());
+  }
+
+  static String lookupNamed(Class<?> c, String name, boolean declared) {
+    try {
+      return "found " + (declared ? c.getDeclaredMethod(name) : c.getMethod(name));
+    } catch (NoSuchMethodException e) {
+      return "NSME:" + e.getMessage();
+    }
+  }
+
+  /** Constructors and initializers are not methods. */
+  public static String initNotMethod() {
+    return lookupNamed(Super.class, "<init>", false) + "|" + lookupNamed(Super.class, "<init>", true)
+        + "|" + lookupNamed(Refl.class, "<clinit>", true);
+  }
+
+  static String methodSet(Class<?> c) {
+    Set<String> names = new TreeSet<>();
+    for (Method m : c.getMethods()) {
+      names.add(m.getDeclaringClass().getName() + "." + m.getName() + "/" + m.getParameterCount());
+    }
+    return c.getMethods().length + ":" + String.join(";", names);
+  }
+
+  static String fieldSet(Class<?> c) {
+    Set<String> names = new TreeSet<>();
+    for (Field f : c.getFields()) {
+      names.add(f.getDeclaringClass().getName() + "." + f.getName());
+    }
+    return c.getFields().length + ":" + String.join(";", names);
+  }
+
+  /** getMethods: public members of the class, superclasses (Object too) and superinterfaces, as sets. */
+  public static String publicMethods() {
+    return methodSet(Sub.class) + "|" + methodSet(Api.class) + "|" + methodSet(GSub.class) + "|" + methodSet(Dia.class);
+  }
+
+  /** getFields: public fields of the class, superinterfaces and superclasses, as sets. */
+  public static String publicFields() {
+    return fieldSet(FSub.class) + "|" + fieldSet(FBase.class) + "|" + fieldSet(Consts.class);
+  }
+
+  /** A JDK class's members are not in any class file the run holds: counted. */
+  public static String jdkMethods() { return "" + String.class.getMethods().length; }
+
+  public static String jdkFields() { return "" + Integer.class.getFields().length; }
+
+  public static String jdkDeclaredMethods() { return "" + String.class.getDeclaredMethods().length; }
+
   public static void main(String[] args) throws Exception {
-    for (String name : new String[] {"spelled", "text", "real", "collections", "sameHandle", "fieldCopies", "methodCopies", "constructorCopies", "fieldStream", "methodMap", "forgedNames", "forgedCopies", "inheritedFields", "jdkFieldModifiers", "jdkFieldDeclaring"}) {
+    for (String name : new String[] {"returnJdk", "returnJdkUnknown", "returnKnown", "virtualInvoke", "initNotMethod", "publicMethods", "publicFields", "jdkMethods", "jdkFields", "jdkDeclaredMethods", "getMethodRules", "methodModifiers", "jdkInvoke", "jdkNewInstance", "spelled", "text", "real", "collections", "sameHandle", "fieldCopies", "methodCopies", "constructorCopies", "fieldStream", "methodMap", "forgedNames", "forgedCopies", "inheritedFields", "jdkFieldModifiers", "jdkFieldDeclaring"}) {
       System.out.println("== " + name);
       System.out.println(Refl.class.getMethod(name).invoke(null));
     }

@@ -8,23 +8,16 @@
 //! `validator = o -> o instanceof String` refused FarmersDelight's own string
 //! defaults ("Config defaults are invalid").
 //!
-//! An array marker (`array/<class>/<method>/<n>`) names the frame that built
-//! it, not its element type, so `array.getClass()` was null and
-//! `getComponentType()` of it too. Architectury's
-//! `EventFactory.createLoop(T... empty)` reads its event interface exactly
-//! that way, and the null reached `Proxy.newProxyInstance` as an NPE. The
-//! component a creating instruction names is now kept beside the array, as a
-//! field of the array marker, so the resident heap keeps and drops it with
-//! the array.
+//! An array once named the frame that built it, not its element type, so
+//! `array.getClass()` was null and `getComponentType()` of it too.
+//! Architectury's `EventFactory.createLoop(T... empty)` reads its event
+//! interface exactly that way, and the null reached `Proxy.newProxyInstance`
+//! as an NPE. An array handle's key now carries its class (`host_array.rs`).
 
 use super::*;
 
-/// Field key suffix (after the array marker) holding an array's component
-/// class marker: `java/lang/String`, `int`, `[I`.
-pub(crate) const ARRAY_COMPONENT_FIELD: &str = "|[#component";
-
 /// `java.lang.String` and every type it extends or implements.
-const STRING_TYPES: &[&str] = &[
+pub(crate) const STRING_TYPES: &[&str] = &[
     "java/lang/String",
     "java/lang/CharSequence",
     "java/lang/Comparable",
@@ -35,12 +28,7 @@ const STRING_TYPES: &[&str] = &[
 
 /// Runtime markers with no `/`, `#`, `@` or `:` in them, which the shape rule
 /// of [`is_plain_string`] cannot tell from text.
-const SEPARATOR_FREE_MARKERS: &[&str] = &[
-    "method-handles-lookup",
-    "guava-cache-builder",
-    "mixin-environment",
-    "stack-walker",
-];
+const SEPARATOR_FREE_MARKERS: &[&str] = &["mixin-environment"];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
 /// is one of the types a string is an instance of.
@@ -57,21 +45,32 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 /// - a box, a builder, a collection, a path or an enum constant: whatever
 ///   `Object.getClass` names (`class_of_value`), including `true`/`false`;
 /// - an object `<class>#<n>`: a `#` after a non-empty, separator-free class;
-/// - a callback, comparator or array class: a leading `@` or `[`;
+/// - a callback or comparator: a leading `@`; an array class: a whole
+///   descriptor (`[I`, `[Ljava/lang/String;`);
 /// - a marker kind or class name: a `/` whose first segment has no `:`, `.`
 ///   or space (`list/3`, `registry/minecraft:item`, `demo/Main`), which a
 ///   resource id like `minecraft:block/stone` does not match.
+///
+/// Arrays and `ColorCollection`s are handles, never text (`host_array.rs`):
+/// a text spelled like their old markers (`array/...`) or their keys
+/// (`[I#0`, `color-collection#0`) is a `String`.
 pub(crate) fn is_plain_string(marker: &str) -> bool {
-    if marker.starts_with(['@', '[']) || SEPARATOR_FREE_MARKERS.contains(&marker) {
+    if marker.starts_with("array/") {
+        return true;
+    }
+    if marker.starts_with('@')
+        || host_array::is_array_descriptor(marker)
+        || SEPARATOR_FREE_MARKERS.contains(&marker)
+    {
         return false;
     }
     if let Some((class, _)) = marker.split_once('#')
         && !class.is_empty()
         && !class.contains([':', ' '])
     {
-        return false;
+        return host_array::handle_only_class(class);
     }
-    if !marker.contains('#') && class_of_value(&Value::Ref(Some(marker.to_owned()))).is_some() {
+    if !marker.contains('#') && class_of_text(marker).is_some() {
         return false;
     }
     if let Some((head, _)) = marker.split_once('/')
@@ -138,47 +137,47 @@ pub(crate) fn primitive_array_component(atype: u8) -> Option<&'static str> {
     })
 }
 
+/// The component class of an array (`java/lang/String`, `int`, `[I`);
+/// `None` for any other value, and for a shared empty array, whose exact
+/// class is unknown (`host_array.rs`).
+pub(crate) fn array_component(value: &Value) -> Option<String> {
+    let key = host_array::array_key(value)?;
+    if host_array::is_shared_empty(key) {
+        return None;
+    }
+    component_of_array_class(host_array::class_of_key(key))
+}
+
 impl<H: Host> Runtime<'_, H> {
-    /// Remember the component class the instruction or call that built
-    /// `array` named.
-    pub(super) fn record_array_component(&mut self, array: &str, component: &str) {
-        self.fields.insert(
-            format!("{array}{ARRAY_COMPONENT_FIELD}"),
-            Value::Ref(Some(component.to_owned())),
-        );
-    }
-
-    /// The component class recorded for `array`, if any.
-    pub(super) fn array_component(&self, array: &str) -> Option<String> {
-        match self.fields.get(&format!("{array}{ARRAY_COMPONENT_FIELD}")) {
-            Some(Value::Ref(Some(component))) => Some(component.clone()),
-            _ => None,
-        }
-    }
-
-    /// `array.getClass()` for an array whose component is known, and
-    /// `Class.getComponentType()` of an array class (null for any other
-    /// class, as on the JVM).
+    /// `array.getClass()`, and `Class.getComponentType()` of an array class
+    /// (null for any other class, as on the JVM).
+    /// A shared empty array's exact class is unknown (`host_array.rs`):
+    /// its `getClass()` is counted.
     pub(super) fn invoke_array_class(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
-    ) -> Option<Value> {
-        let marker = receiver.and_then(expect_ref)?;
-        match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
-            ("java/lang/Object", "getClass", "()Ljava/lang/Class;") => {
-                let Some(Value::Ref(Some(component))) =
-                    self.fields.get(&format!("{marker}{ARRAY_COMPONENT_FIELD}"))
-                else {
-                    return None;
-                };
-                Some(Value::Ref(Some(array_class_marker(component))))
-            }
-            ("java/lang/Class", "getComponentType", "()Ljava/lang/Class;") => {
-                Some(Value::Ref(component_of_array_class(marker)))
-            }
-            _ => None,
-        }
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        Ok(
+            match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+                ("java/lang/Object", "getClass", "()Ljava/lang/Class;") => {
+                    let Some(key) = host_array::array_key(receiver) else {
+                        return Ok(None);
+                    };
+                    if host_array::is_shared_empty(key) {
+                        return self.host.unknown_operand_call(r).map(Some);
+                    }
+                    Some(Value::Ref(Some(host_array::class_of_key(key).to_owned())))
+                }
+                ("java/lang/Class", "getComponentType", "()Ljava/lang/Class;") => {
+                    expect_ref(receiver).map(|class| Value::Ref(component_of_array_class(class)))
+                }
+                _ => None,
+            },
+        )
     }
 }
 
@@ -198,8 +197,11 @@ mod tests {
             // Spelled like the boxes once were; boxes are no longer text.
             "integer:5",
             "true",
-            // Spelled like a path once was (#156 P2).
+            // Spelled like a path and the stack walker once were (#156 P2).
             "path:/horizon/game",
+            "stack-walker",
+            // Spelled like a `Lookup` once was (#156 P10b).
+            "method-handles-lookup",
         ] {
             assert!(is_plain_string(text), "{text:?} should be a string");
         }
@@ -211,7 +213,6 @@ mod tests {
             "@indy:demo/Main:0:demo/Main#lambda$0()V:",
             "@cmp:natural",
             "[Ljava/lang/String;",
-            "method-handles-lookup",
             "java/lang/String",
         ] {
             assert!(

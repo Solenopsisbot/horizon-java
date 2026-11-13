@@ -89,6 +89,70 @@ pub(crate) enum FieldLookup {
 /// stops deciding.
 const MAX_FIELD_SEARCH: usize = 64;
 
+/// What `Class.getMethod` finds, read off the classes the runtime holds.
+pub(crate) enum MethodLookup {
+    /// The method's declaring class and descriptor.
+    Found(String, String),
+    /// Every class the search visits is held and none has it: Java's
+    /// `NoSuchMethodException`.
+    Absent,
+    /// The search reaches a class the runtime does not hold, or a choice it
+    /// cannot rank.
+    Unknown,
+}
+
+/// `Object`'s public methods (Java 25), which every class's `getMethod`
+/// reaches last (an interface's does not).
+const OBJECT_PUBLIC_METHODS: &[(&str, &str)] = &[
+    ("getClass", "()Ljava/lang/Class;"),
+    ("hashCode", "()I"),
+    ("equals", "(Ljava/lang/Object;)Z"),
+    ("toString", "()Ljava/lang/String;"),
+    ("notify", "()V"),
+    ("notifyAll", "()V"),
+    ("wait", "()V"),
+    ("wait", "(J)V"),
+    ("wait", "(JI)V"),
+];
+
+/// A method `getMethod`/`getMethods`/`getDeclaredMethod` collects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PublicMethod {
+    pub(crate) class: String,
+    pub(crate) name: String,
+    pub(crate) descriptor: String,
+    is_static: bool,
+}
+
+impl PublicMethod {
+    /// The parameter part of the descriptor, `(…)`.
+    fn parameters(&self) -> &str {
+        self.descriptor
+            .find(')')
+            .map_or(self.descriptor.as_str(), |end| &self.descriptor[..=end])
+    }
+}
+
+/// Whether a class file method is one reflection lists (no `<init>` or
+/// `<clinit>`: the JDK's declared-method list has neither).
+fn is_member_method(method: &crate::Method) -> bool {
+    method.name != "<init>" && method.name != "<clinit>"
+}
+
+/// `Object`'s public methods named `name` (all of them for `None`).
+fn object_methods(name: Option<&str>) -> Vec<PublicMethod> {
+    OBJECT_PUBLIC_METHODS
+        .iter()
+        .filter(|(method, _)| name.is_none_or(|name| name == *method))
+        .map(|(method, descriptor)| PublicMethod {
+            class: "java/lang/Object".into(),
+            name: (*method).into(),
+            descriptor: (*descriptor).into(),
+            is_static: false,
+        })
+        .collect()
+}
+
 /// `NoSuchFieldException(name)`, as `getField`/`getDeclaredField` throw it.
 pub(crate) fn no_such_field(name: &str) -> NativeError {
     NativeError::UncaughtException {
@@ -150,6 +214,307 @@ impl<H: Host> Runtime<'_, H> {
     /// field). `Object` declares no public field.
     pub(crate) fn field_lookup(&self, class: &str, name: &str, declared: bool) -> FieldLookup {
         self.field_search(class, name, declared, 0)
+    }
+
+    /// `Class.getMethod(name, parameters)` on `class`, `parameters` the
+    /// descriptor's `(…)` part, searched as JDK 25's `getMethodsRecursive`
+    /// does: the class's own public methods with that signature (statics
+    /// too); if none, the superclass's search, then each superinterface's
+    /// (without statics) merged in as `PublicMethods.MethodList.merge` does;
+    /// then `getMostSpecific` picks the most specific return type.
+    pub(crate) fn method_lookup(&self, class: &str, name: &str, parameters: &str) -> MethodLookup {
+        match self.public_methods(class, name, parameters, true, 0) {
+            Some(candidates) => self.most_specific(&candidates),
+            None => MethodLookup::Unknown,
+        }
+    }
+
+    /// `Class.getDeclaredMethod(name, parameters)` (`searchMethods`): the
+    /// class's own methods of any access with that signature, the most
+    /// specific return type winning (a covariant bridge never does, wherever
+    /// the class file puts it). `Unknown` for a class the runtime does not
+    /// hold.
+    pub(crate) fn declared_method_lookup(
+        &self,
+        class: &str,
+        name: &str,
+        parameters: &str,
+    ) -> MethodLookup {
+        let Some(file) = self.class(class) else {
+            return MethodLookup::Unknown;
+        };
+        let candidates: Vec<PublicMethod> = file
+            .methods
+            .iter()
+            .filter(|method| {
+                is_member_method(method)
+                    && method.name == name
+                    && method.descriptor.starts_with(parameters)
+            })
+            .map(|method| PublicMethod {
+                class: class.into(),
+                name: method.name.clone(),
+                descriptor: method.descriptor.clone(),
+                is_static: method.is_static(),
+            })
+            .collect();
+        self.most_specific(&candidates)
+    }
+
+    /// `getMostSpecific`/`searchMethods`: the first candidate unless a later
+    /// one's return type is a different, narrower one.
+    fn most_specific(&self, candidates: &[PublicMethod]) -> MethodLookup {
+        let Some(mut best) = candidates.first() else {
+            return MethodLookup::Absent;
+        };
+        for candidate in &candidates[1..] {
+            let (wide, narrow) = (
+                return_desc(&best.descriptor),
+                return_desc(&candidate.descriptor),
+            );
+            if wide == narrow {
+                continue;
+            }
+            match self.return_assignable(wide, narrow) {
+                Some(true) => best = candidate,
+                Some(false) => {}
+                None => return MethodLookup::Unknown,
+            }
+        }
+        MethodLookup::Found(best.class.clone(), best.descriptor.clone())
+    }
+
+    /// `Class.isAssignableFrom` between two return descriptors, `None` when
+    /// it rests on a hierarchy the runtime does not hold. Decided: a
+    /// primitive (only itself); `Object` (every reference); an array (only
+    /// `Object`, `Cloneable`, `Serializable` and arrays whose elements are
+    /// assignable); a class the runtime holds (its own hierarchy); a JDK class
+    /// of Java 25's generated table (`jdk_closure.rs`: its whole supertype
+    /// set), or any JDK class against a type outside the system modules'
+    /// packages (a JDK class never extends a jar's). Any other JDK class is
+    /// counted.
+    fn return_assignable(&self, wide: &str, narrow: &str) -> Option<bool> {
+        if wide == narrow {
+            return Some(true);
+        }
+        let reference = |descriptor: &str| descriptor.starts_with(['L', '[']);
+        if !reference(wide) || !reference(narrow) {
+            return Some(false);
+        }
+        if wide == "Ljava/lang/Object;" {
+            return Some(true);
+        }
+        if let Some(element) = narrow.strip_prefix('[') {
+            return match wide.strip_prefix('[') {
+                Some(wide_element) => self.return_assignable(wide_element, element),
+                None => Some(matches!(
+                    wide,
+                    "Ljava/lang/Cloneable;" | "Ljava/io/Serializable;"
+                )),
+            };
+        }
+        if wide.starts_with('[') {
+            // A class is never an array.
+            return Some(false);
+        }
+        let class = |descriptor: &str| descriptor[1..descriptor.len() - 1].to_owned();
+        let (wide, narrow) = (class(wide), class(narrow));
+        if narrow == "java/lang/Object" {
+            return Some(false);
+        }
+        if self.class(&narrow).is_some() {
+            return crate::host_ref::ClassHierarchy::is_instance(self, &narrow, &wide);
+        }
+        if let Some(row) = crate::jdk_closure::class(&narrow) {
+            return Some(row.supertypes.contains(&wide.as_str()));
+        }
+        let jdk = crate::jdk_closure::in_jdk_package;
+        (jdk(&narrow) && !jdk(&wide)).then_some(false)
+    }
+
+    /// The public methods `getMethod` collects for `class` (JDK 25's
+    /// `getMethodsRecursive`), `None` when the search leaves the held classes.
+    fn public_methods(
+        &self,
+        class: &str,
+        name: &str,
+        parameters: &str,
+        include_static: bool,
+        depth: usize,
+    ) -> Option<Vec<PublicMethod>> {
+        if class == "java/lang/Object" {
+            return Some(
+                object_methods(Some(name))
+                    .into_iter()
+                    .filter(|method| method.parameters() == parameters)
+                    .collect(),
+            );
+        }
+        let file = self.class(class).filter(|_| depth < MAX_FIELD_SEARCH)?;
+        let own: Vec<PublicMethod> = file
+            .methods
+            .iter()
+            .filter(|method| {
+                is_member_method(method)
+                    && method.name == name
+                    && method.access & 1 != 0
+                    && (include_static || !method.is_static())
+                    && method.descriptor.starts_with(parameters)
+            })
+            .map(|method| PublicMethod {
+                class: class.into(),
+                name: method.name.clone(),
+                descriptor: method.descriptor.clone(),
+                is_static: method.is_static(),
+            })
+            .collect();
+        if !own.is_empty() {
+            return Some(own);
+        }
+        let interface = crate::jdk_model::class_access_flags(file)
+            .is_some_and(|access| access & ACC_INTERFACE != 0);
+        let mut list = if !interface && !file.super_name.is_empty() {
+            self.public_methods(
+                &file.super_name,
+                name,
+                parameters,
+                include_static,
+                depth + 1,
+            )?
+        } else {
+            Vec::new()
+        };
+        for parent in file.interface_names() {
+            for method in self.public_methods(&parent, name, parameters, false, depth + 1)? {
+                self.merge_method(&mut list, method)?;
+            }
+        }
+        Some(list)
+    }
+
+    /// `Class.getMethods()` (JDK 25's `privateGetPublicMethods`): the class's
+    /// own public methods, then its superclass's `getMethods` (statics
+    /// included), then each superinterface's without statics, all merged by
+    /// `PublicMethods` (per name and parameter types,
+    /// `PublicMethods.MethodList.merge`); a class reaches `Object`'s, an
+    /// interface does not. `None` when the walk leaves the held classes (a
+    /// JDK or game class), whose methods the runtime cannot list. The order
+    /// is the runtime's; the JDK specifies none.
+    pub(crate) fn public_method_list(&self, class: &str) -> Option<Vec<PublicMethod>> {
+        self.public_method_list_at(class, 0)
+    }
+
+    fn public_method_list_at(&self, class: &str, depth: usize) -> Option<Vec<PublicMethod>> {
+        if class == "java/lang/Object" {
+            return Some(object_methods(None));
+        }
+        let file = self.class(class).filter(|_| depth < MAX_FIELD_SEARCH)?;
+        let mut list = Vec::new();
+        for method in file
+            .methods
+            .iter()
+            .filter(|method| is_member_method(method) && method.access & 1 != 0)
+        {
+            self.merge_method(
+                &mut list,
+                PublicMethod {
+                    class: class.into(),
+                    name: method.name.clone(),
+                    descriptor: method.descriptor.clone(),
+                    is_static: method.is_static(),
+                },
+            )?;
+        }
+        let interface = crate::jdk_model::class_access_flags(file)
+            .is_some_and(|access| access & ACC_INTERFACE != 0);
+        if !interface && !file.super_name.is_empty() {
+            for method in self.public_method_list_at(&file.super_name, depth + 1)? {
+                self.merge_method(&mut list, method)?;
+            }
+        }
+        for parent in file.interface_names() {
+            for method in self.public_method_list_at(&parent, depth + 1)? {
+                if !method.is_static {
+                    self.merge_method(&mut list, method)?;
+                }
+            }
+        }
+        Some(list)
+    }
+
+    /// `PublicMethods.MethodList.merge` for one name and parameter list: a
+    /// method with the same return type as one already listed replaces it
+    /// when its class is a subtype of the listed one's, is dropped when its
+    /// class is a supertype, and is added otherwise. A "yes" either way
+    /// settles it; adding needs both "no"s, which the hierarchy may not prove
+    /// for a jar class (another jar's Mixin can add an interface): `None`.
+    fn merge_method(&self, list: &mut Vec<PublicMethod>, method: PublicMethod) -> Option<()> {
+        use crate::host_ref::ClassHierarchy;
+        for listed in list.iter_mut() {
+            if listed.name != method.name
+                || listed.parameters() != method.parameters()
+                || return_desc(&listed.descriptor) != return_desc(&method.descriptor)
+            {
+                continue;
+            }
+            let narrower = self.is_instance(&method.class, &listed.class);
+            if narrower == Some(true) {
+                *listed = method;
+                return Some(());
+            }
+            let wider = self.is_instance(&listed.class, &method.class);
+            if wider == Some(true) {
+                return Some(());
+            }
+            narrower.zip(wider)?;
+        }
+        list.push(method);
+        Some(())
+    }
+
+    /// `Class.getFields()` (JDK 25's `privateGetPublicFields`): the class's
+    /// own public fields, then each superinterface's, then (for a class) the
+    /// superclass's, each field once. `None` when the walk leaves the held
+    /// classes. `(declaring class, name, descriptor, access)`.
+    pub(crate) fn public_field_list(
+        &self,
+        class: &str,
+    ) -> Option<Vec<(String, String, String, u16)>> {
+        let mut fields = Vec::new();
+        self.public_fields_at(class, 0, &mut fields)?;
+        Some(fields)
+    }
+
+    fn public_fields_at(
+        &self,
+        class: &str,
+        depth: usize,
+        out: &mut Vec<(String, String, String, u16)>,
+    ) -> Option<()> {
+        if class == "java/lang/Object" {
+            return Some(());
+        }
+        let file = self.class(class).filter(|_| depth < MAX_FIELD_SEARCH)?;
+        for field in file.fields.iter().filter(|field| field.access & 1 != 0) {
+            let entry = (
+                class.to_owned(),
+                field.name.clone(),
+                field.descriptor.clone(),
+                field.access,
+            );
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+        for parent in file.interface_names() {
+            self.public_fields_at(&parent, depth + 1, out)?;
+        }
+        let interface = crate::jdk_model::class_access_flags(file)
+            .is_some_and(|access| access & ACC_INTERFACE != 0);
+        if !interface && !file.super_name.is_empty() {
+            self.public_fields_at(&file.super_name, depth + 1, out)?;
+        }
+        Some(())
     }
 
     fn field_search(&self, class: &str, name: &str, declared: bool, depth: usize) -> FieldLookup {

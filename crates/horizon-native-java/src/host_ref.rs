@@ -193,6 +193,89 @@ pub enum HostKind {
     /// An event a host caller dispatches or posts: key its cancelled flag and
     /// name.
     PostedEvent,
+    /// `net.minecraft.resources.Identifier`: key `namespace:path` (`host_ids.rs`).
+    Identifier,
+    /// `net.minecraft.resources.ResourceKey`: key `registry|location`, or
+    /// `?…` when the host cannot name them (`host_ids.rs`).
+    ResourceKey,
+    /// `net.minecraft.tags.TagKey`: key `registry|location`, or `?…`.
+    TagKey,
+    /// `net.minecraft.references.BlockItemId`: key the block and item ids'
+    /// [`HostRef::of_values`].
+    BlockItemId,
+    /// `java.lang.invoke.MethodType`: key the method descriptor
+    /// (`host_invoke.rs`).
+    MethodType,
+    /// `java.lang.invoke.MethodHandles$Lookup`: key `[mode, class]`
+    /// (`host_invoke.rs`).
+    MethodHandlesLookup,
+    /// A `java.lang.invoke.MethodHandle`: key its combinator tree as JSON
+    /// (`method_handles.rs`).
+    MethodHandle,
+    /// The `ConstantCallSite` `LambdaMetafactory.metafactory` returns: key its
+    /// target handle's JSON (`method_handles.rs`).
+    CallSite,
+    /// A Java array: key `<array class>#<n>`, its elements in the runtime's
+    /// `arrays` table (`host_array.rs`).
+    Array,
+    /// Vanilla's `ColorCollection` record, its sixteen values in the
+    /// runtime's `arrays` table: key `color-collection#<n>`
+    /// (`color_collection.rs`).
+    ColorCollection,
+    /// The empty array the runtime answers for an unmodelled call whose
+    /// declared result is an array: key `<declared class>#empty`
+    /// (`host_array.rs`). Its runtime class is unknown.
+    UnknownArray,
+    /// A `Registry` (`BuiltInRegistries.X`, a jar's built registry): key its
+    /// id (`host_registry.rs`).
+    Registry,
+    /// A NeoForge `DeferredHolder` or Forge `RegistryObject`: key the loader,
+    /// the registration's serial and the entry's key.
+    Holder,
+    /// The value a holder's registration registered: key the serial.
+    Registered,
+    /// A Fabric `FabricRegistryBuilder`: key the [`HostRef::of_values`] of
+    /// the registry its `buildAndRegister()` answers (`fabric_registry.rs`).
+    RegistryBuilder,
+    /// The event a NeoForge/Forge game-event listener receives: key its class
+    /// (`host_game_event.rs`).
+    GameEvent,
+    /// The event a NeoForge loading stage posts: key its class and container.
+    LifecycleEvent,
+    /// An `ExecutorService`: key its allocation marker (`host_executors.rs`).
+    Executor,
+    /// A `Future` an executor answered: key its allocation marker.
+    ExecutorFuture,
+    /// `Executors.callable(task[, result])`: key the values it holds.
+    ExecutorCallable,
+    /// `Executors.defaultThreadFactory()`: key its allocation marker.
+    ThreadFactory,
+    /// A `ServiceLoader`: key its service and load serial (`host_services.rs`).
+    ServiceLoader,
+    /// A `ServiceLoader` iterator: key its serial.
+    ServiceIterator,
+    /// A `ServiceLoader.Provider`: key its service, class and loader serial.
+    ServiceProvider,
+    /// Guava `Splitter.on`: key its separator (`host_guava.rs`).
+    GuavaSplitter,
+    /// Guava `Joiner.on`: key its separator.
+    GuavaJoiner,
+    /// Guava `CacheBuilder`: key its allocation marker.
+    GuavaCacheBuilder,
+    /// Guava `CacheLoader.from(function)`: key the function.
+    GuavaCacheLoader,
+    /// The thread callbacks run on (`host_jdk.rs`): key `main`.
+    Thread,
+    /// A logger: key `of_values([api, name])`.
+    Logger,
+    /// A `StackWalker`: key `""` for `getInstance()`'s, `options` otherwise.
+    StackWalker,
+    /// A `StackWalker.StackFrame` / `StackTraceElement` of a jar frame: key
+    /// `of_values([class, method])`.
+    StackFrame,
+    StackTraceElement,
+    /// A `java.lang.Module`: key `unnamed` or `java.base`.
+    Module,
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
@@ -213,7 +296,7 @@ pub(crate) enum ClassRule {
     /// Every object of the kind is this class.
     Fixed(&'static str),
     /// A family whose objects are of many classes (jar objects, collections,
-    /// game objects), or a class other values than handles may also be
+    /// game objects, arrays), or a class other values than handles may also be
     /// (`CompletableFuture`): the class is read from the key.
     FromKey(fn(&str) -> &str),
     /// The object's runtime class is not known (a jar's lambda, a proxy, a
@@ -340,6 +423,48 @@ pub(crate) struct Methods {
     /// caller counts the comparison.
     pub(crate) compare_to: Option<CompareToFn>,
 }
+
+/// Facts about a class *name* a family kind answers for (no handle, no key): the class a handle's
+/// `getClass()` returns, an `ldc` of it, or a supertype in its family. A `FromKey` kind whose
+/// class names the reflective `Class` surface can reach has one ([`CLASS_SIDES`]); a `Fixed` kind
+/// is found by [`HostKind::of_class`], an `Unknown` one never (its declared types are not its
+/// class).
+///
+/// Two rules every row keeps: **a class file the run holds wins** (a jar's own copy of an owned
+/// class answers from that file: the runtime asks `Runtime::owned_class_side`, which defers to
+/// it), and **one owner per name** (no two rows, nor a row and a fixed class, own one name: checked
+/// over every row by a unit test, and by `owning_class` in debug builds).
+pub(crate) struct ClassSide {
+    /// Whether this kind answers for the class name `class` (its handles' classes and their
+    /// family's supertypes). No two kinds own one class.
+    pub(crate) owns: fn(&str) -> bool,
+    /// `class instanceof wanted` (a subtype check: `Class.isAssignableFrom`, a class walk), the
+    /// row's own rule; `None` = counted.
+    pub(crate) instance_of: InstanceOfClassFn,
+    /// The direct superclass, when known exactly; `None` = counted.
+    pub(crate) superclass: fn(&str) -> Option<String>,
+    /// Whether `class` is an interface, when known; `None` = counted.
+    pub(crate) is_interface: fn(&str) -> Option<bool>,
+    /// Every class name `owns` accepts (its family's table), so that "one owner per name" can be
+    /// checked over every row (read by host_ref's unit test, not at run time).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) classes: fn() -> Vec<String>,
+}
+
+/// [`ClassSide::instance_of`].
+pub(crate) type InstanceOfClassFn = fn(&str, &str, &dyn ClassHierarchy) -> Option<bool>;
+
+/// The kinds with a [`ClassSide`], in `KINDS` order.
+const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
+    (
+        HostKind::GameEvent,
+        &crate::host_game_event::EVENT_CLASS_SIDE,
+    ),
+    (
+        HostKind::LifecycleEvent,
+        &crate::host_game_event::LIFECYCLE_CLASS_SIDE,
+    ),
+];
 
 /// One row of the kind table.
 struct KindInfo {
@@ -556,6 +681,309 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::host_events::DECLARED_TYPE_METHODS,
     },
     KindInfo {
+        kind: HostKind::Identifier,
+        tag: "id",
+        class: ClassRule::Fixed(crate::host_ids::IDENTIFIER),
+        // Not interned: two `Identifier.parse("a:x")` are two objects.
+        canonical: never_canonical,
+        methods: &crate::host_ids::IDENTIFIER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ResourceKey,
+        tag: "rk",
+        class: ClassRule::Fixed(crate::host_ids::RESOURCE_KEY),
+        // Interned by `ResourceKey.create` (`host_ids.rs`).
+        canonical: always_canonical,
+        methods: &crate::host_ids::RESOURCE_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::TagKey,
+        tag: "tk",
+        class: ClassRule::Fixed(crate::host_ids::TAG_KEY),
+        // Interned by `TagKey.create`.
+        canonical: always_canonical,
+        methods: &crate::host_ids::TAG_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::BlockItemId,
+        tag: "bii",
+        class: ClassRule::Fixed(crate::host_ids::BLOCK_ITEM_ID),
+        canonical: never_canonical,
+        methods: &crate::host_ids::BLOCK_ITEM_ID_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodType,
+        tag: "mtype",
+        class: ClassRule::Fixed(crate::host_invoke::METHOD_TYPE),
+        // Java interns method types: one object per descriptor.
+        canonical: always_canonical,
+        methods: &crate::host_invoke::METHOD_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodHandlesLookup,
+        tag: "mhlk",
+        class: ClassRule::Fixed(crate::host_invoke::LOOKUP),
+        canonical: crate::host_invoke::lookup_canonical,
+        methods: &crate::host_invoke::LOOKUP_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MethodHandle,
+        tag: "mh",
+        // `DirectMethodHandle`, `BoundMethodHandle$Species_LL`, …: a
+        // `MethodHandle` of a class the runtime does not know.
+        class: ClassRule::Unknown {
+            declared: crate::method_handles::handle_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::method_handles::HANDLE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CallSite,
+        tag: "csite",
+        // Java 25's metafactory returns a plain `ConstantCallSite`. `FromKey`
+        // keeps that exact class off `HostKind::of_class`, since a jar may
+        // extend `ConstantCallSite`.
+        class: ClassRule::FromKey(crate::method_handles::call_site_class),
+        canonical: never_canonical,
+        methods: &crate::method_handles::CALL_SITE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Array,
+        tag: "arr",
+        class: ClassRule::FromKey(crate::host_array::class_of_key),
+        canonical: crate::host_array::canonical,
+        methods: &crate::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::ColorCollection,
+        tag: "colors",
+        class: ClassRule::Fixed(crate::color_collection::OWNER),
+        // One key per collection the runtime built.
+        canonical: always_canonical,
+        methods: &crate::color_collection::COLOR_COLLECTION,
+    },
+    KindInfo {
+        kind: HostKind::UnknownArray,
+        tag: "arru",
+        class: ClassRule::Unknown {
+            declared: crate::host_array::surely,
+        },
+        // One key stands for every array such a call returned.
+        canonical: never_canonical,
+        methods: &crate::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::Registry,
+        tag: "reg",
+        // An implementation of the interface: `MappedRegistry`,
+        // `DefaultedMappedRegistry`, a loader's own.
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::registry_types,
+        },
+        // One registry per registry key.
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTRY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Holder,
+        tag: "hold",
+        // `DeferredHolder` has subclasses (`DeferredItem`, `DeferredBlock`).
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::holder_types,
+        },
+        // One holder per `register` call: the serial names one allocation.
+        canonical: always_canonical,
+        methods: &crate::host_registry::HOLDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Registered,
+        tag: "rgd",
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::no_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTERED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::RegistryBuilder,
+        tag: "frb",
+        // A final class (fabric-registry-sync 8.0.4).
+        class: ClassRule::Fixed(crate::fabric_registry::BUILDER),
+        // `create(key)` twice is two builders for one registry.
+        canonical: never_canonical,
+        methods: &crate::host_registry::BUILDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GameEvent,
+        tag: "gev",
+        class: ClassRule::FromKey(crate::host_game_event::game_event_class),
+        // A key holds a serial minted once per firing and class: one object.
+        canonical: always_canonical,
+        methods: &crate::host_game_event::GAME_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::LifecycleEvent,
+        tag: "lev",
+        class: ClassRule::FromKey(crate::host_game_event::lifecycle_class),
+        // A stage posts one event per container.
+        canonical: always_canonical,
+        methods: &crate::host_game_event::LIFECYCLE_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::Executor,
+        tag: "exe",
+        class: ClassRule::Unknown {
+            declared: crate::host_executors::executor_types,
+        },
+        // One per `Executors.newX()` call.
+        canonical: always_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ExecutorFuture,
+        tag: "fut",
+        class: ClassRule::Unknown {
+            declared: crate::host_executors::future_types,
+        },
+        // One per `submit`/`schedule`.
+        canonical: always_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ExecutorCallable,
+        tag: "xcall",
+        class: ClassRule::Unknown {
+            declared: crate::host_executors::callable_types,
+        },
+        // A fresh `RunnableAdapter` per call: equal keys may be two objects.
+        canonical: never_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ThreadFactory,
+        tag: "tfac",
+        class: ClassRule::Unknown {
+            declared: crate::host_executors::thread_factory_types,
+        },
+        // One per `defaultThreadFactory()` call.
+        canonical: always_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceLoader,
+        tag: "svl",
+        class: ClassRule::Unknown {
+            declared: crate::host_services::loader_types,
+        },
+        // One per `ServiceLoader.load`.
+        canonical: always_canonical,
+        methods: &crate::host_services::LOADER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceIterator,
+        tag: "svi",
+        class: ClassRule::Unknown {
+            declared: crate::host_services::iterator_types,
+        },
+        // One per `iterator()`.
+        canonical: always_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceProvider,
+        tag: "svp",
+        class: ClassRule::Unknown {
+            declared: crate::host_services::provider_types,
+        },
+        // Equal keys are equal providers; `reload()` makes new objects.
+        canonical: never_canonical,
+        methods: &crate::host_services::PROVIDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaSplitter,
+        tag: "gsplit",
+        class: ClassRule::Unknown {
+            declared: crate::host_guava::splitter_types,
+        },
+        // A fresh `Splitter` per `on`.
+        canonical: never_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaJoiner,
+        tag: "gjoin",
+        class: ClassRule::Unknown {
+            declared: crate::host_guava::joiner_types,
+        },
+        // A fresh `Joiner` per `on`.
+        canonical: never_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaCacheBuilder,
+        tag: "gcb",
+        class: ClassRule::Unknown {
+            declared: crate::host_guava::cache_builder_types,
+        },
+        // One per `newBuilder()`; setters answer it.
+        canonical: always_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaCacheLoader,
+        tag: "gcl",
+        class: ClassRule::Unknown {
+            declared: crate::host_guava::cache_loader_types,
+        },
+        // A fresh loader per `from`.
+        canonical: never_canonical,
+        methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Thread,
+        tag: "thr",
+        class: ClassRule::FromKey(|_| "java/lang/Thread"),
+        canonical: always_canonical,
+        methods: &crate::host_jdk::THREAD,
+    },
+    KindInfo {
+        kind: HostKind::Logger,
+        tag: "log",
+        class: ClassRule::Unknown {
+            declared: crate::host_jdk::logger_declared,
+        },
+        canonical: crate::host_jdk::logger_canonical,
+        methods: &crate::host_jdk::LOGGER,
+    },
+    KindInfo {
+        kind: HostKind::StackWalker,
+        tag: "walker",
+        class: ClassRule::Fixed("java/lang/StackWalker"),
+        canonical: canonical_when_empty,
+        methods: &crate::host_jdk::STACK_WALKER,
+    },
+    KindInfo {
+        kind: HostKind::StackFrame,
+        tag: "frame",
+        class: ClassRule::Fixed("java/lang/StackFrameInfo"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk::STACK_FRAME,
+    },
+    KindInfo {
+        kind: HostKind::StackTraceElement,
+        tag: "ste",
+        class: ClassRule::FromKey(|_| "java/lang/StackTraceElement"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk::STACK_TRACE_ELEMENT,
+    },
+    KindInfo {
+        kind: HostKind::Module,
+        tag: "module",
+        class: ClassRule::Fixed("java/lang/Module"),
+        canonical: always_canonical,
+        methods: &crate::host_jdk::MODULE,
+    },
+    KindInfo {
         kind: HostKind::StreamBuilder,
         tag: "sbld",
         class: ClassRule::Fixed("java/util/stream/Streams$StreamBuilderImpl"),
@@ -607,18 +1035,51 @@ impl HostKind {
             .copied()
     }
 
-    /// `class instanceof wanted` for the class name of a fixed-class kind (a
-    /// handle's `getClass()` handed to `Class.isAssignableFrom`, a class
-    /// walk): the kind's row, as for a handle of it, since a fixed class's
-    /// supertypes do not depend on the key. `None` when `class` is no kind's
-    /// fixed class; `Some(None)` when the row cannot tell.
+    /// `class instanceof wanted` for a class name a kind owns
+    /// ([`Self::owning_class`]: a handle's `getClass()` handed to
+    /// `Class.isAssignableFrom`, a class walk): a fixed class's row, as for a
+    /// handle of it (a fixed class's supertypes do not depend on the key), or
+    /// a family's [`ClassSide`]. `None` when no kind owns `class`;
+    /// `Some(None)` when the row cannot tell.
     pub(crate) fn class_instance_of(
         class: &str,
         wanted: &str,
         hierarchy: &dyn ClassHierarchy,
     ) -> Option<Option<bool>> {
-        let kind = Self::of_class(class)?;
-        Some(HostRef::new(kind, "").instance_of(wanted, hierarchy))
+        let kind = Self::owning_class(class)?;
+        Some(match kind.class_side() {
+            Some(side) => (side.instance_of)(class, wanted, hierarchy),
+            None => HostRef::new(kind, "").instance_of(wanted, hierarchy),
+        })
+    }
+
+    /// The kind that answers for the class name `class`: a fixed-class kind
+    /// whose class it is, else the family kind whose [`ClassSide`] owns it.
+    /// Every `Class` call on a name a kind owns answers from the kind or is
+    /// counted; it never falls to "a class the runtime does not hold".
+    pub(crate) fn owning_class(class: &str) -> Option<Self> {
+        Self::of_class(class).or_else(|| {
+            debug_assert!(
+                CLASS_SIDES
+                    .iter()
+                    .filter(|(_, side)| (side.owns)(class))
+                    .count()
+                    <= 1,
+                "two kinds own {class}"
+            );
+            CLASS_SIDES
+                .iter()
+                .find(|(_, side)| (side.owns)(class))
+                .map(|(kind, _)| *kind)
+        })
+    }
+
+    /// The kind's [`ClassSide`], when it has one.
+    pub(crate) fn class_side(self) -> Option<&'static ClassSide> {
+        CLASS_SIDES
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .map(|(_, side)| *side)
     }
 
     /// The kind of a fixed-class kind whose class is `class` (asked on every
@@ -827,11 +1288,51 @@ mod tests {
             "java/lang/Object",
         ] {
             assert_eq!(HostKind::of_class(class), None, "{class}");
+        }
+        // No kind's row answers for a declared type as its class. bus-8's `Event` is a NeoForge
+        // event class of its own (`host_game_event.rs`): it answers its own supertypes, never an
+        // interface it does not declare.
+        for class in [
+            "java/util/function/Supplier",
+            "net/neoforged/bus/api/ICancellableEvent",
+            "net/minecraftforge/eventbus/api/bus/EventBus",
+            "java/lang/Object",
+        ] {
             assert_eq!(
                 HostKind::class_instance_of(class, "java/lang/Object", &JdkHierarchy),
                 None,
                 "{class}"
             );
+        }
+        assert_ne!(
+            HostKind::class_instance_of(
+                "net/neoforged/bus/api/Event",
+                "net/neoforged/bus/api/ICancellableEvent",
+                &JdkHierarchy
+            ),
+            Some(Some(true))
+        );
+    }
+
+    /// One owner per class name, over every class-side row (not a list of
+    /// kinds): each name a row enumerates is owned by that row alone, and by
+    /// no fixed-class kind.
+    #[test]
+    fn every_class_name_has_one_owner() {
+        for (kind, side) in CLASS_SIDES {
+            assert!(kind.class_side().is_some(), "{kind:?}");
+            let classes = (side.classes)();
+            assert!(!classes.is_empty(), "{kind:?} enumerates no class");
+            for class in classes {
+                assert!((side.owns)(&class), "{kind:?} does not own its own {class}");
+                let owners: Vec<HostKind> = CLASS_SIDES
+                    .iter()
+                    .filter(|(_, other)| (other.owns)(&class))
+                    .map(|(kind, _)| *kind)
+                    .collect();
+                assert_eq!(owners, [*kind], "{class}");
+                assert_eq!(HostKind::of_class(&class), None, "{class}");
+            }
         }
     }
 

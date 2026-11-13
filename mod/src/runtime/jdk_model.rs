@@ -13,15 +13,17 @@
 //!   charsets every JVM must ship (`StandardCharsets`) are known; any other
 //!   name raises `UnsupportedCharsetException`, as a JVM without that charset
 //!   would.
-//! * `logger/<name>`: a log4j, slf4j, `java.util.logging` or Mojang
-//!   `LogUtils` logger. Nothing is written anywhere: every level reports
-//!   disabled and every logging call returns without effect, which is what a
-//!   logger configured to drop the mod's output does.
+//! * a logger (a `HostKind::Logger` handle, `host_jdk.rs`): log4j, slf4j,
+//!   `java.util.logging`, `System.Logger` or Mojang `LogUtils`. Nothing is
+//!   written anywhere: every level reports disabled and every logging call
+//!   returns without effect, which is what a logger configured to drop the
+//!   mod's output does.
 //!
 //! The module also answers `Path.resolveSibling`, which the host's path model
 //! lacked. Paths stay virtual (`host_path.rs`): no call in this file reads or
 //! writes the host filesystem.
 
+use crate::runtime::host_jdk::logger_value;
 use crate::runtime::{MethodRef, NativeError, Value, expect_ref, expect_string};
 
 /// The canonical names of the charsets `java.nio.charset.StandardCharsets`
@@ -37,15 +39,9 @@ const STANDARD_CHARSETS: &[(&str, &str)] = &[
 
 /// Prefix of a modelled `Charset` marker.
 const CHARSET_PREFIX: &str = "charset/";
-/// Prefix of a modelled logger marker.
-const LOGGER_PREFIX: &str = "logger/";
 
 fn charset_value(canonical: &str) -> Value {
     Value::Ref(Some(format!("{CHARSET_PREFIX}{canonical}")))
-}
-
-fn logger_value(name: &str) -> Value {
-    Value::Ref(Some(format!("{LOGGER_PREFIX}{name}")))
 }
 
 /// The canonical name `Charset.forName` resolves `name` to, matching the
@@ -79,12 +75,15 @@ fn is_logger_owner(owner: &str) -> bool {
     )
 }
 
-/// The logger name a factory argument names: a `String` as is, a `Class`
-/// marker (an internal name) as its binary name, and anything else as the
-/// root logger's empty name.
-fn logger_name(args: &[Value]) -> String {
+/// The logger name a factory argument names: a `String` as it is, a `Class`
+/// (an internal name, by the factory's declared parameter) as its binary
+/// name, and anything else as the root logger's empty name.
+fn logger_name(r: &MethodRef, args: &[Value]) -> String {
     match args.first() {
-        Some(Value::Ref(Some(text))) => text.replace('/', "."),
+        Some(Value::Ref(Some(text))) if r.descriptor.starts_with("(Ljava/lang/Class;") => {
+            text.replace('/', ".")
+        }
+        Some(Value::Ref(Some(text))) => text.clone(),
         _ => String::new(),
     }
 }
@@ -149,7 +148,12 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
     match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
         // `Arrays.asList(new T[0])`: the shared empty array has no elements,
         // so the list is empty rather than a one-element list holding it.
-        ("java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;") if matches!(args.first(), Some(Value::Ref(Some(marker))) if marker == "array/empty") => {
+        ("java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;")
+            if args
+                .first()
+                .and_then(crate::runtime::host_array::array_key)
+                .is_some_and(crate::runtime::host_array::is_shared_empty) =>
+        {
             Some(Ok(Value::Ref(Some("list".into()))))
         }
         // `Modifier`'s predicates over the access flags reflection answers
@@ -216,31 +220,44 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
             let name = args.first().map(expect_string).unwrap_or_default();
             Some(Ok(Value::Int(i32::from(canonical_charset(name).is_some()))))
         }
-        // Logger factories. A descriptor that answers a logger type is enough:
-        // log4j's overloads take a `String`, a `Class`, an `Object` and an
-        // optional `MessageFactory`, and all of them name the logger by their
-        // first argument.
-        ("org/apache/logging/log4j/LogManager", "getLogger" | "getFormatterLogger", descriptor)
-            if descriptor.ends_with(")Lorg/apache/logging/log4j/Logger;") =>
-        {
-            Some(Ok(logger_value(&logger_name(args))))
+        // Logger factories. log4j's `String` overload names the logger by
+        // its text; the no-argument, `Class` and `Object` overloads name it by
+        // a class, which only the runtime knows (`invoke_logger_factory`). A
+        // `null` name (the caller's class) and the `MessageFactory` overloads
+        // (one logger per name and factory) are left counted.
+        (
+            "org/apache/logging/log4j/LogManager",
+            "getLogger" | "getFormatterLogger",
+            "(Ljava/lang/String;)Lorg/apache/logging/log4j/Logger;",
+        ) => {
+            let api = if r.name == "getLogger" {
+                "log4j"
+            } else {
+                "log4j-formatter"
+            };
+            match args.first() {
+                Some(Value::Ref(Some(name))) => Some(Ok(logger_value(api, name))),
+                _ => None,
+            }
         }
-        ("org/apache/logging/log4j/LogManager", "getRootLogger", _) => Some(Ok(logger_value(""))),
+        ("org/apache/logging/log4j/LogManager", "getRootLogger", _) => {
+            Some(Ok(logger_value("log4j", "")))
+        }
         ("org/slf4j/LoggerFactory", "getLogger", descriptor)
             if descriptor.ends_with(")Lorg/slf4j/Logger;") =>
         {
-            Some(Ok(logger_value(&logger_name(args))))
+            Some(Ok(logger_value("slf4j", &logger_name(r, args))))
         }
         // Mojang's `LogUtils.getLogger()` names the caller's class through a
         // stack walk; the bounded runtime has no stack to walk, so the logger
         // is anonymous. Its name is never observable through a disabled logger.
         ("com/mojang/logging/LogUtils", "getLogger", "()Lorg/slf4j/Logger;") => {
-            Some(Ok(logger_value("")))
+            Some(Ok(logger_value("mojang", "")))
         }
         ("java/util/logging/Logger", "getLogger", descriptor)
             if descriptor.ends_with(")Ljava/util/logging/Logger;") =>
         {
-            Some(Ok(logger_value(&logger_name(args))))
+            Some(Ok(logger_value("jul", &logger_name(r, args))))
         }
         // `System.getLogger(String[, ResourceBundle])`: the JDK's
         // `System.Logger` is answered by the same disabled-logger model as
@@ -249,14 +266,11 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         ("java/lang/System", "getLogger", descriptor)
             if descriptor.ends_with(")Ljava/lang/System$Logger;") =>
         {
-            Some(Ok(logger_value(&logger_name(args))))
+            Some(Ok(logger_value("system", &logger_name(r, args))))
         }
-        ("java/util/logging/Logger", "getGlobal" | "getAnonymousLogger", _) => {
-            Some(Ok(logger_value(if r.name == "getGlobal" {
-                "global"
-            } else {
-                ""
-            })))
+        ("java/util/logging/Logger", "getGlobal", _) => Some(Ok(logger_value("jul", "global"))),
+        ("java/util/logging/Logger", "getAnonymousLogger", _) => {
+            Some(Ok(logger_value("jul-anonymous", "")))
         }
         // The single runtime object. `availableProcessors` and the memory
         // reads already answer on it (a single-threaded bounded runtime is one
@@ -366,14 +380,14 @@ pub(crate) fn instance_call(
         )
         .then(|| Ok(Value::Ref(Some(kind.to_owned()))));
     }
+    if let Some(name) = crate::runtime::host_jdk::logger_name(receiver)
+        && is_logger_owner(&r.owner)
+    {
+        return logger_call(r, &name);
+    }
     let marker = expect_ref(receiver)?;
     if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
         return charset_call(r, canonical, args);
-    }
-    if let Some(name) = marker.strip_prefix(LOGGER_PREFIX)
-        && (is_logger_owner(&r.owner) || r.owner == "java/lang/Object")
-    {
-        return logger_call(r, name);
     }
     if let Some(kind) = marker.strip_prefix("fabric-resource-loader/") {
         return match (r.name.as_str(), r.descriptor.as_str()) {
@@ -830,7 +844,8 @@ pub(crate) fn platform_instance_of(marker: &str, wanted: &str) -> bool {
     let Some((class, _)) = marker.split_once('#') else {
         return false;
     };
-    class_instance_of(class, wanted)
+    // `[I#0` is a string: arrays are handles (`host_array.rs`).
+    !crate::runtime::host_array::handle_only_class(class) && class_instance_of(class, wanted)
 }
 
 /// Whether an instance of the platform class `class` is a `wanted`.
@@ -920,7 +935,10 @@ pub(crate) fn class_access_flags(file: &crate::runtime::ClassFile) -> Option<u16
 /// (`owner/Class#n`), as opposed to string text.
 fn is_object_marker(marker: &str) -> bool {
     marker.rsplit_once('#').is_some_and(|(class, number)| {
-        class.contains('/') && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+        class.contains('/')
+            && !crate::runtime::host_array::handle_only_class(class)
+            && !number.is_empty()
+            && number.bytes().all(|b| b.is_ascii_digit())
     })
 }
 
@@ -944,11 +962,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         };
         let elements: Vec<Value> = match r.descriptor.as_str() {
             "(Ljava/lang/CharSequence;[Ljava/lang/CharSequence;)Ljava/lang/String;" => {
-                let Some(values) = args
-                    .get(1)
-                    .and_then(expect_ref)
-                    .and_then(|array| self.arrays.get(array))
-                else {
+                let Some(values) = args.get(1).and_then(|array| self.owned_array(array)) else {
                     return Ok(None);
                 };
                 values.clone()
@@ -1215,7 +1229,6 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         values.extend(found.into_iter().map(|entry| crate::runtime::path_value(&entry)));
         // `spliteratorUnknownSize` over the directory iterator: not `SIZED`.
         let stream = self.new_stream(class, method, values);
-        self.mark_unsized_stream(&stream);
         Ok(stream)
     }
 
@@ -1384,6 +1397,106 @@ pub(crate) fn java_string_hash(text: &str) -> i32 {
     })
 }
 
+impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
+    /// The logger factories whose name may depend on a class, which only the
+    /// runtime knows: log4j's `LogManager.getLogger`/`getFormatterLogger`
+    /// with no argument (the caller's class, `StackLocatorUtil.getCallerClass`),
+    /// a `String` (`null`: the caller's), a `Class` (`null`: the caller's) or
+    /// an `Object` (its class; `null`: the caller's), a class named by
+    /// `Class.getCanonicalName()` (else `getName()`) as log4j-api 2.26's
+    /// `LoggerContext.getLogger(Class)` does, each with an optional
+    /// `MessageFactory` (counted, see below); and Mojang's
+    /// `LogUtils.getLogger()`, slf4j's logger of the caller's class, named by
+    /// `getName()`. A name the runtime cannot tell (a class it does not hold
+    /// with a `$`, a value of unknown class, no caller frame) is counted and
+    /// answered with the best name it has. `None` for any other call.
+    pub(crate) fn invoke_logger_factory(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let caller = || {
+            crate::runtime::stack_walk::snapshot()
+                .first()
+                .map(|(class, _)| class.clone())
+        };
+        if (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str())
+            == (
+                "com/mojang/logging/LogUtils",
+                "getLogger",
+                "()Lorg/slf4j/Logger;",
+            )
+        {
+            return Ok(Some(match caller() {
+                Some(class) => logger_value("slf4j", &class.replace('/', ".")),
+                None => {
+                    self.host.unknown_operand_call(r)?;
+                    logger_value("mojang", "")
+                }
+            }));
+        }
+        let api = match (r.owner.as_str(), r.name.as_str()) {
+            ("org/apache/logging/log4j/LogManager", "getLogger") => "log4j",
+            ("org/apache/logging/log4j/LogManager", "getFormatterLogger") => "log4j-formatter",
+            _ => return Ok(None),
+        };
+        if !r.descriptor.ends_with(")Lorg/apache/logging/log4j/Logger;") {
+            return Ok(None);
+        }
+        // An overload taking a `MessageFactory` caches one logger per name
+        // and factory, which the runtime cannot compare: answered (a mod
+        // logs through it) but counted, under a key no other logger shares.
+        let parameters = crate::runtime::descriptor_arguments(&r.descriptor);
+        let (api, first) = match parameters.as_slice() {
+            [] => (api, None),
+            [first] => (api, Some(first.as_str())),
+            [first, factory] if factory == "Lorg/apache/logging/log4j/message/MessageFactory;" => {
+                self.host.unknown_operand_call(r)?;
+                ("log4j-factory", Some(first.as_str()))
+            }
+            _ => return Ok(None),
+        };
+        let class = match (first, args.first()) {
+            (None, _)
+            | (
+                Some("Ljava/lang/String;" | "Ljava/lang/Class;" | "Ljava/lang/Object;"),
+                Some(Value::Ref(None)),
+            ) => caller(),
+            // A name is the logger's name as it is.
+            (Some("Ljava/lang/String;"), Some(Value::Ref(Some(name)))) => {
+                return Ok(Some(logger_value(api, name)));
+            }
+            (Some("Ljava/lang/Class;"), Some(Value::Ref(Some(class)))) => {
+                Some(class.replace('.', "/"))
+            }
+            (Some("Ljava/lang/Object;"), Some(value)) => {
+                crate::runtime::class_of_value(value).or_else(|| {
+                    expect_ref(value)
+                        .filter(|text| crate::runtime::value_class::is_plain_string(text))
+                        .map(|_| "java/lang/String".to_owned())
+                })
+            }
+            _ => return Ok(None),
+        };
+        let name = match class
+            .as_deref()
+            .map(|class| (class, self.canonical_class_name(class)))
+        {
+            Some((_, Some(Some(name)))) => name,
+            Some((class, Some(None))) => class.replace('/', "."),
+            Some((class, None)) => {
+                self.host.unknown_operand_call(r)?;
+                class.replace('/', ".")
+            }
+            None => {
+                self.host.unknown_operand_call(r)?;
+                String::new()
+            }
+        };
+        Ok(Some(logger_value(api, &name)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1456,12 +1569,15 @@ mod tests {
 
     #[test]
     fn logger_factories_answer_a_named_disabled_logger() {
-        let by_class = method(
+        // The `Class`/`Object`/no-argument overloads are named by a class
+        // the runtime knows (`invoke_logger_factory`; fixture_host_values_p2b
+        // checks them against Java 25); the host answers the `String` one.
+        let by_name = method(
             "org/apache/logging/log4j/LogManager",
             "getLogger",
-            "(Ljava/lang/Class;)Lorg/apache/logging/log4j/Logger;",
+            "(Ljava/lang/String;)Lorg/apache/logging/log4j/Logger;",
         );
-        let logger = static_call(&by_class, &[text("xaero/lib/XaeroLib")])
+        let logger = static_call(&by_name, &[text("xaero.lib.XaeroLib")])
             .unwrap()
             .unwrap();
         assert_ne!(logger, Value::Ref(None));
@@ -1510,13 +1626,19 @@ mod tests {
             "([Ljava/lang/Object;)Ljava/util/List;",
         );
         assert_eq!(
-            static_call(&as_list, &[text("array/empty")])
-                .unwrap()
-                .unwrap(),
+            static_call(
+                &as_list,
+                &[crate::runtime::host_array::shared_empty("[Ljava/lang/String;")]
+            )
+            .unwrap()
+            .unwrap(),
             text("list")
         );
-        // A runtime-owned array is the interpreter's to expand.
-        assert!(static_call(&as_list, &[text("array/demo/Probe/run/0")]).is_none());
+        // A runtime-owned array is the interpreter's to expand, and a string
+        // spelled like the old shared empty array is no array.
+        let owned = crate::runtime::host_array::handle(crate::runtime::host_array::key("[Ljava/lang/Object;", 0));
+        assert!(static_call(&as_list, &[owned]).is_none());
+        assert!(static_call(&as_list, &[text("array/empty")]).is_none());
     }
 
     #[test]

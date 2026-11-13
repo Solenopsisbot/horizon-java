@@ -1135,6 +1135,10 @@ impl StdHost {
         if !self.client_environment() {
             return None;
         }
+        // A client registration event (`RegisterKeyMappingsEvent`...), as its firing names it.
+        if let Some(event) = crate::host_game_event::fired_event(receiver) {
+            return self.client_event_call(event.name(), r, args);
+        }
         let text = expect_ref(receiver)?.clone();
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
         // `NonNullList` is a `List`: the inventory's lists answer as one.
@@ -1179,7 +1183,7 @@ impl StdHost {
                     .or_else(|| a.strip_prefix(items::BLOCK))
             })
         {
-            return Some(Ok(marker(format!("identifier/{id}"))));
+            return Some(Ok(crate::host_ids::identifier_of_text(id)));
         }
         // A stack the frame built answers as its slot marker does.
         if !text.starts_with("client/")
@@ -1222,18 +1226,12 @@ impl StdHost {
             }
             return Some(refuse());
         }
-        if let Some(event) = text.strip_prefix("game-event/") {
-            return self.client_event_call(event, r, args);
-        }
         if self.client.key_inits.contains_key(&text) {
             return self.key_mapping_call(&text, r, args);
         }
         if let Some(id) = text.strip_prefix(CATEGORY) {
             return Some(match (r.name.as_str(), return_desc(&r.descriptor)) {
-                ("id", _) => {
-                    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-                    Ok(marker(format!("identifier/{namespace}:{path}")))
-                }
+                ("id", _) => Ok(crate::host_ids::identifier_of_text(id)),
                 ("label", _) => Ok(component_value(
                     "translatable",
                     &format!("key.category.{}", id.replacen(':', ".", 1)),
@@ -1581,10 +1579,10 @@ impl StdHost {
                     ("getDayTime" | "getOverworldClockTime", "J") => {
                         Some(Value::Long(level.day_time))
                     }
-                    ("dimension", _) => Some(marker(format!(
-                        "resource-key/dimension/{}",
-                        level.dimension
-                    ))),
+                    ("dimension", _) => Some(crate::host_ids::resource_key_named(
+                        "minecraft:dimension",
+                        &level.dimension,
+                    )),
                     ("isClientSide", "Z") => Some(flag(true)),
                     ("getMinY", "I") => int(level.min_y),
                     ("getHeight", "I") => int(level.height),

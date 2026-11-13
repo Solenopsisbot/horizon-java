@@ -227,6 +227,7 @@ fn package_of(class: &str) -> &str {
 pub(crate) fn constructed_object_class(marker: &str) -> Option<&str> {
     let (class, serial) = marker.split_once('#')?;
     (!class.is_empty()
+        && !host_array::handle_only_class(class)
         && !class.contains([':', ' ', '.'])
         && !serial.is_empty()
         && serial.bytes().all(|byte| byte.is_ascii_digit()))

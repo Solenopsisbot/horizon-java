@@ -245,18 +245,31 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Ok(Lookup::Unknown);
             }
-            return Ok(if table.contains(&marker) {
-                Lookup::Found(key.clone())
-            } else {
-                Lookup::Absent
-            });
+            if !table.contains(&marker) {
+                return Ok(Lookup::Absent);
+            }
+            // A handle with an equal key is stored: the same object only
+            // where `equals` says so (the row's, or identity proved by
+            // `same_object`); an equal key is never a match by itself.
+            if let Value::Host(handle) = key {
+                let stored = parse_collection_value(&marker)?;
+                return Ok(
+                    match handle.equals(&stored, &mut object_methods::RuntimeNested::new(self))? {
+                        Some(true) => Lookup::Found(stored),
+                        Some(false) => Lookup::Absent,
+                        None => Lookup::Unknown,
+                    },
+                );
+            }
+            return Ok(Lookup::Found(key.clone()));
         };
         if table.lookups_unknown() && !self.pure_equality(key) {
             return Ok(Lookup::Unknown);
         }
         for candidate in table.candidates(hash) {
             let stored = parse_collection_value(&candidate)?;
-            if stored == *key && !matches!(stored, Value::Float(_)) {
+            // `p.key == key`: identity, which equal handle keys do not prove.
+            if object_methods::identical(&stored, key) {
                 return Ok(Lookup::Found(stored));
             }
             if *key != Value::Ref(None) && self.java_equals(key, &stored)? {
@@ -915,6 +928,16 @@ impl<H: Host> Runtime<'_, H> {
                 .put_value(receiver, table, key, value.clone(), false)?
                 .is_none()
             {
+                // A key whose lookup is unknown: counted, and the pair kept,
+                // never merged with an equal-looking key.
+                self.host.unknown_operand_call(&MethodRef {
+                    owner: "java/util/HashMap".into(),
+                    name: "put".into(),
+                    descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".into(),
+                })?;
+                let mut stored = self.collection_elements(receiver)?;
+                stored.extend([key.clone(), value.clone()]);
+                self.host.replace_mutable_collection(receiver, stored);
                 table.tainted = true;
             }
         }
@@ -933,7 +956,21 @@ impl<H: Host> Runtime<'_, H> {
         for element in &elements {
             match self.set_add(receiver, table, element)? {
                 Some(added) => changed |= added,
-                None => table.tainted = true,
+                None => {
+                    // `add` whose lookup is unknown (an `equals` that cannot
+                    // be answered): counted, and the element kept, never
+                    // merged with an equal-looking one.
+                    self.host.unknown_operand_call(&MethodRef {
+                        owner: "java/util/HashSet".into(),
+                        name: "add".into(),
+                        descriptor: "(Ljava/lang/Object;)Z".into(),
+                    })?;
+                    let mut entries = self.collection_elements(receiver)?;
+                    entries.push(element.clone());
+                    self.host.replace_mutable_collection(receiver, entries);
+                    table.tainted = true;
+                    changed = true;
+                }
             }
         }
         Ok(changed)

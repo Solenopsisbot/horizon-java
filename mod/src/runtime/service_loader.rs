@@ -3,10 +3,10 @@
 //! `loadProvider`, `getConstructor`, `ProviderImpl.newInstance`).
 //!
 //! Before this module the loader handed out each provider as its bare class
-//! name: `Provider.get` split the `service-provider/<service>/<provider>`
-//! marker at the first `/` (so a packaged service gave a wrong class name),
-//! and no provider was ever constructed, so its constructor and field
-//! initialisers never ran.
+//! name (its `Provider` was text split at the first `/`, so a packaged
+//! service gave a wrong class name), and no provider was ever constructed,
+//! so its constructor and field initialisers never ran. The loader, its
+//! iterators and providers are host handles now (`host_services.rs`).
 //!
 //! What the JDK does, and this module with it:
 //!
@@ -48,26 +48,13 @@
 use super::*;
 
 const SERVICE_ERROR: &str = "java/util/ServiceConfigurationError";
-const LOADER: &str = "service-loader/";
-const ITERATOR: &str = "service-iterator/";
-const PROVIDER: &str = "service-provider/";
 const ACC_PUBLIC: u16 = 0x0001;
 const ACC_INTERFACE: u16 = 0x0200;
 
-/// The side table a loader or iterator keeps in the runtime's field map.
-fn slot(marker: &str, name: &str) -> String {
-    format!("{marker}|java/util/ServiceLoader#{name}")
-}
-
-/// The service a loader marker (`service-loader/<service>;<n>`) loads.
-pub(super) fn loader_service(marker: &str) -> Option<&str> {
-    let rest = marker.strip_prefix(LOADER)?;
-    Some(rest.split_once(';').map_or(rest, |(service, _)| service))
-}
-
-/// The service and provider class a `Provider` marker names.
-pub(super) fn provider_parts(marker: &str) -> Option<(&str, &str)> {
-    marker.strip_prefix(PROVIDER)?.split_once(';')
+/// The side table a loader or iterator keeps in the runtime's field map,
+/// under its handle's key (`host_services.rs`).
+fn slot(key: &str, name: &str) -> String {
+    format!("{key}|java/util/ServiceLoader#{name}")
 }
 
 fn service_error(service: &str, message: &str) -> NativeError {
@@ -94,7 +81,11 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let marker = receiver.and_then(expect_ref).cloned();
+        let state = receiver
+            .and_then(host_services::state_key)
+            .map(str::to_owned);
+        let is =
+            |kind: HostKind| matches!(receiver, Some(Value::Host(handle)) if handle.kind() == kind);
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
             // The host validates the service (and refuses a JDK or game one it
             // cannot see); each load is then its own loader object.
@@ -102,38 +93,38 @@ impl<H: Host> Runtime<'_, H> {
                 if descriptor.starts_with("(Ljava/lang/Class;") =>
             {
                 let loader = self.host.invoke(r, args)?;
-                let Some(service) = expect_ref(&loader).and_then(|marker| loader_service(marker))
-                else {
+                let Some((service, _)) = host_services::loader_parts(&loader) else {
                     return Ok(Some(loader));
                 };
-                let loader = format!("{LOADER}{service};{}", self.next_object);
+                // Each load is its own loader object.
+                let loader = host_services::loader(&service, self.next_object);
                 self.next_object = self.next_object.saturating_add(1);
-                Ok(Some(Value::Ref(Some(loader))))
+                Ok(Some(loader))
             }
             ("java/util/ServiceLoader" | "java/lang/Iterable", _, _)
-                if marker.as_deref().is_some_and(|m| m.starts_with(LOADER)) =>
+                if is(HostKind::ServiceLoader) =>
             {
-                let loader = marker.unwrap_or_default();
+                let Some(loader) = receiver.cloned() else {
+                    return Ok(None);
+                };
                 self.loader_call(r, &loader, args)
             }
-            ("java/util/Iterator", "hasNext", "()Z")
-                if marker.as_deref().is_some_and(|m| m.starts_with(ITERATOR)) =>
-            {
-                let iterator = marker.unwrap_or_default();
+            ("java/util/Iterator", "hasNext", "()Z") if is(HostKind::ServiceIterator) => {
+                let iterator = state.unwrap_or_default();
                 self.iterator_has_next(&iterator)
                     .map(|more| Some(Value::Int(i32::from(more))))
             }
             ("java/util/Iterator", "next", "()Ljava/lang/Object;")
-                if marker.as_deref().is_some_and(|m| m.starts_with(ITERATOR)) =>
+                if is(HostKind::ServiceIterator) =>
             {
-                let iterator = marker.unwrap_or_default();
+                let iterator = state.unwrap_or_default();
                 self.iterator_next(&iterator).map(Some)
             }
             ("java/util/ServiceLoader$Provider", name, descriptor) => {
-                let Some((service, provider)) = marker.as_deref().and_then(provider_parts) else {
+                let Some((service, provider)) = receiver.and_then(host_services::provider_parts)
+                else {
                     return Ok(None);
                 };
-                let (service, provider) = (service.to_owned(), provider.to_owned());
                 match (name, descriptor) {
                     ("type", "()Ljava/lang/Class;") => {
                         self.lookup(&service, &provider)?;
@@ -152,15 +143,21 @@ impl<H: Host> Runtime<'_, H> {
     fn loader_call(
         &mut self,
         r: &MethodRef,
-        loader: &str,
+        handle: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let service = loader_service(loader).unwrap_or_default().to_owned();
+        let (service, _) = host_services::loader_parts(handle).unwrap_or_default();
+        let loader = host_services::state_key(handle)
+            .unwrap_or_default()
+            .to_owned();
+        let loader = loader.as_str();
         match (r.name.as_str(), r.descriptor.as_str()) {
-            ("iterator", "()Ljava/util/Iterator;") => Ok(Some(self.new_service_iterator(loader))),
+            ("iterator", "()Ljava/util/Iterator;") => Ok(Some(self.new_service_iterator(handle))),
             ("findFirst", "()Ljava/util/Optional;") => {
-                let iterator = self.new_service_iterator(loader);
-                let iterator = expect_ref(&iterator).cloned().unwrap_or_default();
+                let iterator = self.new_service_iterator(handle);
+                let iterator = host_services::state_key(&iterator)
+                    .unwrap_or_default()
+                    .to_owned();
                 if !self.iterator_has_next(&iterator)? {
                     return Ok(Some(empty_optional()));
                 }
@@ -169,8 +166,10 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("forEach", "(Ljava/util/function/Consumer;)V") => {
                 let action = StdHost::argument(r, args, 0)?.clone();
-                let iterator = self.new_service_iterator(loader);
-                let iterator = expect_ref(&iterator).cloned().unwrap_or_default();
+                let iterator = self.new_service_iterator(handle);
+                let iterator = host_services::state_key(&iterator)
+                    .unwrap_or_default()
+                    .to_owned();
                 while self.iterator_has_next(&iterator)? {
                     let value = self.iterator_next(&iterator)?;
                     if self
@@ -189,15 +188,15 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("stream", "()Ljava/util/stream/Stream;") => {
                 // Each element looks its provider up when it is used, so a
-                // `findFirst()` never reaches a later provider's failure.
+                // `findFirst()` never reaches a later provider's failure. The
+                // loader keeps one `Provider` per provider (`host_services.rs`).
                 let providers = self
                     .service_names(&service)
                     .into_iter()
-                    .map(|provider| Value::Ref(Some(format!("{PROVIDER}{service};{provider}"))))
+                    .map(|provider| host_services::provider(&service, &provider))
                     .collect();
                 // `ProviderSpliterator` is not `SIZED`.
                 let stream = self.new_stream("java/util/ServiceLoader", "stream", providers);
-                self.mark_unsized_stream(&stream);
                 Ok(Some(stream))
             }
             ("reload", "()V") => {
@@ -209,10 +208,6 @@ impl<H: Host> Runtime<'_, H> {
                     .insert(slot(loader, "reloads"), Value::Int(reloads + 1));
                 Ok(Some(Value::Void))
             }
-            ("toString", "()Ljava/lang/String;") => Ok(Some(Value::Ref(Some(format!(
-                "java.util.ServiceLoader[{}]",
-                service.replace('/', ".")
-            ))))),
             _ => Ok(None),
         }
     }
@@ -235,48 +230,61 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `ServiceLoader.iterator()`: a cursor over the loader's cached instances,
     /// then its shared lookup.
-    fn new_service_iterator(&mut self, loader: &str) -> Value {
-        let iterator = format!("{ITERATOR}{}", self.next_object);
+    fn new_service_iterator(&mut self, loader: &Value) -> Value {
+        let handle = host_services::iterator(self.next_object);
         self.next_object = self.next_object.saturating_add(1);
-        let reloads = self.int_slot(loader, "reloads");
-        self.fields.insert(
-            slot(&iterator, "loader"),
-            Value::Ref(Some(loader.to_owned())),
-        );
+        let iterator = host_services::state_key(&handle)
+            .unwrap_or_default()
+            .to_owned();
+        let key = host_services::state_key(loader)
+            .unwrap_or_default()
+            .to_owned();
+        let reloads = self.int_slot(&key, "reloads");
+        self.fields
+            .insert(slot(&iterator, "loader"), loader.clone());
         self.fields
             .insert(slot(&iterator, "reloads"), Value::Int(reloads));
-        Value::Ref(Some(iterator))
+        handle
     }
 
-    /// The iterator's loader, after `checkReloadCount`.
-    fn iterator_loader(&self, iterator: &str) -> Result<String, NativeError> {
-        let Some(Value::Ref(Some(loader))) = self.fields.get(&slot(iterator, "loader")) else {
+    /// The iterator's loader (its state key and its service), after
+    /// `checkReloadCount`.
+    fn iterator_loader(&self, iterator: &str) -> Result<(String, String), NativeError> {
+        let Some(handle) = self.fields.get(&slot(iterator, "loader")) else {
             return Err(NativeError::Metadata(format!(
                 "unknown ServiceLoader iterator {iterator}"
             )));
         };
-        if self.int_slot(iterator, "reloads") != self.int_slot(loader, "reloads") {
+        let (Some(loader), Some((service, _))) = (
+            host_services::state_key(handle),
+            host_services::loader_parts(handle),
+        ) else {
+            return Err(NativeError::Metadata(format!(
+                "unknown ServiceLoader iterator {iterator}"
+            )));
+        };
+        let loader = loader.to_owned();
+        if self.int_slot(iterator, "reloads") != self.int_slot(&loader, "reloads") {
             return Err(NativeError::UncaughtException {
                 class: "java/util/ConcurrentModificationException".into(),
                 message: None,
                 frame: None,
             });
         }
-        Ok(loader.clone())
+        Ok((loader, service))
     }
 
     fn iterator_has_next(&mut self, iterator: &str) -> Result<bool, NativeError> {
-        let loader = self.iterator_loader(iterator)?;
+        let (loader, service) = self.iterator_loader(iterator)?;
         if self.int_slot(iterator, "index") < self.int_slot(&loader, "count") {
             return Ok(true);
         }
-        let service = loader_service(&loader).unwrap_or_default();
         let lookup = self.int_slot(&loader, "lookup");
-        Ok((lookup as usize) < self.service_names(service).len())
+        Ok((lookup as usize) < self.service_names(&service).len())
     }
 
     fn iterator_next(&mut self, iterator: &str) -> Result<Value, NativeError> {
-        let loader = self.iterator_loader(iterator)?;
+        let (loader, service) = self.iterator_loader(iterator)?;
         let index = self.int_slot(iterator, "index");
         let count = self.int_slot(&loader, "count");
         let value = if index < count {
@@ -285,7 +293,6 @@ impl<H: Host> Runtime<'_, H> {
                 .cloned()
                 .unwrap_or(Value::Ref(None))
         } else {
-            let service = loader_service(&loader).unwrap_or_default().to_owned();
             let lookup = self.int_slot(&loader, "lookup");
             let Some(provider) = self
                 .host

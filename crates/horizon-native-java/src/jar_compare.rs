@@ -22,6 +22,16 @@ impl<H: Host> Runtime<'_, H> {
         // A host handle's natural order is its kind's row (`host_ref.rs`);
         // a kind with none, or a pair it cannot compare, is counted.
         if let Value::Host(handle) = a {
+            // A kind known not to be `Comparable` (an array) fails the
+            // `(Comparable)` cast, as `ComparableTimSort` does.
+            if handle.instance_of("java/lang/Comparable", self) == Some(false)
+                && let Some(class) = handle.class()
+            {
+                return Err(crate::checkcast::class_cast_exception(
+                    class,
+                    "java/lang/Comparable",
+                ));
+            }
             return match self.host_ref_compare(handle, b)? {
                 Some(order) => Ok(order),
                 None => self.count_compare_to(),
