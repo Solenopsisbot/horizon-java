@@ -238,3 +238,55 @@ impl<H: Host> Runtime<'_, H> {
             .map(|simple| Value::Ref(Some(simple.unwrap_or_default()))))
     }
 }
+
+impl<H: Host> Runtime<'_, H> {
+    /// `Class.getCanonicalName()` of `class` (an internal name), as JDK 25
+    /// builds it: an array's component's name plus `[]`; `null` for a local
+    /// or anonymous class; a member class's enclosing class's canonical name,
+    /// `.`, and its simple name; a top-level class's binary name. A class the
+    /// runtime does not hold is canonical by its name unless it is nested
+    /// (`$`), which only its `InnerClasses` can tell: `None` (unknown).
+    pub(crate) fn canonical_class_name(&self, class: &str) -> Option<Option<String>> {
+        self.canonical_class_name_at(class, 0)
+    }
+
+    fn canonical_class_name_at(&self, class: &str, depth: usize) -> Option<Option<String>> {
+        if depth > MAX_SUPERCLASS_WALK {
+            return None;
+        }
+        if let Some(component) = class.strip_prefix('[') {
+            let component = erased_field_type(component);
+            let name = if PRIMITIVE_CLASS_NAMES.contains(&component.as_str()) {
+                Some(component)
+            } else {
+                self.canonical_class_name_at(&component, depth + 1)?
+            };
+            return Some(name.map(|name| format!("{name}[]")));
+        }
+        let binary = class.replace('/', ".");
+        let Some(file) = self.class(class) else {
+            return (!class.contains('$')).then_some(Some(binary));
+        };
+        let nesting = file.nesting_attributes()?;
+        if nesting.enclosing_method_class.is_some() {
+            return Some(None);
+        }
+        match nesting.own_row() {
+            None => Some(Some(binary)),
+            Some(None) => Some(None),
+            Some(Some(outer)) => {
+                let outer = outer.to_owned();
+                let simple = file.nested_simple_name()??;
+                Some(
+                    self.canonical_class_name_at(&outer, depth + 1)?
+                        .map(|outer| format!("{outer}.{simple}")),
+                )
+            }
+        }
+    }
+}
+
+/// The primitive class names an array component can be.
+const PRIMITIVE_CLASS_NAMES: &[&str] = &[
+    "boolean", "byte", "char", "short", "int", "long", "float", "double",
+];
