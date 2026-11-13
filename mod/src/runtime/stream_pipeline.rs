@@ -257,6 +257,9 @@ pub(crate) struct Pipelines {
     next_drive: u64,
     /// Value-list sources over a fail-fast host collection.
     origins: BTreeMap<String, Origin>,
+    /// Value-list sources over a map's `keySet()`/`values()`/`entrySet()`
+    /// copy: the map and its write count when the stream was made.
+    view_origins: BTreeMap<String, (String, u64)>,
     /// Streams a stage or terminal has used (`linkedOrConsumed`).
     used: BTreeSet<String>,
 }
@@ -331,6 +334,29 @@ fn npe() -> NativeError {
     }
 }
 
+/// Whether comparing with `comparator` runs jar code: anything but natural
+/// order, `reversed()` of it, and the map-entry comparators over natural
+/// order.
+fn comparator_runs_code(comparator: &Value) -> bool {
+    let Some(marker) = expect_ref(comparator) else {
+        return false;
+    };
+    let Some(body) = marker.strip_prefix("@cmp:") else {
+        return true;
+    };
+    let (kind, rest) = body.split_once(':').unwrap_or((body, ""));
+    match kind {
+        "natural" | "entry-key" | "entry-value" => false,
+        "reverse" | "then" => crate::runtime::split_capture_markers(rest).map_or(true, |parts| {
+            parts.iter().any(|part| {
+                crate::runtime::parse_collection_value(part)
+                    .map_or(true, |inner| comparator_runs_code(&inner))
+            })
+        }),
+        _ => true,
+    }
+}
+
 fn concurrent_modification() -> NativeError {
     NativeError::UncaughtException {
         class: "java/util/ConcurrentModificationException".into(),
@@ -391,6 +417,24 @@ fn is_stream_owner(owner: &str) -> bool {
 }
 
 impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
+    /// An unmodifiable `ListN` holding `values` (`Stream.toList()`,
+    /// `Collectors.toUnmodifiableList()`).
+    pub(crate) fn unmodifiable_list(&mut self, values: Vec<Value>) -> Value {
+        let fallback = crate::runtime::collection_value("list", &values);
+        self.host.unmodifiable_list(values).unwrap_or(fallback)
+    }
+
+    /// A new `ArrayList` of its own holding `values` (`Collectors.toList()`).
+    pub(crate) fn new_array_list(&mut self, values: Vec<Value>) -> Value {
+        match self.host.empty_mutable_collection("list") {
+            Some(list) if self.host.mutable_collection_values(&list).is_some() => {
+                self.host.replace_mutable_collection(&list, values);
+                list
+            }
+            _ => crate::runtime::collection_value("list", &values),
+        }
+    }
+
     /// `linkedOrConsumed`: a stream takes one stage or one terminal.
     fn consume(&mut self, stream: &str) -> Result<(), NativeError> {
         if !self.pipelines.used.insert(stream.to_owned()) {
@@ -443,6 +487,16 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let (Some(marker), Some(source)) = (expect_ref(stream), expect_ref(collection)) else {
             return;
         };
+        // A map view's copy: the JDK's view binds late and fails fast on its
+        // map, which the copy cannot; a write to the map before the
+        // traversal ends is counted.
+        if let Some(map) = self.host.view_copy_map(source) {
+            let writes = self.host.collection_writes(&map);
+            self.pipelines
+                .view_origins
+                .insert(marker.clone(), (map, writes));
+            return;
+        }
         let class = source.split_once('#').map_or("", |(class, _)| class);
         if FAIL_FAST.contains(&class) && self.host.mutable_collection_values(collection).is_some() {
             self.pipelines.origins.insert(
@@ -827,6 +881,8 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 self.consume(stream)?;
                 self.bind_sources(stream)?;
                 if let Some(size) = self.exact_size(stream)? {
+                    let root = self.root(stream);
+                    self.check_view_origin(&root)?;
                     self.count_parallel(stream)?;
                     return Ok(Some(Value::Long(size)));
                 }
@@ -955,8 +1011,9 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             self.count_stream(terminal, descriptor)?;
         }
         self.bind_sources(&marker)?;
-        if let Some(values) = self.streams.get(&marker) {
-            return Ok(values.clone());
+        if let Some(values) = self.streams.get(&marker).cloned() {
+            self.check_view_origin(&marker)?;
+            return Ok(values);
         }
         self.count_parallel(&marker)?;
         // `toArray`/`toList` size their array first
@@ -1067,7 +1124,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                         }
                         self.accept(id, 0, value)?;
                     }
-                    return Ok(());
+                    return self.check_view_origin(marker);
                 };
                 self.feed_collection(&origin, values, id)
             }
@@ -1117,6 +1174,24 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         }
     }
 
+    /// A stream over a map view's copy whose map was written to since the
+    /// stream was made: the JDK's view would have seen the change (and its
+    /// iterator failed fast), the copy did not. Counted.
+    fn check_view_origin(&mut self, marker: &str) -> Result<(), NativeError> {
+        let Some((map, writes)) = self.pipelines.view_origins.get(marker).cloned() else {
+            return Ok(());
+        };
+        if self.host.collection_writes(&map) != writes {
+            let class = map.split_once('#').map_or(map.as_str(), |(class, _)| class);
+            self.host.unknown_operand_call(&MethodRef {
+                owner: class.to_owned(),
+                name: "spliterator".into(),
+                descriptor: "()Ljava/util/Spliterator;".into(),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Feed a host collection's bound elements, checking it for modification
     /// as its fail-fast spliterator does: after each element when pulled,
     /// after the last when pushed in bulk.
@@ -1127,6 +1202,8 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         id: u64,
     ) -> Result<(), NativeError> {
         let bound = self.origin_items(origin)?;
+        let source = expect_ref(&origin.collection).cloned().unwrap_or_default();
+        let writes = self.host.collection_writes(&source);
         let short = self
             .pipelines
             .drives
@@ -1146,6 +1223,13 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             self.accept(id, 0, value)?;
             let now = self.origin_items(origin)?;
             if now == bound {
+                // Written to and back (an add and a remove, a clear and an
+                // addAll): the JDK's `modCount` moved, the contents did not.
+                // Undecidable without it, so counted.
+                if self.host.collection_writes(&source) != writes && !uncertain {
+                    uncertain = true;
+                    self.host.unknown_operand_call(&counted)?;
+                }
                 continue;
             }
             let resized = now.len() != bound.len();
@@ -1331,6 +1415,15 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             Some(State::Buffer(buffer)) => std::mem::take(buffer),
             _ => Vec::new(),
         };
+        // The JDK sorts the buffer with TimSort; the runtime's merge sort
+        // makes its comparisons in another order, which a comparator that runs
+        // jar code (a lambda, a key extractor) would see.
+        if buffer.len() > 1 && comparator_runs_code(&comparator) {
+            self.count_stream(
+                "sorted",
+                "(Ljava/util/Comparator;)Ljava/util/stream/Stream;",
+            )?;
+        }
         let sorted = self.sort_values(buffer, &comparator)?;
         for value in sorted {
             if self.cancelled(id, index + 1) {

@@ -27,6 +27,7 @@ mod collection_base;
 mod collection_callback;
 mod color_collection;
 mod commons_io;
+mod commons_pair;
 mod concurrent_sync;
 pub mod content;
 mod declarations_content;
@@ -50,11 +51,13 @@ mod game_rules;
 mod gson_model;
 mod gson_tree;
 mod guava_model;
+mod guava_text;
 mod hash_map_order;
 mod heap;
 mod hook_shapes;
 mod jar_operands;
 mod jar_text;
+mod jar_throwables;
 mod java_format;
 mod java_format_args;
 mod java_identifier;
@@ -80,6 +83,7 @@ mod jdk_text_oracle;
 mod jvm_dispatch;
 mod lambda_boxing;
 mod library_dispatch;
+mod linked_resources;
 mod map_compute;
 mod method_handles;
 mod mixin_extras;
@@ -100,7 +104,9 @@ mod neoforge_subscribe;
 mod nested_jars;
 mod night_config;
 mod null_checks;
+mod object_methods;
 mod open_options;
+mod optionull;
 mod references;
 mod reflect_constructors;
 mod reflect_enum;
@@ -113,6 +119,8 @@ mod sequenced;
 mod service_loader;
 mod stack_walk;
 mod stream_pipeline;
+mod string_constructors;
+mod synchronized_views;
 mod type_switch;
 mod value_class;
 mod vanilla_registries;
@@ -2318,6 +2326,24 @@ pub trait Host {
         None
     }
 
+    /// A new unmodifiable list (`ImmutableCollections.ListN`) holding
+    /// `values`, for a host that models one.
+    fn unmodifiable_list(&mut self, _values: Vec<Value>) -> Option<Value> {
+        None
+    }
+
+    /// How many mutators have run on the host collection `marker` so far: a
+    /// stream over it uses this to notice its callbacks wrote to it
+    /// (`stream_pipeline.rs`).
+    fn collection_writes(&self, _marker: &str) -> u64 {
+        0
+    }
+
+    /// The map a `keySet()`/`values()`/`entrySet()` copy was taken from.
+    fn view_copy_map(&self, _marker: &str) -> Option<String> {
+        None
+    }
+
     /// How many unknown host calls this host has counted (each answered with
     /// a neutral value), for a model that must not build a verdict on one.
     fn counted_unknown_calls(&self) -> usize {
@@ -2529,9 +2555,20 @@ pub struct StdHost {
     neoforge_bus: neoforge_bus::BusState,
     holders: BTreeMap<String, Value>,
     mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Mutator calls run on each host collection (`Host::collection_writes`).
+    collection_writes: BTreeMap<String, u64>,
+    /// `keySet()`/`values()`/`entrySet()` copies and their maps
+    /// (`Host::view_copy_map`).
+    view_copy_maps: BTreeMap<String, String>,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
     unmodifiable_collections: BTreeMap<String, Option<String>>,
+    /// The JDK's own `List.of`/`List.copyOf` lists, whose search members
+    /// reject `null` (`java_immutable.rs`).
+    null_hostile_lists: BTreeSet<String>,
+    /// `Collections.synchronized*` views and the collection each wraps
+    /// (`synchronized_views.rs`).
+    synchronized_views: BTreeMap<String, String>,
     /// `List.reversed()` views: view marker → (its list, whether it writes
     /// through) (`sequenced.rs`).
     reversed_views: BTreeMap<String, (String, bool)>,
@@ -2657,7 +2694,11 @@ impl StdHost {
             neoforge_bus: neoforge_bus::BusState::default(),
             holders: BTreeMap::new(),
             mutable_collections: BTreeMap::new(),
+            collection_writes: BTreeMap::new(),
+            view_copy_maps: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
+            null_hostile_lists: BTreeSet::new(),
+            synchronized_views: BTreeMap::new(),
             reversed_views: BTreeMap::new(),
             locales: BTreeMap::new(),
             levels: Vec::new(),
@@ -2859,9 +2900,12 @@ impl StdHost {
     /// Query an explicitly seeded resource marker without crossing into the
     /// host filesystem or process classpath.
     pub fn resource(&self, name: &str) -> Option<&str> {
+        let name = name.strip_prefix('/').unwrap_or(name);
         self.resources
-            .get(name.strip_prefix('/').unwrap_or(name))
+            .get(name)
             .map(String::as_str)
+            // A linked jar's, after the running jar's (`linked_resources.rs`).
+            .or_else(|| self.linked_classes.resource(name).map(|(marker, _)| marker))
     }
 
     /// Alias named for callers that want to make the query boundary explicit.
@@ -2885,7 +2929,16 @@ impl StdHost {
         let Some(marker) = self.resource(name).map(str::to_owned) else {
             return Value::Ref(None);
         };
-        if let Some(bytes) = self.resource_bytes.get(name).cloned() {
+        let bytes = self.resource_bytes.get(name).cloned().or_else(|| {
+            (!self.resources.contains_key(name))
+                .then(|| {
+                    self.linked_classes
+                        .resource(name)
+                        .map(|(_, bytes)| bytes.to_vec())
+                })
+                .flatten()
+        });
+        if let Some(bytes) = bytes {
             self.resource_streams.insert(marker.clone(), (bytes, 0));
         } else {
             self.resource_streams
@@ -3057,7 +3110,7 @@ impl StdHost {
     }
 
     fn mutable_values(&self, receiver: &Value) -> Option<Vec<String>> {
-        let marker = expect_ref(receiver)?;
+        let marker = self.synchronized_target(expect_ref(receiver)?);
         if let Some(values) = self.view_values(marker) {
             return Some(values);
         }
@@ -3088,11 +3141,14 @@ impl StdHost {
     ) -> Result<Option<Value>, NativeError> {
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("load", "(Ljava/io/InputStream;)V") | ("load", "(Ljava/io/Reader;)V") => {
-                let Some(stream) = expect_ref(Self::argument(r, args, 0)?) else {
-                    return Ok(Some(Value::Void));
-                };
-                let Some((bytes, index)) = self.resource_streams.get_mut(stream) else {
-                    return Ok(Some(Value::Void));
+                // Only a host resource stream has bytes the host can parse.
+                // Any other stream (a file the jar opened, a null) would load
+                // entries the host never sees, so the call is counted rather
+                // than answered as an empty load.
+                let Some((bytes, index)) = expect_ref(Self::argument(r, args, 0)?)
+                    .and_then(|stream| self.resource_streams.get_mut(stream))
+                else {
+                    return self.unknown_host_call(r).map(Some);
                 };
                 let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
                 *index = bytes.len();
@@ -3183,7 +3239,14 @@ impl StdHost {
                 }
                 Ok(Some(marker))
             }
-            ("store", _) | ("storeToXML", _) | ("list", _) | ("save", _) => Ok(Some(Value::Void)),
+            // JDK 25's `store` writes a `#` line with `new Date().toString()`
+            // (the clock and the time zone) before the key-sorted entries,
+            // `list` walks the table in hash order, and `save` is `store` with
+            // the `IOException` swallowed. None of the text `store`,
+            // `storeToXML`, `list` or `save` writes reaches anything the host
+            // keeps, so each is counted: answering `void` would report a save
+            // that never happened.
+            ("store" | "storeToXML" | "list" | "save", _) => self.unknown_host_call(r).map(Some),
             _ => Ok(None),
         }
     }
@@ -3494,7 +3557,26 @@ impl StdHost {
         cancelled
     }
 
+    /// Remember which host map a view copy came from, so a stream over it
+    /// can notice writes to the map (`stream_pipeline.rs`).
+    fn note_view_copy(&mut self, copy: &Value, map: &Value) {
+        if let (Some(copy), Some(map)) = (expect_ref(copy), expect_ref(map))
+            && self.mutable_collections.contains_key(map)
+        {
+            self.view_copy_maps.insert(copy.clone(), map.clone());
+        }
+    }
+
     fn record(&mut self, r: &MethodRef, receiver: Option<&Value>, args: &[Value]) {
+        if java_immutable::is_mutator(&r.name)
+            && let Some(marker) = receiver.and_then(expect_ref)
+            && self
+                .mutable_collections
+                .contains_key(self.synchronized_target(marker))
+        {
+            let marker = self.synchronized_target(marker).to_owned();
+            *self.collection_writes.entry(marker).or_default() += 1;
+        }
         self.calls.push(r.clone());
         self.invocations.push(HostInvocation {
             method: r.clone(),
@@ -4029,12 +4111,26 @@ impl Host for StdHost {
 
     fn replace_mutable_collection(&mut self, value: &Value, values: Vec<Value>) {
         if let Some(marker) = expect_ref(value) {
-            self.mutable_collections.insert(marker.to_owned(), values);
+            let marker = self.synchronized_target(marker).to_owned();
+            *self.collection_writes.entry(marker.clone()).or_default() += 1;
+            self.mutable_collections.insert(marker, values);
         }
     }
 
     fn empty_mutable_collection(&mut self, kind: &str) -> Option<Value> {
         Some(self.empty_collection(kind))
+    }
+
+    fn unmodifiable_list(&mut self, values: Vec<Value>) -> Option<Value> {
+        Some(self.unmodifiable_values("list", values))
+    }
+
+    fn collection_writes(&self, marker: &str) -> u64 {
+        self.collection_writes.get(marker).copied().unwrap_or(0)
+    }
+
+    fn view_copy_map(&self, marker: &str) -> Option<String> {
+        self.view_copy_maps.get(marker).cloned()
     }
 
     fn payload_type_id(&self, marker: &str) -> Option<String> {
@@ -4290,6 +4386,10 @@ impl Host for StdHost {
         self.record(r, None, args);
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
+        }
+        // Guava's `Splitter`/`Joiner` and `Lists.newArrayList` (`guava_text.rs`).
+        if let Some(value) = self.guava_text(r, None, args) {
+            return value;
         }
         if let Some(value) = self.neoforge_loader_call(r, args) {
             return Ok(value);
@@ -4712,17 +4812,18 @@ impl Host for StdHost {
                 "toUnmodifiableSet",
                 "()Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some("collector/set".into()))),
+            // An unmodifiable list that rejects `null` (`List.of`'s
+            // `ListN`; Guava's `ImmutableList` is the host's same shape).
             (
                 "java/util/stream/Collectors",
                 "toUnmodifiableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/list".into()))),
-            // Guava's immutable collectors are the same list/set shapes.
-            (
+            )
+            | (
                 "com/google/common/collect/ImmutableList",
                 "toImmutableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/list".into()))),
+            ) => Ok(Value::Ref(Some("collector/unmodifiable-list".into()))),
             (
                 "com/google/common/collect/ImmutableSet",
                 "toImmutableSet",
@@ -4761,9 +4862,11 @@ impl Host for StdHost {
                 "joining",
                 "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some(format!(
+                // `joining(delimiter, prefix, suffix)`; the payload is
+                // prefix, delimiter, suffix.
                 "collector/joining/{}\u{1f}{}\u{1f}{}",
-                expect_string(Self::argument(r, args, 0)?),
                 expect_string(Self::argument(r, args, 1)?),
+                expect_string(Self::argument(r, args, 0)?),
                 expect_string(Self::argument(r, args, 2)?)
             )))),
             ("java/util/List", "of", descriptor) if descriptor.ends_with("Ljava/util/List;") => {
@@ -4798,6 +4901,9 @@ impl Host for StdHost {
                 "singletonMap",
                 "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;",
             ) => Ok(collection_value("map", args)),
+            ("java/util/Collections", name, _) if name.starts_with("synchronized") => self
+                .synchronized_view(r, args)
+                .unwrap_or_else(|| self.unknown_host_call(r)),
             ("java/util/Collections", "unmodifiableList", "(Ljava/util/List;)Ljava/util/List;")
             | ("java/util/Collections", "unmodifiableSet", "(Ljava/util/Set;)Ljava/util/Set;")
             | ("java/util/Collections", "unmodifiableMap", "(Ljava/util/Map;)Ljava/util/Map;") => {
@@ -5404,6 +5510,9 @@ impl Host for StdHost {
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
         }
+        if let Some(value) = self.guava_text(r, Some(receiver), args) {
+            return value;
+        }
         // The loader's own objects: `FMLPaths.get`, `Dist` and mod containers.
         if let Some(value) = self.neoforge_loader_instance(r, receiver, args) {
             return Ok(value);
@@ -5411,6 +5520,11 @@ impl Host for StdHost {
         // The loading stages' event objects (`neoforge_lifecycle.rs`).
         if let Some(value) = self.neoforge_lifecycle_instance(r, receiver, args) {
             return Ok(value);
+        }
+        // A synchronized view runs every call on what it wraps
+        // (`synchronized_views.rs`).
+        if let Some(wrapped) = self.synchronized_receiver(receiver) {
+            return self.invoke_instance(r, &wrapped, args);
         }
         // `MixinEnvironment#getSide` and its side constants (`mixin_plugins.rs`).
         if let Some(value) = self.mixin_platform_instance(r, receiver) {
@@ -5518,17 +5632,40 @@ impl Host for StdHost {
             let marker = expect_ref(receiver)
                 .ok_or_else(|| NativeError::Metadata("malformed Throwable marker".into()))?;
             if r.name == "<init>" {
-                let message = args.first().and_then(|value| match value {
-                    Value::Ref(Some(text)) => Some(text.clone()),
-                    Value::Ref(None) => None,
-                    _ => None,
-                });
-                let cause = args.iter().find_map(|value| match value {
-                    Value::Ref(Some(value)) if is_throwable_marker(value) => {
-                        Some(Value::Ref(Some(value.clone())))
-                    }
-                    _ => None,
-                });
+                // The cause is the `Throwable` parameter, whatever class the
+                // argument is (a jar exception's name need not end in
+                // `Exception`); `Throwable(Throwable cause)`'s message is
+                // `cause.toString()`, `null` for a null cause.
+                let parameters = descriptor_arguments(&r.descriptor);
+                let cause = parameters
+                    .iter()
+                    .position(|parameter| parameter == "Ljava/lang/Throwable;")
+                    .and_then(|index| args.get(index))
+                    .filter(|value| **value != Value::Ref(None))
+                    .cloned();
+                let message = if r.descriptor == "(Ljava/lang/Throwable;)V" {
+                    cause.as_ref().and_then(expect_ref).map(|cause| {
+                        let class = cause
+                            .split_once('#')
+                            .map_or(cause.as_str(), |(class, _)| class);
+                        let name = class.replace('/', ".");
+                        match self.throwable_messages.get(cause).cloned().flatten() {
+                            Some(message) => format!("{name}: {message}"),
+                            None => name,
+                        }
+                    })
+                } else {
+                    args.first().and_then(|value| match value {
+                        Value::Ref(Some(text))
+                            if parameters
+                                .first()
+                                .is_none_or(|p| p != "Ljava/lang/Throwable;") =>
+                        {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                };
                 self.throwable_messages.insert(marker.clone(), message);
                 self.throwable_causes.insert(marker.clone(), cause);
                 return Ok(Value::Void);
@@ -5558,9 +5695,10 @@ impl Host for StdHost {
                     let class = marker
                         .split_once('#')
                         .map_or(marker.as_str(), |(class, _)| class);
-                    let class = class.rsplit('/').next().unwrap_or(class);
+                    // `getClass().getName()`: the binary name, package included.
+                    let class = class.replace('/', ".");
                     let Some(Some(message)) = self.throwable_messages.get(marker) else {
-                        return Ok(Value::Ref(Some(class.to_owned())));
+                        return Ok(Value::Ref(Some(class)));
                     };
                     return Ok(Value::Ref(Some(format!("{class}: {message}"))));
                 }
@@ -7219,7 +7357,9 @@ impl Host for StdHost {
                         Ok(map_entry_value(&key, &value))
                     })
                     .collect::<Result<Vec<_>, NativeError>>()?;
-                Ok(collection_value("set", &entries))
+                let copy = collection_value("set", &entries);
+                self.note_view_copy(&copy, receiver);
+                Ok(copy)
             }
             // `ConcurrentHashMap.keySet()` declares its `KeySetView`; the
             // snapshot is the same key set.
@@ -7235,7 +7375,9 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| parse_collection_value(&pair[0]))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(collection_value("set", &keys))
+                let copy = collection_value("set", &keys);
+                self.note_view_copy(&copy, receiver);
+                Ok(copy)
             }
             (owner, "values", "()Ljava/util/Collection;") if is_map_owner(owner) => {
                 let values = host_collection_values(self, receiver)?;
@@ -7245,7 +7387,9 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| parse_collection_value(&pair[1]))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(collection_value("list", &values))
+                let copy = collection_value("list", &values);
+                self.note_view_copy(&copy, receiver);
+                Ok(copy)
             }
             (owner, "toString", "()Ljava/lang/String;") if is_collection_owner(owner) => {
                 // A jar subclass's marker names its own class; the JDK owner
@@ -9378,42 +9522,6 @@ fn java_value_text(value: &Value, desc: &str) -> String {
         }
         Value::Ref(None) => "null".to_owned(),
         Value::Void => String::new(),
-    }
-}
-
-/// Java's component hash for a record's generated `hashCode`.
-///
-/// `Boolean.hashCode` is 1231/1237, a `char` is its code unit, a `long` folds
-/// its halves, a `float`/`double` uses the bit pattern `Float`/`Double` hash
-/// with, and a reference is the value's own `hashCode` — a string marker keeps
-/// `String.hashCode`, an object marker its identity text.
-fn java_value_hash(value: &Value, desc: &str) -> i32 {
-    match (value, desc) {
-        (Value::Int(value), "Z") => {
-            if *value != 0 {
-                1231
-            } else {
-                1237
-            }
-        }
-        (Value::Int(value), _) => *value,
-        (Value::Long(value), _) => (*value ^ ((*value as u64) >> 32) as i64) as i32,
-        (Value::Float(value), "F") => java_float_bits(*value) as i32,
-        (Value::Float(value), _) => java_double_bits(*value) as i32,
-        (Value::Ref(Some(value)), _) => stable_hash(value),
-        _ => 0,
-    }
-}
-
-/// Value equality for a record's generated `equals`: references compare by
-/// their marker (identity for objects, text for strings) and `NaN` compares
-/// equal to `NaN` as `Double.equals` does.
-fn java_values_equal(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Float(left), Value::Float(right)) => {
-            java_double_bits(*left) == java_double_bits(*right)
-        }
-        _ => left == right,
     }
 }
 
@@ -12586,6 +12694,9 @@ pub struct LinkedClassTable {
     /// path, it only answers what a supplied jar declared.
     services: BTreeMap<String, Vec<String>>,
     providers: usize,
+    /// Each linked jar's resources by name, with the marker the host answers
+    /// for them (`linked_resources.rs`).
+    resources: BTreeMap<String, (String, Vec<u8>)>,
 }
 
 impl LinkedClassTable {
@@ -12613,6 +12724,7 @@ impl LinkedClassTable {
         jar: &NativeJar,
     ) -> Result<usize, NativeError> {
         let added = self.link_classes(id, jar.classes.values().cloned())?;
+        self.link_resources(jar);
         self.link_services(jar);
         Ok(added)
     }
@@ -19391,8 +19503,11 @@ impl<H: Host> Runtime<'_, H> {
             // so this comes before the receiver split below.
             if callback.target.name == "<init>" {
                 let object = self.new_object(&callback.target.owner);
-                self.host
-                    .invoke_instance(&callback.target, &object, &values)?;
+                // `String::new` is counted (`string_constructors.rs`).
+                if string_constructors::count(self, &callback.target)?.is_none() {
+                    self.host
+                        .invoke_instance(&callback.target, &object, &values)?;
+                }
                 return Ok(Some(object));
             }
             let Some((receiver, rest)) = values.split_first() else {
@@ -19688,14 +19803,39 @@ impl<H: Host> Runtime<'_, H> {
     /// sibling jars the host linked. This keeps reflection useful for
     /// bootstrap code without permitting arbitrary classpath or filesystem
     /// loading: a class neither source declares still answers `null`.
-    fn class_for_name(&self, args: &[Value]) -> Result<Value, NativeError> {
-        let binary = expect_string(
+    /// `Class.forName`, as JDK 25 runs it: `forName(String)` loads and
+    /// **initializes** the class (`forName0(name, true, ..)`), so its static
+    /// initializer runs here, at the call, and a failure in it surfaces as the
+    /// `ExceptionInInitializerError` it is. `forName(String, boolean,
+    /// ClassLoader)` initializes only when asked; `forName(Module, String)`
+    /// never does, and takes the name as its second argument. night-config's
+    /// `FormatDetector.<clinit>` relies on the first: it `forName`s
+    /// `TomlFormat`, whose own `<clinit>` registers the `toml` extension.
+    fn class_for_name(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
+        let module_overload = r.descriptor.starts_with("(Ljava/lang/Module;");
+        let name = if module_overload {
+            args.get(1)
+        } else {
             args.first()
-                .ok_or_else(|| NativeError::Metadata("Class.forName needs a class name".into()))?,
+        };
+        let binary = expect_string(
+            name.ok_or_else(|| NativeError::Metadata("Class.forName needs a class name".into()))?,
         );
         let internal = binary.replace('.', "/");
-        if self.has_class(&internal)
-            || library_dispatch::jdk_class_exists(&internal)
+        if self.has_class(&internal) {
+            let initialize = match r.descriptor.as_str() {
+                "(Ljava/lang/String;)Ljava/lang/Class;" => true,
+                "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;" => {
+                    !matches!(args.get(1), Some(Value::Int(0)))
+                }
+                _ => false,
+            };
+            if initialize {
+                self.ensure_initialized(&internal)?;
+            }
+            return Ok(Value::Ref(Some(internal)));
+        }
+        if library_dispatch::jdk_class_exists(&internal)
             || self.host.platform_class_present(&internal)
         {
             return Ok(Value::Ref(Some(internal)));
@@ -19747,6 +19887,9 @@ impl<H: Host> Runtime<'_, H> {
                 "java/lang/Iterable",
             ],
             "map" => &["java/util/Map"],
+            // A host map entry (`HashMap`/`TreeMap` node, `Map.entry`): every
+            // one implements only `Map.Entry`.
+            "map-entry" => &["java/util/Map$Entry"],
             _ => &[],
         };
         if collection_kinds.contains(&wanted) {
@@ -20233,6 +20376,9 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_reflect_simple_name(r, receiver)? {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.invoke_reflect_enclosing_class(r, receiver)? {
             return Ok(Some(value));
         }
         // `getSuperclass` walks the jar's own hierarchy: a config scanner that
@@ -22176,100 +22322,6 @@ impl<H: Host> Runtime<'_, H> {
             .map(|ordinal| Value::Int(ordinal as i32)))
     }
 
-    /// Answer a record's generated `toString`/`equals`/`hashCode` call site.
-    ///
-    /// `java.lang.runtime.ObjectMethods.bootstrap` is the invokedynamic
-    /// bootstrap javac emits for a record's three object methods. The
-    /// interpreter cannot run a bootstrap, so it answers the pattern the
-    /// components were declared with: `Record[x=.., y=..]`, component-wise
-    /// equality and the JVM's 31-based hash.
-    fn invoke_record_object_method(
-        &mut self,
-        file: &ClassFile,
-        index: u16,
-        class: &str,
-        name: &str,
-        captured: &[Value],
-    ) -> Result<Option<Value>, NativeError> {
-        let Some(components) = file.record_component_names(index) else {
-            return Ok(None);
-        };
-        let Some(receiver) = captured.first() else {
-            return Ok(None);
-        };
-        match (name, captured.len()) {
-            ("toString", 1) => {
-                let mut text = String::new();
-                // `getSimpleName()`: `Point`, not `Probe$Point`.
-                match file.nested_simple_name() {
-                    Some(Some(simple)) => text.push_str(&simple),
-                    _ => text.push_str(class.rsplit('/').next().unwrap_or(class)),
-                }
-                text.push('[');
-                for (position, component) in components.iter().enumerate() {
-                    if position > 0 {
-                        text.push_str(", ");
-                    }
-                    let (descriptor, value) =
-                        self.record_component(file, class, component, receiver)?;
-                    text.push_str(component);
-                    text.push('=');
-                    text.push_str(&self.value_of_text(&value, &descriptor, class, "toString")?);
-                }
-                text.push(']');
-                Ok(Some(Value::Ref(Some(text))))
-            }
-            ("hashCode", 1) => {
-                let mut hash = 1_i32;
-                for component in &components {
-                    let (descriptor, value) =
-                        self.record_component(file, class, component, receiver)?;
-                    hash = hash
-                        .wrapping_mul(31)
-                        .wrapping_add(java_value_hash(&value, &descriptor));
-                }
-                Ok(Some(Value::Int(hash)))
-            }
-            ("equals", 2) => {
-                let other = captured.get(1).cloned().unwrap_or(Value::Ref(None));
-                let same_record = expect_ref(&other)
-                    .and_then(|marker| marker.split_once('#'))
-                    .is_some_and(|(owner, _)| owner == class);
-                if !same_record {
-                    return Ok(Some(Value::Int(0)));
-                }
-                for component in &components {
-                    let (_, left) = self.record_component(file, class, component, receiver)?;
-                    let (_, right) = self.record_component(file, class, component, &other)?;
-                    if !java_values_equal(&left, &right) {
-                        return Ok(Some(Value::Int(0)));
-                    }
-                }
-                Ok(Some(Value::Int(1)))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// One record component's value and declared descriptor, read through the
-    /// accessor javac generated for it.
-    fn record_component(
-        &mut self,
-        file: &ClassFile,
-        class: &str,
-        component: &str,
-        receiver: &Value,
-    ) -> Result<(String, Value), NativeError> {
-        let descriptor = file
-            .methods
-            .iter()
-            .find(|method| method.name == component && arg_count(&method.descriptor) == 0)
-            .map(|method| method.descriptor.clone())
-            .unwrap_or_else(|| "Ljava/lang/Object;".into());
-        let value = self.invoke(class, component, &descriptor, Some(receiver.clone()), &[])?;
-        Ok((descriptor, value))
-    }
-
     /// `Object.clone` on a runtime-owned array.
     ///
     /// `Enum.values()` is the visible caller: it clones the `$VALUES` array
@@ -22459,6 +22511,10 @@ impl<H: Host> Runtime<'_, H> {
     /// The throwable value a Java handler receives for a throw the host or a
     /// nested frame raised, tagged with the message the throw carries.
     fn caught_throwable(&mut self, class: &str, message: Option<String>) -> Value {
+        // The object a jar frame threw, when this is its throw.
+        if let Some(value) = jar_throwables::take_in_flight(class, &message) {
+            return value;
+        }
         let value = self.new_object(class);
         if let Some(marker) = expect_ref(&value) {
             self.host.record_throwable(marker, message);
@@ -22574,7 +22630,8 @@ impl<H: Host> Runtime<'_, H> {
         }
         let values = self.stream_output(receiver, &r.name)?;
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
-            ("toList", "()Ljava/util/List;") => collection_value("list", &values),
+            // `Stream.toList()`: an unmodifiable `ListN` that allows `null`.
+            ("toList", "()Ljava/util/List;") => self.unmodifiable_list(values),
             ("toArray", "()[Ljava/lang/Object;") => {
                 let marker = self.new_array(class, method);
                 self.arrays.insert(marker.clone(), values);
@@ -22585,7 +22642,18 @@ impl<H: Host> Runtime<'_, H> {
                     NativeError::Metadata("Stream.collect needs a collector".into())
                 })?;
                 match collector.as_str() {
-                    "collector/list" => collection_value("list", &values),
+                    // `ArrayList::new`, `List::add`: a list of its own.
+                    "collector/list" => self.new_array_list(values),
+                    "collector/unmodifiable-list" => {
+                        if values.contains(&Value::Ref(None)) {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/NullPointerException".into(),
+                                message: None,
+                                frame: None,
+                            });
+                        }
+                        self.unmodifiable_list(values)
+                    }
                     "collector/set" => collection_value("set", &values),
                     collector if collector.starts_with("collector/joining/") => {
                         let payload = collector
@@ -23912,12 +23980,24 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         // FML's `InterModComms` (`neoforge_imc.rs`).
                         value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, string_constructors::count(self, &r))
+                    {
+                        // `new String(...)` builds no text yet: counted.
+                        value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
                         self.count_unmodelled_jar_operand(&r, op, receiver.as_ref(), &args)
                     ) {
                         // A model handed a jar object it has no state for
                         // counts it instead of answering (`jar_operands.rs`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_object_methods(&r, op, receiver.as_ref(), &args)
+                    ) {
+                        // `equals`/`hashCode` as the JVM runs them
+                        // (`object_methods.rs`).
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
@@ -24017,6 +24097,11 @@ impl<H: Host> Runtime<'_, H> {
                         self.invoke_mod_config_spec(&r, receiver.as_ref(), &args)
                     ) {
                         value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_commons_pair(&r, receiver.as_ref(), &args))
+                    {
+                        // commons-lang3 `Pair` (`commons_pair.rs`).
+                        value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
                         self.invoke_field_access(&r, receiver.as_ref(), &args, class)
@@ -24045,6 +24130,11 @@ impl<H: Host> Runtime<'_, H> {
                         self.invoke_collection_callback(&r, receiver.as_ref(), &args)
                     ) {
                         value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_optionull(&r, &args))
+                    {
+                        // The game's pure `Optionull` helper (`optionull.rs`).
+                        value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
                         self.invoke_server_facade(&r, receiver.as_ref(), &args)
@@ -24063,7 +24153,7 @@ impl<H: Host> Runtime<'_, H> {
                         && r.name == "forName"
                         && r.descriptor.ends_with(")Ljava/lang/Class;")
                     {
-                        invoke_or_catch!(at, self.class_for_name(&args))
+                        invoke_or_catch!(at, self.class_for_name(&r, &args))
                     } else if let Some(value) = self.invoke_class_interfaces(&r, receiver.as_ref())
                     {
                         value
@@ -24369,9 +24459,10 @@ impl<H: Host> Runtime<'_, H> {
                         continue;
                     }
                     let site_name = file.invoke_dynamic_name(index)?;
-                    if let Some(value) =
-                        self.invoke_record_object_method(file, index, class, &site_name, &captured)?
-                    {
+                    if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_record_object_method(file, index, class, &site_name, &captured)
+                    ) {
                         if return_desc(&descriptor) != "V" {
                             stack.push(value);
                         }
@@ -24402,7 +24493,9 @@ impl<H: Host> Runtime<'_, H> {
                     if thrown == Value::Ref(None) {
                         invoke_or_catch!(at, Err(null_checks::throw_null()))
                     }
-                    let thrown_class = thrown_class(&thrown);
+                    // A jar class extending a JDK exception is its own class
+                    // (`jar_throwables.rs`).
+                    let thrown_class = self.throwable_class(&thrown);
                     if let Some(handler) =
                         self.exception_handler(file, method, desc, at, &thrown_class)?
                     {
@@ -24411,9 +24504,12 @@ impl<H: Host> Runtime<'_, H> {
                         pc = handler;
                         continue;
                     }
+                    let message = self.thrown_text(&thrown);
+                    // The handler that catches this throw gets this object.
+                    jar_throwables::note_in_flight(&thrown_class, &message, &thrown);
                     return Err(NativeError::UncaughtException {
                         class: thrown_class,
-                        message: thrown_message(&thrown, self.host),
+                        message,
                         frame: Some(format!("{class}#{method} +{at}")),
                     });
                 }
@@ -33962,6 +34058,122 @@ mandatory = true
     }
 
     #[test]
+    fn properties_writes_and_unreadable_loads_are_counted() {
+        // A jar that saves its config with `props.store(out, ..)` and reads it
+        // back must see the call counted, not a silent `void` (#4 of the
+        // 2026-11-13 census: the four writers were no-ops).
+        let mut host = StdHost::new();
+        let properties = host
+            .invoke(
+                &MethodRef {
+                    owner: "java/lang/System".into(),
+                    name: "getProperties".into(),
+                    descriptor: "()Ljava/util/Properties;".into(),
+                },
+                &[],
+            )
+            .unwrap();
+        let out = Value::Ref(Some("jar-object/java/io/FileOutputStream/0".into()));
+        let comment = Value::Ref(Some("settings".into()));
+        let writes = [
+            ("store", "(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+            ("store", "(Ljava/io/Writer;Ljava/lang/String;)V"),
+            ("storeToXML", "(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+            ("save", "(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+        ];
+        for (name, descriptor) in writes {
+            let call = MethodRef {
+                owner: "java/util/Properties".into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            };
+            host.invoke_instance(&call, &properties, &[out.clone(), comment.clone()])
+                .unwrap();
+        }
+        let list = MethodRef {
+            owner: "java/util/Properties".into(),
+            name: "list".into(),
+            descriptor: "(Ljava/io/PrintStream;)V".into(),
+        };
+        host.invoke_instance(&list, &properties, std::slice::from_ref(&out))
+            .unwrap();
+        // A stream the host holds no bytes for: the entries it would load are
+        // unknown, so the load is counted too.
+        let load = MethodRef {
+            owner: "java/util/Properties".into(),
+            name: "load".into(),
+            descriptor: "(Ljava/io/InputStream;)V".into(),
+        };
+        host.invoke_instance(&load, &properties, &[out]).unwrap();
+        let counted = host.unknown_host_calls();
+        let count = |key: &str| {
+            counted
+                .iter()
+                .find(|(method, _)| method == key)
+                .map_or(0, |(_, count)| *count)
+        };
+        assert_eq!(
+            count("java/util/Properties#store(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+            1
+        );
+        assert_eq!(
+            count("java/util/Properties#store(Ljava/io/Writer;Ljava/lang/String;)V"),
+            1
+        );
+        assert_eq!(
+            count("java/util/Properties#storeToXML(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+            1
+        );
+        assert_eq!(
+            count("java/util/Properties#save(Ljava/io/OutputStream;Ljava/lang/String;)V"),
+            1
+        );
+        assert_eq!(
+            count("java/util/Properties#list(Ljava/io/PrintStream;)V"),
+            1
+        );
+        assert_eq!(
+            count("java/util/Properties#load(Ljava/io/InputStream;)V"),
+            1
+        );
+        assert_eq!(host.unknown_host_call_count(), 6);
+    }
+
+    #[test]
+    fn properties_load_from_a_resource_stream_still_answers() {
+        let mut host =
+            StdHost::new().with_resource_bytes("mod.properties", b"mod.version=1.2.0\n".to_vec());
+        let stream = host.resource_stream("mod.properties");
+        let properties = host
+            .invoke(
+                &MethodRef {
+                    owner: "java/lang/System".into(),
+                    name: "getProperties".into(),
+                    descriptor: "()Ljava/util/Properties;".into(),
+                },
+                &[],
+            )
+            .unwrap();
+        let load = MethodRef {
+            owner: "java/util/Properties".into(),
+            name: "load".into(),
+            descriptor: "(Ljava/io/InputStream;)V".into(),
+        };
+        host.invoke_instance(&load, &properties, &[stream]).unwrap();
+        let get = MethodRef {
+            owner: "java/util/Properties".into(),
+            name: "getProperty".into(),
+            descriptor: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        };
+        assert_eq!(
+            host.invoke_instance(&get, &properties, &[Value::Ref(Some("mod.version".into()))])
+                .unwrap(),
+            Value::Ref(Some("1.2.0".into()))
+        );
+        assert_eq!(host.unknown_host_call_count(), 0);
+    }
+
+    #[test]
     fn standard_host_uses_seeded_current_time_millis() {
         let mut host = StdHost::new().with_current_time_millis(1_700_000_000);
         let current_time_millis = MethodRef {
@@ -36068,45 +36280,47 @@ mandatory = true
             )
             .unwrap()
             .unwrap();
+        // A real list now (`Stream.toList()`'s `ListN`, `Collectors.toList()`'s
+        // `ArrayList`): its elements are what the stream yielded.
+        let listed = runtime
+            .invoke_stream(
+                &MethodRef {
+                    owner: "java/util/stream/Stream".into(),
+                    name: "toList".into(),
+                    descriptor: "()Ljava/util/List;".into(),
+                },
+                Some(&distinct),
+                &[],
+                "demo/Stream",
+                "probe",
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            runtime
-                .invoke_stream(
-                    &MethodRef {
-                        owner: "java/util/stream/Stream".into(),
-                        name: "toList".into(),
-                        descriptor: "()Ljava/util/List;".into(),
-                    },
-                    Some(&distinct),
-                    &[],
-                    "demo/Stream",
-                    "probe",
-                )
-                .unwrap(),
-            Some(collection_value(
-                "list",
-                &[Value::Ref(Some("alpha".into())), Value::Int(2)],
-            ))
+            runtime_collection_values(runtime.host, &listed).unwrap(),
+            ["ralpha", "i2"]
         );
         let collector = Value::Ref(Some("collector/list".into()));
         let distinct = distinct_stream(&mut runtime);
+        // A real list now (`Stream.toList()`'s `ListN`, `Collectors.toList()`'s
+        // `ArrayList`): its elements are what the stream yielded.
+        let listed = runtime
+            .invoke_stream(
+                &MethodRef {
+                    owner: "java/util/stream/Stream".into(),
+                    name: "collect".into(),
+                    descriptor: "(Ljava/util/stream/Collector;)Ljava/lang/Object;".into(),
+                },
+                Some(&distinct),
+                std::slice::from_ref(&collector),
+                "demo/Stream",
+                "probe",
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            runtime
-                .invoke_stream(
-                    &MethodRef {
-                        owner: "java/util/stream/Stream".into(),
-                        name: "collect".into(),
-                        descriptor: "(Ljava/util/stream/Collector;)Ljava/lang/Object;".into(),
-                    },
-                    Some(&distinct),
-                    std::slice::from_ref(&collector),
-                    "demo/Stream",
-                    "probe",
-                )
-                .unwrap(),
-            Some(collection_value(
-                "list",
-                &[Value::Ref(Some("alpha".into())), Value::Int(2)],
-            ))
+            runtime_collection_values(runtime.host, &listed).unwrap(),
+            ["ralpha", "i2"]
         );
         let distinct = distinct_stream(&mut runtime);
         let array = runtime
@@ -36352,14 +36566,28 @@ mandatory = true
         );
         assert_eq!(
             runtime
-                .class_for_name(&[Value::Ref(Some("demo.Reflective".into()))])
+                .class_for_name(
+                    &MethodRef {
+                        owner: "java/lang/Class".into(),
+                        name: "forName".into(),
+                        descriptor: "(Ljava/lang/String;)Ljava/lang/Class;".into(),
+                    },
+                    &[Value::Ref(Some("demo.Reflective".into()))]
+                )
                 .unwrap(),
             Value::Ref(Some("demo/Reflective".into()))
         );
         // The JVM throws for an absent class; a platform probe catches the
         // exception and tries its next loader.
         let missing = runtime
-            .class_for_name(&[Value::Ref(Some("demo.Missing".into()))])
+            .class_for_name(
+                &MethodRef {
+                    owner: "java/lang/Class".into(),
+                    name: "forName".into(),
+                    descriptor: "(Ljava/lang/String;)Ljava/lang/Class;".into(),
+                },
+                &[Value::Ref(Some("demo.Missing".into()))],
+            )
             .unwrap_err();
         assert!(matches!(
             missing,
@@ -37638,7 +37866,8 @@ mandatory = true
         };
         assert_eq!(
             host.invoke_instance(&to_string, &error, &[]).unwrap(),
-            Value::Ref(Some("IllegalStateException: bad state".into()))
+            // JDK 25: `getClass().getName() + ": " + message`, the binary name.
+            Value::Ref(Some("java.lang.IllegalStateException: bad state".into()))
         );
     }
 

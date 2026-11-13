@@ -317,6 +317,9 @@ impl<H: Host> Runtime<'_, H> {
         let Some(this) = receiver else {
             return Ok(None);
         };
+        if let Some(answer) = self.host_entry_equals(r, opcode, this, args)? {
+            return Ok(Some(answer));
+        }
         if let Some(class) =
             expect_ref(this).and_then(|marker| jvm_dispatch::constructed_object_class(marker))
             && INTERNAL.iter().any(|(internal, _, _)| *internal == class)
@@ -388,6 +391,13 @@ impl<H: Host> Runtime<'_, H> {
             });
         match owner {
             Some(owner) => self.run_skeleton_body(owner, r, this, args),
+            // `Object.equals`, which a private class that no skeleton gives
+            // an `equals` inherits (`values()`'s view, the iterators): identity.
+            None if (r.name.as_str(), r.descriptor.as_str())
+                == ("equals", "(Ljava/lang/Object;)Z") =>
+            {
+                Ok(Some(boolean(args.first() == Some(this))))
+            }
             None => Ok(None),
         }
     }
@@ -489,7 +499,70 @@ impl<H: Host> Runtime<'_, H> {
         };
         stack_walk::leave();
         self.depth -= 1;
-        result.map(Some)
+        match result {
+            // A host answer the body needed was counted and null: the body
+            // stops with its own neutral answer (`jdk_call::ABANDONED`).
+            Err(NativeError::Metadata(message)) if message == jdk_call::ABANDONED => {
+                Ok(Some(Value::default_for(&r.descriptor)))
+            }
+            other => other.map(Some),
+        }
+    }
+
+    /// `hostEntry.equals(o)` where `o` is not a host value: the JDK's entry
+    /// classes (`HashMap.Node`, `KeyValueHolder`, `TreeMap.Entry`) answer
+    /// `o instanceof Map.Entry e && eq(key, e.getKey()) && eq(value,
+    /// e.getValue())`, reading a jar entry's own accessors. The host compares
+    /// markers and would answer `false` without asking the jar.
+    fn host_entry_equals(
+        &mut self,
+        r: &MethodRef,
+        opcode: u8,
+        this: &Value,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if !matches!(opcode, 0xb6 | 0xb9)
+            || (r.name.as_str(), r.descriptor.as_str()) != ("equals", "(Ljava/lang/Object;)Z")
+            || !expect_ref(this).is_some_and(|marker| marker.starts_with("map-entry/"))
+        {
+            return Ok(None);
+        }
+        let other = args.first().cloned().unwrap_or(Value::Ref(None));
+        let Some(class) =
+            expect_ref(&other).and_then(|marker| jvm_dispatch::constructed_object_class(marker))
+        else {
+            return Ok(None);
+        };
+        if self.class(class).is_none() && !jar_operands::is_skeleton(class) {
+            return Ok(None);
+        }
+        if !self.java_instance_of(&other, "java/util/Map$Entry")? {
+            return Ok(Some(boolean(false)));
+        }
+        for part in ["getKey", "getValue"] {
+            let mine = self.call_virtual(
+                Site::Interface,
+                "java/util/Map$Entry",
+                part,
+                "()Ljava/lang/Object;",
+                this,
+                &[],
+            )?;
+            let theirs = self.call_virtual(
+                Site::Interface,
+                "java/util/Map$Entry",
+                part,
+                "()Ljava/lang/Object;",
+                &other,
+                &[],
+            )?;
+            let equal = mine == theirs
+                || (mine != Value::Ref(None) && self.virtual_equals(&mine, &theirs)?);
+            if !equal {
+                return Ok(Some(boolean(false)));
+            }
+        }
+        Ok(Some(boolean(true)))
     }
 
     // ---- calls a JDK body makes ----
@@ -537,7 +610,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// `a.equals(b)` (`invokevirtual Object.equals`).
-    fn java_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
+    fn virtual_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
         let answer = self.call_virtual(
             Site::Virtual,
             "java/lang/Object",
@@ -550,7 +623,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// `value.hashCode()` (`invokevirtual Object.hashCode`).
-    fn java_hash(&mut self, value: &Value) -> Result<i32, NativeError> {
+    fn virtual_hash(&mut self, value: &Value) -> Result<i32, NativeError> {
         Ok(int_of(&self.call_virtual(
             Site::Virtual,
             "java/lang/Object",
@@ -562,7 +635,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// `String.valueOf(value)`, as `StringBuilder.append(Object)` prints it.
-    fn java_text(&mut self, value: &Value) -> Result<String, NativeError> {
+    fn virtual_text(&mut self, value: &Value) -> Result<String, NativeError> {
         let text = self.call_static(
             "java/lang/String",
             "valueOf",

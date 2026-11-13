@@ -110,6 +110,11 @@ impl StdHost {
         Value::Ref(Some(marker))
     }
 
+    /// [`Self::unmodifiable`] for the stream terminals (`Host::unmodifiable_list`).
+    pub(crate) fn unmodifiable_values(&mut self, kind: &str, values: Vec<Value>) -> Value {
+        self.unmodifiable(kind, values)
+    }
+
     /// The elements a collection argument holds, parsed.
     fn elements(&self, value: &Value) -> Result<Vec<Value>, NativeError> {
         crate::runtime::host_collection_values(self, value)?
@@ -144,10 +149,14 @@ impl StdHost {
                     .next()
                     .unwrap_or_default()
                     .to_lowercase();
-                return Some(
-                    self.elements(&copy)
-                        .map(|values| self.unmodifiable(&kind, values)),
-                );
+                let null_hostile = kind == "list";
+                return Some(self.elements(&copy).map(|values| {
+                    let list = self.unmodifiable(&kind, values);
+                    if null_hostile {
+                        self.mark_null_hostile(&list);
+                    }
+                    list
+                }));
             }
             (
                 "com/google/common/collect/ImmutableList"
@@ -204,7 +213,19 @@ impl StdHost {
                 )));
             }
         }
-        Some(Ok(self.unmodifiable(kind, args.to_vec())))
+        let collection = self.unmodifiable(kind, args.to_vec());
+        if r.owner == "java/util/List" {
+            self.mark_null_hostile(&collection);
+        }
+        Some(Ok(collection))
+    }
+
+    /// Remember a JDK `ListN`/`List12`: its `indexOf`, `lastIndexOf` and
+    /// `contains` call `Objects.requireNonNull(o)`.
+    fn mark_null_hostile(&mut self, list: &Value) {
+        if let Some(marker) = expect_ref(list) {
+            self.null_hostile_lists.insert(marker.clone());
+        }
     }
 
     /// The elements a view reads: its source's current ones.
@@ -226,6 +247,22 @@ impl StdHost {
         if MUTATORS.contains(&r.name.as_str()) && self.unmodifiable_collections.contains_key(marker)
         {
             return Some(Err(throw("java/lang/UnsupportedOperationException", None)));
+        }
+        // `ListN`/`List12`'s `indexOf`/`lastIndexOf`/`contains` (and
+        // `containsAll`, through `contains`) start with
+        // `Objects.requireNonNull(o)`: a message-less NPE for `null`.
+        if self.null_hostile_lists.contains(marker) {
+            let null_argument = match (r.name.as_str(), r.descriptor.as_str()) {
+                ("indexOf" | "lastIndexOf", "(Ljava/lang/Object;)I")
+                | ("contains", "(Ljava/lang/Object;)Z") => args.first() == Some(&Value::Ref(None)),
+                ("containsAll", "(Ljava/util/Collection;)Z") => self
+                    .elements(args.first()?)
+                    .is_ok_and(|values| values.contains(&Value::Ref(None))),
+                _ => false,
+            };
+            if null_argument {
+                return Some(Err(throw("java/lang/NullPointerException", None)));
+            }
         }
         if (r.name.as_str(), r.descriptor.as_str()) != ("equals", "(Ljava/lang/Object;)Z") {
             return None;
