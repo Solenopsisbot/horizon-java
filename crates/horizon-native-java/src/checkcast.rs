@@ -641,11 +641,15 @@ impl<H: Host> host_ref::ClassHierarchy for Runtime<'_, H> {
         }
     }
 
-    /// A held class's own `ACC_INTERFACE`; Java 25's table for a JDK class.
+    /// A held class's own `ACC_INTERFACE`; a class a host kind owns, its class side's answer
+    /// (`host_ref::ClassSide`); Java 25's table for a JDK class.
     fn is_interface(&self, class: &str) -> Option<bool> {
         match self.class(class) {
             Some(file) => class_access(file).map(|access| access & ACC_INTERFACE != 0),
-            None => host_ref::JdkHierarchy.is_interface(class),
+            None => HostKind::owning_class(class)
+                .and_then(HostKind::class_side)
+                .and_then(|side| (side.is_interface)(class))
+                .or_else(|| host_ref::JdkHierarchy.is_interface(class)),
         }
     }
 }
