@@ -1135,6 +1135,10 @@ impl StdHost {
         if !self.client_environment() {
             return None;
         }
+        // A client registration event (`RegisterKeyMappingsEvent`...), as its firing names it.
+        if let Some(event) = crate::runtime::host_game_event::fired_event(receiver) {
+            return self.client_event_call(event.name(), r, args);
+        }
         let text = expect_ref(receiver)?.clone();
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
         // `NonNullList` is a `List`: the inventory's lists answer as one.
@@ -1221,9 +1225,6 @@ impl StdHost {
                 return None;
             }
             return Some(refuse());
-        }
-        if let Some(event) = text.strip_prefix("game-event/") {
-            return self.client_event_call(event, r, args);
         }
         if self.client.key_inits.contains_key(&text) {
             return self.key_mapping_call(&text, r, args);

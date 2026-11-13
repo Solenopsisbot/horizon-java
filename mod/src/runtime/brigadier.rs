@@ -1213,13 +1213,8 @@ impl StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
-        let text = expect_ref(receiver)?.clone();
         let name = r.name.as_str();
-        // The objects `new` made of permission and exception classes.
-        if name == "<init>" {
-            return self.brigadier_init(r, &text, args);
-        }
-        if text == "game-event/register_commands" {
+        if crate::runtime::host_game_event::fired_event(receiver) == Some(GameEvent::RegisterCommands) {
             return match name {
                 "getDispatcher" => Some(Ok(marker(DISPATCHER.into()))),
                 "getBuildContext" => Some(Ok(marker(BUILD_CONTEXT.into()))),
@@ -1230,6 +1225,11 @@ impl StdHost {
                 }
                 _ => None,
             };
+        }
+        let text = expect_ref(receiver)?.clone();
+        // The objects `new` made of permission and exception classes.
+        if name == "<init>" {
+            return self.brigadier_init(r, &text, args);
         }
         if let Some(answer) = self.permission_call(r, &text, args) {
             return Some(answer);

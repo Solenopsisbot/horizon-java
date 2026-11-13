@@ -193,6 +193,11 @@ pub enum HostKind {
     /// An event a host caller dispatches or posts: key its cancelled flag and
     /// name.
     PostedEvent,
+    /// The event a NeoForge/Forge game-event listener receives: key its class
+    /// (`host_game_event.rs`).
+    GameEvent,
+    /// The event a NeoForge loading stage posts: key its class and container.
+    LifecycleEvent,
 }
 
 /// How a kind's Java class follows from its key.
@@ -543,6 +548,22 @@ const KINDS: &[KindInfo] = &[
         canonical: never_canonical,
         methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
     },
+    KindInfo {
+        kind: HostKind::GameEvent,
+        tag: "gev",
+        class: ClassRule::FromKey(crate::runtime::host_game_event::game_event_class),
+        // Every firing builds a new event object.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_game_event::GAME_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::LifecycleEvent,
+        tag: "lev",
+        class: ClassRule::FromKey(crate::runtime::host_game_event::lifecycle_class),
+        // A stage posts one event per container.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_game_event::LIFECYCLE_EVENT,
+    },
 ];
 
 impl HostKind {
@@ -563,14 +584,18 @@ impl HostKind {
     /// `class instanceof wanted` for the class name of a fixed-class kind (a
     /// handle's `getClass()` handed to `Class.isAssignableFrom`, a class
     /// walk): the kind's row, as for a handle of it, since a fixed class's
-    /// supertypes do not depend on the key. `None` when `class` is no kind's
-    /// fixed class; `Some(None)` when the row cannot tell.
+    /// supertypes do not depend on the key. A NeoForge event class (a game or
+    /// loading-stage event's `getClass()`, `host_game_event.rs`) answers by
+    /// the event rows' rule. `None` when `class` is no kind's class;
+    /// `Some(None)` when the row cannot tell.
     pub(crate) fn class_instance_of(
         class: &str,
         wanted: &str,
         hierarchy: &dyn ClassHierarchy,
     ) -> Option<Option<bool>> {
-        let kind = Self::of_class(class)?;
+        let Some(kind) = Self::of_class(class) else {
+            return crate::runtime::host_game_event::event_class_instance_of(class, wanted, hierarchy);
+        };
         Some(HostRef::new(kind, "").instance_of(wanted, hierarchy))
     }
 
@@ -780,12 +805,30 @@ mod tests {
             "java/lang/Object",
         ] {
             assert_eq!(HostKind::of_class(class), None, "{class}");
+        }
+        // No kind's row answers for a declared type as its class. bus-8's `Event` is a NeoForge
+        // event class of its own (`host_game_event.rs`): it answers its own supertypes, never an
+        // interface it does not declare.
+        for class in [
+            "java/util/function/Supplier",
+            "net/neoforged/bus/api/ICancellableEvent",
+            "net/minecraftforge/eventbus/api/bus/EventBus",
+            "java/lang/Object",
+        ] {
             assert_eq!(
                 HostKind::class_instance_of(class, "java/lang/Object", &JdkHierarchy),
                 None,
                 "{class}"
             );
         }
+        assert_ne!(
+            HostKind::class_instance_of(
+                "net/neoforged/bus/api/Event",
+                "net/neoforged/bus/api/ICancellableEvent",
+                &JdkHierarchy
+            ),
+            Some(Some(true))
+        );
     }
 
     /// A kind's `instance_of` asks the hierarchy it is handed, so a family

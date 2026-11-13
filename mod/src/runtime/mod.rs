@@ -69,6 +69,7 @@ mod heap;
 mod hook_shapes;
 mod host_entry;
 mod host_events;
+mod host_game_event;
 mod host_list_iterator;
 mod host_optional;
 mod host_path;
@@ -4612,9 +4613,7 @@ impl Host for StdHost {
     /// The command façade's markers (a source, a node, a builder) answer
     /// `instanceof` for their Brigadier and vanilla types.
     fn host_instance_of(&self, marker: &str, wanted: &str) -> bool {
-        self.brigadier_instance_of(marker, wanted)
-            || self.mod_container_instance_of(marker, wanted)
-            || neoforge_lifecycle::instance_of(marker, wanted)
+        self.brigadier_instance_of(marker, wanted) || self.mod_container_instance_of(marker, wanted)
     }
 
     /// Read back what the bounded `Throwable.<init>` surface recorded, so an
