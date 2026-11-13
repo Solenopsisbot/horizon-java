@@ -2801,6 +2801,8 @@ pub struct StdHost {
     /// What each `DeferredRegister.register` recorded, by registration
     /// serial: a holder handle's key names its row (`host_registry.rs`).
     holder_rows: Vec<host_registry::HolderRow>,
+    /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
+    holder_binding: host_registry::Binding,
     mutable_collections: BTreeMap<String, Vec<Value>>,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
@@ -2975,6 +2977,7 @@ impl StdHost {
             neoforge_bus: neoforge_bus::BusState::default(),
             holders: BTreeMap::new(),
             holder_rows: Vec::new(),
+            holder_binding: host_registry::Binding::Construct,
             mutable_collections: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
@@ -6057,6 +6060,9 @@ impl Host for StdHost {
             return value;
         }
         if let Some(value) = dfu_pair::instance_call(r, receiver, args) {
+            return value;
+        }
+        if let Some(value) = self.holder_call(r, receiver) {
             return value;
         }
         if let Some(value) = fabric_registry::instance_call(self, r, receiver) {
@@ -9228,41 +9234,8 @@ impl Host for StdHost {
                 let register = expect_ref(receiver).map_or("", String::as_str);
                 Ok(collection_value("list", &self.register_holders(register)))
             }
-            // A holder's value (the host models registration as done) or, for
-            // a value no `DeferredRegister.register` holder holds, counted.
-            (
-                "net/neoforged/neoforge/registries/DeferredHolder",
-                "get" | "value",
-                "()Ljava/lang/Object;",
-            )
-            | ("net/minecraftforge/registries/RegistryObject", "get", "()Ljava/lang/Object;")
-            | (
-                "net/minecraftforge/registries/RegistryObject",
-                "orElse",
-                "(Ljava/lang/Object;)Ljava/lang/Object;",
-            )
-            | (
-                "net/minecraftforge/registries/RegistryObject",
-                "orElseGet",
-                "(Ljava/util/function/Supplier;)Ljava/lang/Object;",
-            )
-            | (
-                "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference",
-                "value",
-                "()Ljava/lang/Object;",
-            ) => match self.holder_value(receiver) {
-                Some(value) => Ok(value),
-                None => self.unknown_host_call(r),
-            },
-            (
-                "net/neoforged/neoforge/registries/DeferredHolder"
-                | "net/minecraftforge/registries/RegistryObject",
-                "getOptional",
-                "()Ljava/util/Optional;",
-            ) => match self.holder_value(receiver) {
-                Some(value) => Ok(optional_wrap(value)),
-                None => self.unknown_host_call(r),
-            },
+            // A holder's `get`/`value`/`isBound`/... are `holder_call`'s
+            // (`host_registry.rs`).
             (
                 "net/neoforged/neoforge/registries/DeferredHolder"
                 | "net/minecraftforge/registries/RegistryObject",
@@ -9286,25 +9259,12 @@ impl Host for StdHost {
                 "()Lnet/minecraft/resources/ResourceLocation;",
             ) => self.holder_id(r, receiver),
             (
-                "net/neoforged/neoforge/registries/DeferredHolder"
-                | "net/minecraftforge/registries/RegistryObject",
-                "isPresent",
-                "()Z",
-            ) => Ok(Value::Int(1)),
-            (
                 "net/minecraftforge/registries/IForgeRegistryEntry",
                 "setRegistryName",
                 descriptor,
             ) if descriptor.ends_with("Lnet/minecraftforge/registries/IForgeRegistryEntry;") => {
                 Ok(receiver.clone())
             }
-            (
-                "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference",
-                "isBound",
-                "()Z",
-            ) => Ok(Value::Int(i32::from(
-                host_registry::holder_serial(receiver).is_some(),
-            ))),
             (
                 "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference",
                 "unwrapKey",
@@ -36321,6 +36281,8 @@ mandatory = true
             .unwrap(),
             Value::Int(1)
         );
+        // Read after NeoForge's registry step (`host_registry::Binding`).
+        host.holders_bound();
         let holder_get = MethodRef {
             owner: "net/neoforged/neoforge/registries/DeferredHolder".into(),
             name: "get".into(),
@@ -36525,6 +36487,8 @@ mandatory = true
             host_registry::holder_serial(&object).is_some(),
             "{object:?}"
         );
+        // Read after the registry step (`host_registry::Binding`).
+        host.holders_bound();
         let value = host
             .invoke_instance(
                 &MethodRef {

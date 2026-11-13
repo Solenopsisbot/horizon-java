@@ -415,6 +415,57 @@ pub(crate) fn retired_marker_cast(value: &Value, target: &str) -> Option<String>
     .then(|| "java/lang/String".to_owned())
 }
 
+/// When NeoForge binds a holder to its entry (`DeferredHolder.bind`): at its
+/// registry's `RegisterEvent`, which this runtime does not post
+/// (`neoforge_lifecycle.rs`). Before it every holder is unbound (#177 review
+/// B2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Binding {
+    /// Mod construction: no `RegisterEvent` has fired.
+    #[default]
+    Construct,
+    /// The registry step: some registries' events have fired, and which is
+    /// not modelled, so every answer is counted.
+    Registering,
+    /// After the registry step: the host models every registration as done.
+    Bound,
+}
+
+/// `DeferredHolder.value()`'s NPE for an unbound holder (26.3.0.101 @12–31:
+/// `"Trying to access unbound value: " + key()`).
+fn unbound_value(registry: &str, location: &str) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/NullPointerException".into(),
+        message: Some(format!(
+            "Trying to access unbound value: ResourceKey[{registry} / {location}]"
+        )),
+        frame: None,
+    }
+}
+
+/// What a holder call asks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Value,
+    Bound,
+    Optional,
+}
+
+/// A row's entry key as `(registry, location)`, when that key is unbound
+/// during construction: its registry holds no entry for it yet. An entry in
+/// `minecraft`'s namespace may be one of vanilla's (bound already), so it is
+/// left out (counted), as is a key the host could not name.
+fn unbound_key(row: &HolderRow) -> Option<(String, String)> {
+    let (registry, id) = row.id.as_ref()?;
+    let key = crate::host_ids::resource_key(
+        registry,
+        &crate::host_ids::identifier_of_text(id),
+        Some(id.clone()),
+    );
+    let (registry, location) = crate::host_ids::resource_key_parts(&key)?;
+    (!location.starts_with("minecraft:")).then_some((registry, location))
+}
+
 /// What `DeferredRegister.register` recorded for one registration.
 #[derive(Clone, Debug)]
 pub(crate) struct HolderRow {
@@ -478,9 +529,135 @@ impl crate::StdHost {
         self.holder_rows.get(serial)
     }
 
-    /// `holder.get()`/`value()`: the value the registration registered
-    /// (the host models registration as done; NeoForge throws for a holder
-    /// read before its `RegisterEvent`). `None` for no holder.
+    /// NeoForge's registry step began (`register_attachment_types`, the
+    /// first `RegisterEvent` this runtime runs).
+    pub(crate) fn holders_registering(&mut self) {
+        if self.holder_binding == Binding::Construct {
+            self.holder_binding = Binding::Registering;
+        }
+    }
+
+    /// A loading stage after construction began: every `RegisterEvent` has
+    /// fired.
+    pub(crate) fn holders_bound(&mut self) {
+        self.holder_binding = Binding::Bound;
+    }
+
+    /// A holder's `get`/`value`/`isBound`/`asOptional` (NeoForge), its
+    /// `get`/`orElse`/`orElseGet`/`getOptional`/`isPresent` (Forge), and
+    /// `Supplier.get` on a holder (the field type a mod usually gives it):
+    /// all one arm, so one object never answers two ways. `None` for a call
+    /// that is not one of these.
+    pub(crate) fn holder_call(
+        &mut self,
+        r: &crate::MethodRef,
+        receiver: &Value,
+    ) -> Option<Result<Value, NativeError>> {
+        const DEFERRED: &[&str] = &[
+            "net/neoforged/neoforge/registries/DeferredHolder",
+            "net/neoforged/neoforge/registries/DeferredItem",
+            "net/neoforged/neoforge/registries/DeferredBlock",
+        ];
+        const HOLDER: &[&str] = &[
+            "net/minecraft/core/Holder",
+            "net/minecraft/core/Holder$Reference",
+        ];
+        const FORGE: &str = "net/minecraftforge/registries/RegistryObject";
+        let owner = r.owner.as_str();
+        let deferred = DEFERRED.contains(&owner);
+        let ask = match (r.name.as_str(), r.descriptor.as_str()) {
+            ("get", "()Ljava/lang/Object;")
+                if deferred
+                    || owner == FORGE
+                    || (owner == "java/util/function/Supplier"
+                        && holder_serial(receiver).is_some()) =>
+            {
+                Ask::Value
+            }
+            ("value", "()Ljava/lang/Object;") if deferred || HOLDER.contains(&owner) => Ask::Value,
+            ("isBound", "()Z") if deferred || HOLDER.contains(&owner) => Ask::Bound,
+            ("asOptional", "()Ljava/util/Optional;") if deferred => Ask::Optional,
+            // Forge's (a `DeferredHolder` has neither in 26.3.0.101; kept for
+            // older NeoForge callers, as before).
+            ("getOptional", "()Ljava/util/Optional;") if deferred || owner == FORGE => {
+                Ask::Optional
+            }
+            ("isPresent", "()Z") if deferred || owner == FORGE => Ask::Bound,
+            ("orElse", "(Ljava/lang/Object;)Ljava/lang/Object;")
+            | ("orElseGet", "(Ljava/util/function/Supplier;)Ljava/lang/Object;")
+                if owner == FORGE =>
+            {
+                Ask::Value
+            }
+            _ => return None,
+        };
+        Some(self.holder_answer(r, receiver, ask))
+    }
+
+    fn holder_answer(
+        &mut self,
+        r: &crate::MethodRef,
+        receiver: &Value,
+        ask: Ask,
+    ) -> Result<Value, NativeError> {
+        // Anything but a holder the host made (a vanilla `Holder` it does
+        // not model, a String a cast let through): counted.
+        let Some((serial, row)) = holder_serial(receiver)
+            .and_then(|serial| Some((serial, self.holder_rows.get(serial)?.clone())))
+        else {
+            return self.unknown_host_call(r);
+        };
+        let left_unbound = self
+            .neoforge_attachments
+            .holder_left_unbound(&serial.to_string());
+        match self.holder_binding {
+            // An attachment holder whose registration failed stays unbound;
+            // its registry exists by now.
+            Binding::Bound if left_unbound => match (ask, unbound_key(&row)) {
+                (Ask::Bound, _) => Ok(Value::Int(0)),
+                (Ask::Optional, _) => Ok(crate::host_optional::empty_optional()),
+                (Ask::Value, Some((registry, location))) => {
+                    Err(unbound_value(&registry, &location))
+                }
+                (Ask::Value, None) => self.unknown_host_call(r),
+            },
+            // The host models every registration as done.
+            Binding::Bound => Ok(match ask {
+                Ask::Bound => Value::Int(1),
+                Ask::Value => self.holder_value(receiver).unwrap_or(Value::Ref(None)),
+                Ask::Optional => crate::host_optional::optional_wrap(
+                    self.holder_value(receiver).unwrap_or(Value::Ref(None)),
+                ),
+            }),
+            Binding::Construct => match (row.forge, unbound_key(&row)) {
+                // NeoForge 26.3.0.101: `isBound` is `bind(false)`, then
+                // `holder != null && holder.isBound()`; `asOptional` is
+                // `isBound() ? Optional.of(value()) : Optional.empty()`.
+                (false, Some(_)) if ask == Ask::Bound => Ok(Value::Int(0)),
+                (false, Some(_)) if ask == Ask::Optional => {
+                    Ok(crate::host_optional::empty_optional())
+                }
+                // `value()` (`get()` is `value()`) @0 `bind(true)`: the
+                // registry is there (a vanilla one), the entry not yet, so
+                // @9–31 throws. A registry the host cannot vouch for may
+                // throw `bind`'s `IllegalStateException` instead: counted.
+                (false, Some((registry, location)))
+                    if crate::vanilla_registries::is_built_in(&registry) =>
+                {
+                    Err(unbound_value(&registry, &location))
+                }
+                // A Forge `RegistryObject` (no Forge jar to read), or a key
+                // the host could not name.
+                _ => self.unknown_host_call(r),
+            },
+            // Some registries' events have fired; which, the runtime does not
+            // model.
+            Binding::Registering => self.unknown_host_call(r),
+        }
+    }
+
+    /// `holder.get()`/`value()` once registration is done: the value the
+    /// registration registered. `None` for no holder.
     pub(crate) fn holder_value(&self, value: &Value) -> Option<Value> {
         let serial = holder_serial(value)?;
         Some(
@@ -527,6 +704,114 @@ impl crate::StdHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Host, MethodRef, StdHost};
+
+    fn method(owner: &str, name: &str, descriptor: &str) -> MethodRef {
+        MethodRef {
+            owner: owner.into(),
+            name: name.into(),
+            descriptor: descriptor.into(),
+        }
+    }
+
+    /// `DeferredRegister.create(Registries.ITEM, "demo").register(name, ..)`.
+    fn demo_holder(host: &mut StdHost, name: &str) -> Result<Value, NativeError> {
+        let register = host.invoke(
+            &method(
+                "net/neoforged/neoforge/registries/DeferredRegister",
+                "create",
+                "(Lnet/minecraft/resources/ResourceKey;Ljava/lang/String;)Lnet/neoforged/neoforge/registries/DeferredRegister;",
+            ),
+            &[
+                crate::host_ids::registry_key_of("minecraft:item"),
+                Value::Ref(Some("demo".into())),
+            ],
+        )?;
+        host.invoke_instance(
+            &method(
+                "net/neoforged/neoforge/registries/DeferredRegister",
+                "register",
+                "(Ljava/lang/String;Ljava/util/function/Supplier;)Lnet/neoforged/neoforge/registries/DeferredHolder;",
+            ),
+            &register,
+            &[
+                Value::Ref(Some(name.into())),
+                Value::Ref(Some("@indy:supplier".into())),
+            ],
+        )
+    }
+
+    fn is_bound() -> MethodRef {
+        method("net/minecraft/core/Holder", "isBound", "()Z")
+    }
+
+    /// M1: `Holder.isBound()` on anything that is no holder the host made (a
+    /// registered value, a registry, a vanilla holder's text) is counted,
+    /// never a silent `false`.
+    #[test]
+    fn is_bound_on_what_is_no_holder_is_counted() {
+        let mut host = StdHost::new();
+        demo_holder(&mut host, "x").unwrap();
+        let registered = host.registrations()[0].value.clone();
+        for receiver in [
+            registered,
+            registry("minecraft:item"),
+            Value::Ref(Some(
+                "holder/deferred-register/registry/minecraft:item/demo/x".into(),
+            )),
+        ] {
+            let before = host.unknown_host_call_count();
+            host.invoke_instance(&is_bound(), &receiver, &[]).unwrap();
+            assert_eq!(host.unknown_host_call_count(), before + 1, "{receiver:?}");
+        }
+    }
+
+    /// B2: unbound (exact) during construction, counted while the registry
+    /// step runs, bound (the host's model of a finished registration) after.
+    #[test]
+    fn a_holder_binds_after_the_registry_step() {
+        let mut host = StdHost::new();
+        let holder = demo_holder(&mut host, "x").unwrap();
+        let get = method(
+            "net/neoforged/neoforge/registries/DeferredHolder",
+            "get",
+            "()Ljava/lang/Object;",
+        );
+        assert_eq!(
+            host.invoke_instance(&is_bound(), &holder, &[]).unwrap(),
+            Value::Int(0)
+        );
+        assert!(matches!(
+            host.invoke_instance(&get, &holder, &[]),
+            Err(NativeError::UncaughtException { class, .. }) if class == "java/lang/NullPointerException"
+        ));
+        assert_eq!(host.unknown_host_call_count(), 0);
+        host.holders_registering();
+        host.invoke_instance(&is_bound(), &holder, &[]).unwrap();
+        host.invoke_instance(&get, &holder, &[]).unwrap();
+        assert_eq!(host.unknown_host_call_count(), 2);
+        host.holders_bound();
+        assert_eq!(
+            host.invoke_instance(&is_bound(), &holder, &[]).unwrap(),
+            Value::Int(1)
+        );
+        let registered = host.registrations()[0].value.clone();
+        assert_eq!(
+            host.invoke_instance(&get, &holder, &[]).unwrap(),
+            registered
+        );
+        // `Supplier.get` on the holder is the same arm.
+        assert_eq!(
+            host.invoke_instance(
+                &method("java/util/function/Supplier", "get", "()Ljava/lang/Object;"),
+                &holder,
+                &[]
+            )
+            .unwrap(),
+            registered
+        );
+        assert_eq!(host.unknown_host_call_count(), 2);
+    }
 
     /// A builder's key holds the registry it answers, whatever that
     /// registry's id is spelled with, and two registries never give one

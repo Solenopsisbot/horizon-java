@@ -268,6 +268,18 @@ pub struct AttachmentState {
 }
 
 impl AttachmentState {
+    /// Whether holder `key` is an attachment holder that NeoForge's registration left unbound:
+    /// its supplier did not make a type, or its register never joined a bus. Before the
+    /// registration point every holder is unbound anyway (`host_registry::Binding`).
+    pub(crate) fn holder_left_unbound(&self, key: &str) -> bool {
+        self.registration_done
+            && !self.bound.contains_key(key)
+            && self
+                .registers
+                .iter()
+                .any(|register| register.entries.iter().any(|(_, _, holder)| holder == key))
+    }
+
     /// Every value this state holds that names a jar object: roots of the heap collection.
     pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
         fn value<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
@@ -1332,6 +1344,8 @@ impl NativeJar {
             return Vec::new();
         }
         host.neoforge_attachments.registration_done = true;
+        // The registry step: which holders are bound is no longer known until it ends.
+        host.holders_registering();
         let entries: Vec<(String, String, Value, String)> = host
             .neoforge_attachments
             .registers

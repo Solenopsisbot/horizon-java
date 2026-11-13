@@ -264,6 +264,44 @@ fn run(fixture: &javac_fixture::Fixture, method: &str) -> (String, Vec<(String, 
     (text, host.unknown_host_calls())
 }
 
+/// B2: before its `RegisterEvent` a NeoForge holder is unbound, and the
+/// holder, its `Holder` view and its `Supplier` view all say so: `isBound()`
+/// is `false`, `asOptional()` empty, and `get()`/`value()`/`Supplier.get()`
+/// throw NeoForge's NPE naming the key. Nothing is counted.
+#[test]
+fn holders_are_unbound_before_their_register_event() {
+    let fixture = fixture("host-registries-unbound");
+    for method in ["c10", "c11", "c12", "c13", "unboundViews"] {
+        let (text, unknown) = run(&fixture, method);
+        assert_eq!(text, expected(method), "{method}: {unknown:?}");
+        assert!(unknown.is_empty(), "{method}: {unknown:?}");
+    }
+}
+
+/// Where the host cannot know the binding it counts: an entry in
+/// `minecraft`'s namespace may be vanilla's (bound already: Java says
+/// `true`), and a registry that is no vanilla one may not exist yet (Java
+/// throws `bind`'s `IllegalStateException`). `isBound()` on that holder is
+/// still exact (`bind(false)` never throws).
+#[test]
+fn a_binding_the_host_cannot_know_is_counted() {
+    let fixture = fixture("host-registries-unknown-binding");
+    let (_, unknown) = run(&fixture, "vanillaEntry");
+    assert!(
+        unknown
+            .iter()
+            .any(|(call, _)| call == "net/neoforged/neoforge/registries/DeferredHolder#isBound()Z"),
+        "{unknown:?}"
+    );
+    let (text, unknown) = run(&fixture, "customRegistry");
+    assert!(text.starts_with("false|"), "{text}");
+    assert!(
+        unknown.iter().any(|(call, _)| call
+            == "net/neoforged/neoforge/registries/DeferredHolder#get()Ljava/lang/Object;"),
+        "{unknown:?}"
+    );
+}
+
 /// B1 and M1: Strings spelled like a registry, a holder or a builder once
 /// were are Strings, so their casts to `Registry`, `Holder`,
 /// `DeferredHolder` and `FabricRegistryBuilder` throw Java's
