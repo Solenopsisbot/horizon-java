@@ -35,6 +35,10 @@ const SEPARATOR_FREE_MARKERS: &[&str] = &[
     "stack-walker",
 ];
 
+/// The marker families that moved onto handles (#156): no runtime value is
+/// text with one of these prefixes any more.
+const RETIRED_PREFIXES: &[&str] = &["array/", "brigadier/"];
+
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
 /// is one of the types a string is an instance of.
 pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
@@ -56,11 +60,15 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 ///   or space (`list/3`, `registry/minecraft:item`, `demo/Main`), which a
 ///   resource id like `minecraft:block/stone` does not match.
 ///
-/// Arrays and `ColorCollection`s are handles, never text (`host_array.rs`):
-/// a text spelled like their old markers (`array/...`) or their keys
-/// (`[I#0`, `color-collection#0`) is a `String`.
+/// Arrays, `ColorCollection`s and the command surface's objects are
+/// handles, never text (`host_array.rs`, `host_brigadier.rs`): a text spelled
+/// like their old markers ([`RETIRED_PREFIXES`]) or their keys (`[I#0`,
+/// `color-collection#0`) is a `String`.
 pub(crate) fn is_plain_string(marker: &str) -> bool {
-    if marker.starts_with("array/") {
+    if RETIRED_PREFIXES
+        .iter()
+        .any(|prefix| marker.starts_with(prefix))
+    {
         return true;
     }
     if marker.starts_with('@')

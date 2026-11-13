@@ -214,6 +214,26 @@ pub enum HostKind {
     /// declared result is an array: key `<declared class>#empty`
     /// (`host_array.rs`). Its runtime class is unknown.
     UnknownArray,
+    /// The command surface (`host_brigadier.rs`): Brigadier's
+    /// `CommandDispatcher` a registration callback receives (no key).
+    BrigadierDispatcher,
+    /// The `CommandBuildContext` a registration callback receives (no key).
+    CommandBuildContext,
+    /// A running command's `CommandContext`: key the run's serial.
+    CommandContext,
+    /// A running command's `CommandSourceStack`: key the run's serial and
+    /// the source's index in it.
+    CommandSource,
+    /// A `CommandNode`: key its arena id, kind and name.
+    CommandNode,
+    /// A `LiteralArgumentBuilder`/`RequiredArgumentBuilder`: key its id and kind.
+    ArgumentBuilder,
+    /// An `ArgumentType` a factory made: key its arena id and the factory's
+    /// declared class.
+    ArgumentType,
+    /// A `Permission`, `PermissionCheck`, `PermissionSet` or `requires`
+    /// predicate: key what it is and its operator level.
+    CommandPermission,
 }
 
 /// How a kind's Java class follows from its key.
@@ -619,6 +639,87 @@ const KINDS: &[KindInfo] = &[
         // One key stands for every array such a call returned.
         canonical: never_canonical,
         methods: &crate::host_array::ARRAY,
+    },
+    // The command surface (`host_brigadier.rs`). Their runtime classes need
+    // #174's class surface; until then `getClass()` is counted.
+    KindInfo {
+        kind: HostKind::BrigadierDispatcher,
+        tag: "brd",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::dispatcher_types,
+        },
+        // A reload makes another dispatcher.
+        canonical: never_canonical,
+        methods: &crate::host_brigadier::DISPATCHER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CommandBuildContext,
+        tag: "brbc",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::build_context_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::host_brigadier::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CommandContext,
+        tag: "brcc",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::context_types,
+        },
+        // One per run of a command, whose serial the key holds.
+        canonical: always_canonical,
+        methods: &crate::host_brigadier::CONTEXT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CommandSource,
+        tag: "brsrc",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::source_types,
+        },
+        // One per run of a command, whose serial the key holds.
+        canonical: always_canonical,
+        methods: &crate::host_brigadier::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CommandNode,
+        tag: "brnode",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::node_types,
+        },
+        // The arena never reuses an id.
+        canonical: always_canonical,
+        methods: &crate::host_brigadier::NODE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ArgumentBuilder,
+        tag: "brbld",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::builder_types,
+        },
+        // Builder ids only grow.
+        canonical: always_canonical,
+        methods: &crate::host_brigadier::BUILDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ArgumentType,
+        tag: "brarg",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::argument_type_types,
+        },
+        // The arena never reuses an id.
+        canonical: always_canonical,
+        methods: &crate::host_brigadier::ARGUMENT_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CommandPermission,
+        tag: "brperm",
+        class: ClassRule::Unknown {
+            declared: crate::host_brigadier::permission_types,
+        },
+        // Several constants and objects share a level.
+        canonical: never_canonical,
+        methods: &crate::host_brigadier::STATE_METHODS,
     },
 ];
 
