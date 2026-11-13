@@ -43,15 +43,19 @@
 //! **A stream over a host collection** (`ArrayList`, `LinkedList`,
 //! `HashSet`, ...: the fail-fast ones) binds late, as their spliterators do:
 //! it reads the collection when the terminal starts, not when `stream()` was
-//! called. A change to the collection during the traversal is checked like
-//! the JDK's `modCount` check, after each element when the pipeline pulls
-//! (`tryAdvance`) and after the last when it pushes (`forEachRemaining`): a
-//! changed size throws `ConcurrentModificationException`. What the JDK's
-//! bulk traversal visits after a change depends on the collection's
-//! internals (a `HashSet` visits an element added behind the cursor), so any
-//! change other than appending to a list is counted; so is a list of the
-//! same size with different elements, which only `modCount` could tell from
-//! a `set`.
+//! called, and captures its `modCount` then (`mod_count.rs`). It checks that
+//! `modCount` as the JDK's spliterators do, after each element when the
+//! pipeline pulls (`tryAdvance`) and after the last when it pushes
+//! (`forEachRemaining`): a structural change throws
+//! `ConcurrentModificationException`, even one that restored the contents.
+//! What the JDK's traversal visits after a change depends on the
+//! collection's internals (a `HashSet` visits an element added behind the
+//! cursor, an `ArrayList` reads a `set` element from its live array), so a
+//! change of the contents other than appending to a list is counted.
+//!
+//! `distinct()` keeps JDK 25's `HashSet` (`hash_bulk.rs`), so the elements'
+//! own `equals`/`hashCode` decide it; `sorted()` is TimSort (`tim_sort.rs`),
+//! so a comparator sees the JDK's comparisons in the JDK's order.
 //!
 //! A stream is used once: linking a stage to it, or running a terminal on
 //! it, a second time throws the JDK's `IllegalStateException` ("stream has
@@ -65,8 +69,9 @@
 //! * `iterator()`/`spliterator()` of a pipeline that runs code or binds to a
 //!   host collection (`Stream#iterator`): the JDK pulls it lazily as the
 //!   iterator advances, this hands out the pushed list;
-//! * `distinct()` over objects (`Stream#distinct`): the runtime compares by
-//!   value, where the JDK's `HashSet` runs their `equals`/`hashCode`.
+//! * a stream over a map's `keySet()`/`values()`/`entrySet()` copy whose map
+//!   changed before the traversal ended (`<Map>#spliterator`): the JDK's view
+//!   sees the change, the copy does not.
 
 use crate::{MethodRef, NativeError, Value, expect_ref};
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,8 +130,10 @@ enum State {
     None,
     /// `skip`/`limit`: how many elements are left to drop or pass.
     Left(i64),
-    /// `distinct`: the elements seen.
-    Seen(Vec<Value>),
+    /// `distinct`: `DistinctOps`' `HashSet` of the references seen, and the
+    /// primitives seen (an `IntStream`'s `distinct` boxes them, so two are
+    /// the same element exactly when their values are).
+    Seen(Value, Vec<Value>),
     /// `sorted`: the elements buffered until the source ends.
     Buffer(Vec<Value>),
 }
@@ -197,6 +204,14 @@ struct Origin {
     class: String,
 }
 
+/// A stream over a map view's copy: what the map was when it was made.
+#[derive(Clone, Debug)]
+struct ViewOrigin {
+    map: Value,
+    stamp: crate::mod_count::ModStamp,
+    entries: Vec<String>,
+}
+
 /// The JDK collections whose spliterators bind late and check `modCount`.
 const FAIL_FAST: &[&str] = &[
     "java/util/ArrayList",
@@ -237,8 +252,9 @@ pub(crate) struct Pipelines {
     /// Value-list sources over a fail-fast host collection.
     origins: BTreeMap<String, Origin>,
     /// Value-list sources over a map's `keySet()`/`values()`/`entrySet()`
-    /// copy: the map and its write count when the stream was made.
-    view_origins: BTreeMap<String, (String, u64)>,
+    /// copy: the map, its `modCount` and its entries when the stream was
+    /// made.
+    view_origins: BTreeMap<String, ViewOrigin>,
     /// Streams a stage or terminal has used (`linkedOrConsumed`).
     used: BTreeSet<String>,
 }
@@ -310,29 +326,6 @@ fn npe() -> NativeError {
         class: "java/lang/NullPointerException".into(),
         message: None,
         frame: None,
-    }
-}
-
-/// Whether comparing with `comparator` runs jar code: anything but natural
-/// order, `reversed()` of it, and the map-entry comparators over natural
-/// order.
-fn comparator_runs_code(comparator: &Value) -> bool {
-    let Some(marker) = expect_ref(comparator) else {
-        return false;
-    };
-    let Some(body) = marker.strip_prefix("@cmp:") else {
-        return true;
-    };
-    let (kind, rest) = body.split_once(':').unwrap_or((body, ""));
-    match kind {
-        "natural" | "entry-key" | "entry-value" => false,
-        "reverse" | "then" => crate::split_capture_markers(rest).map_or(true, |parts| {
-            parts.iter().any(|part| {
-                crate::parse_collection_value(part)
-                    .map_or(true, |inner| comparator_runs_code(&inner))
-            })
-        }),
-        _ => true,
     }
 }
 
@@ -468,11 +461,14 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         // A map view's copy: the JDK's view binds late and fails fast on its
         // map, which the copy cannot; a write to the map before the
         // traversal ends is counted.
-        if let Some(map) = self.host.view_copy_map(source) {
-            let writes = self.host.collection_writes(&map);
-            self.pipelines
-                .view_origins
-                .insert(marker.clone(), (map, writes));
+        if let Some(map) = self.host.view_copy_source(source) {
+            let map = Value::Ref(Some(map));
+            let origin = ViewOrigin {
+                stamp: self.capture_mod_count(&map),
+                entries: crate::runtime_collection_values(self.host, &map).unwrap_or_default(),
+                map,
+            };
+            self.pipelines.view_origins.insert(marker.clone(), origin);
             return;
         }
         let class = source.split_once('#').map_or("", |(class, _)| class);
@@ -785,7 +781,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             // interleaved with the stages.
             ("collect", "(Ljava/util/stream/Collector;)Ljava/lang/Object;") => {
                 let collector = expect_ref(&arg(0)).cloned().unwrap_or_default();
-                let Some(state) = crate::jdk_model::ToMap::begin(&collector)? else {
+                let Some(state) = self.begin_to_map(&collector)? else {
                     return Ok(None);
                 };
                 Terminal::ToMap(Box::new(state))
@@ -899,15 +895,16 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         outer: Option<(u64, usize)>,
     ) -> Result<Terminal, NativeError> {
         let (source, stages) = self.chain(stream)?;
-        let states = stages
-            .iter()
-            .map(|stage| match stage {
+        let mut states = Vec::with_capacity(stages.len());
+        for stage in &stages {
+            states.push(match stage {
                 Stage::Skip(n) | Stage::Limit(n) => State::Left(*n),
-                Stage::Distinct => State::Seen(Vec::new()),
+                // `DistinctOps`' sink makes its `HashSet` in `begin`.
+                Stage::Distinct => State::Seen(self.new_distinct_set()?, Vec::new()),
                 Stage::Sorted(_) => State::Buffer(Vec::new()),
                 _ => State::None,
-            })
-            .collect();
+            });
+        }
         let terminal = match outer {
             Some((id, at)) => Terminal::Forward(id, at),
             None => terminal,
@@ -980,11 +977,13 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// stream was made: the JDK's view would have seen the change (and its
     /// iterator failed fast), the copy did not. Counted.
     fn check_view_origin(&mut self, marker: &str) -> Result<(), NativeError> {
-        let Some((map, writes)) = self.pipelines.view_origins.get(marker).cloned() else {
+        let Some(origin) = self.pipelines.view_origins.get(marker).cloned() else {
             return Ok(());
         };
-        if self.host.collection_writes(&map) != writes {
-            let class = map.split_once('#').map_or(map.as_str(), |(class, _)| class);
+        let entries = crate::runtime_collection_values(self.host, &origin.map)?;
+        if self.capture_mod_count(&origin.map) != origin.stamp || entries != origin.entries {
+            let map = expect_ref(&origin.map).map_or("", String::as_str);
+            let class = map.split_once('#').map_or(map, |(class, _)| class);
             self.host.unknown_operand_call(&MethodRef {
                 owner: class.to_owned(),
                 name: "spliterator".into(),
@@ -994,18 +993,20 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         Ok(())
     }
 
-    /// Feed a host collection's bound elements, checking it for modification
-    /// as its fail-fast spliterator does: after each element when pulled,
-    /// after the last when pushed in bulk.
+    /// Feed a host collection's bound elements, checking its `modCount` as
+    /// its fail-fast spliterator does: after each element when pulled
+    /// (`tryAdvance`), after the last when pushed in bulk
+    /// (`forEachRemaining`). `expectedModCount` is captured here, at the
+    /// spliterator's first use.
     fn feed_collection(
         &mut self,
         origin: &Origin,
         values: Vec<Value>,
         id: u64,
     ) -> Result<(), NativeError> {
+        use crate::mod_count::ModVerdict;
         let bound = self.origin_items(origin)?;
-        let source = expect_ref(&origin.collection).cloned().unwrap_or_default();
-        let writes = self.host.collection_writes(&source);
+        let expected = self.capture_mod_count(&origin.collection);
         let short = self
             .pipelines
             .drives
@@ -1017,47 +1018,75 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             descriptor: "()Ljava/util/Spliterator;".into(),
         };
         let list = APPEND_SAFE.contains(&origin.class.as_str());
+        // `ArrayDeque` has no `modCount`: its spliterator checks the slots at
+        // its ends, which depends on the array's layout. Any change is
+        // counted.
+        let tracked = self.has_mod_count(&origin.collection);
+        let verdict_now = |this: &mut Self, now: &[String]| {
+            if tracked {
+                this.capture_mod_count(&origin.collection).verdict(expected)
+            } else if now == bound.as_slice() {
+                ModVerdict::Same
+            } else {
+                ModVerdict::Unknown
+            }
+        };
         let mut uncertain = false;
-        for value in values {
+        // A structural change during a bulk traversal: the JDK's list walk
+        // may now read a stale array.
+        let mut structural = false;
+        for (index, bound_value) in values.into_iter().enumerate() {
             if self.cancelled(id, 0) {
                 break;
             }
+            // A list's spliterator reads each element from the live list
+            // (`elementData[i]`, a node's `item`), so a `set` made during the
+            // traversal is seen, as long as nothing structural happened.
+            let value = match self.origin_items(origin)?.get(index) {
+                Some(item) if list && !structural => crate::parse_collection_value(item)?,
+                _ => bound_value,
+            };
             self.accept(id, 0, value)?;
             let now = self.origin_items(origin)?;
-            if now == bound {
-                // Written to and back (an add and a remove, a clear and an
-                // addAll): the JDK's `modCount` moved, the contents did not.
-                // Undecidable without it, so counted.
-                if self.host.collection_writes(&source) != writes && !uncertain {
-                    uncertain = true;
-                    self.host.unknown_operand_call(&counted)?;
-                }
-                continue;
-            }
-            let resized = now.len() != bound.len();
-            if short {
+            let verdict = verdict_now(self, &now);
+            let unsure = if short {
                 // `tryAdvance` checks `modCount` right after the element.
-                if resized || !list {
-                    return Err(concurrent_modification());
+                match verdict {
+                    ModVerdict::Changed => return Err(concurrent_modification()),
+                    ModVerdict::Unknown => true,
+                    // Other contents with no structural change: a list's
+                    // `set`, read live above.
+                    ModVerdict::Same => now != bound && !list,
                 }
-                // A list of the same size: a `set`, or a remove and an add.
-                if !uncertain {
-                    uncertain = true;
-                    self.host.unknown_operand_call(&counted)?;
+            } else {
+                // In bulk the traversal goes on over the bound elements when a
+                // list was appended to, or written to and back; any other
+                // structural change makes what it visits next depend on the
+                // collection's internals (a `HashSet` visits an element added
+                // behind its cursor, an `ArrayList` shifts its array).
+                structural |= verdict == ModVerdict::Changed;
+                let appended = now.len() > bound.len() && now.starts_with(&bound);
+                match verdict {
+                    ModVerdict::Unknown => true,
+                    ModVerdict::Same => now != bound && !list,
+                    ModVerdict::Changed => !(list && (now == bound || appended)),
                 }
-                continue;
-            }
-            // In bulk the traversal goes on over the bound elements only when
-            // a list was appended to; anything else changes what it visits.
-            let appended = list && now.len() > bound.len() && now.starts_with(&bound);
-            if !appended && !uncertain {
+            };
+            if unsure && !uncertain {
                 uncertain = true;
                 self.host.unknown_operand_call(&counted)?;
             }
         }
         // `forEachRemaining`'s check after the last element.
-        if !short && self.origin_items(origin)?.len() != bound.len() {
-            return Err(concurrent_modification());
+        if !short {
+            let now = self.origin_items(origin)?;
+            match verdict_now(self, &now) {
+                ModVerdict::Changed => return Err(concurrent_modification()),
+                ModVerdict::Unknown if !uncertain => {
+                    self.host.unknown_operand_call(&counted)?;
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -1154,21 +1183,30 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 Ok(())
             }
             Stage::Distinct => {
-                // An object's `equals`/`hashCode` are its own; the runtime
-                // compares by value.
-                if expect_ref(&value)
-                    .and_then(|marker| crate::jvm_dispatch::constructed_object_class(marker))
-                    .is_some()
-                {
-                    self.count_stream("distinct", "()Ljava/util/stream/Stream;")?;
-                }
-                if let Some(State::Seen(seen)) = self.state(id, at) {
-                    if seen.contains(&value) {
+                let Some(State::Seen(set, primitives)) = self.state(id, at) else {
+                    return self.accept(id, next, value);
+                };
+                if let Value::Int(_) | Value::Long(_) | Value::Float(_) = value {
+                    // A primitive stream's element: `Integer`/`Long`/`Double`
+                    // `equals` is equality of the value (of its bits, for a
+                    // `double`: `NaN` equals itself, `0.0` is not `-0.0`).
+                    let same = |a: &Value, b: &Value| match (a, b) {
+                        (Value::Float(a), Value::Float(b)) => {
+                            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+                        }
+                        _ => a == b,
+                    };
+                    if primitives.iter().any(|seen| same(seen, &value)) {
                         return Ok(());
                     }
-                    seen.push(value.clone());
+                    primitives.push(value.clone());
+                    return self.accept(id, next, value);
                 }
-                self.accept(id, next, value)
+                let set = set.clone();
+                if self.distinct_accept(&set, &value)? {
+                    self.accept(id, next, value)?;
+                }
+                Ok(())
             }
             Stage::Sorted(_) => {
                 if let Some(State::Buffer(buffer)) = self.state(id, at) {
@@ -1179,7 +1217,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             Stage::Pass => self.accept(id, next, value),
             Stage::Widen(kind) => {
                 let widened = match (kind, value) {
-                    ('I', Value::Int(v)) => Value::Ref(Some(format!("integer:{v}"))),
+                    // `Integer.valueOf`.
+                    ('I', Value::Int(v)) => Value::Boxed(crate::Boxed::Integer(v)),
                     ('J', Value::Int(v)) => Value::Long(i64::from(v)),
                     ('D', Value::Int(v)) => Value::Float(f64::from(v)),
                     ('D', Value::Long(v)) => Value::Float(v as f64),
@@ -1217,15 +1256,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             Some(State::Buffer(buffer)) => std::mem::take(buffer),
             _ => Vec::new(),
         };
-        // The JDK sorts the buffer with TimSort; the runtime's merge sort
-        // makes its comparisons in another order, which a comparator that runs
-        // jar code (a lambda, a key extractor) would see.
-        if buffer.len() > 1 && comparator_runs_code(&comparator) {
-            self.count_stream(
-                "sorted",
-                "(Ljava/util/Comparator;)Ljava/util/stream/Stream;",
-            )?;
-        }
+        // `list.sort(comparator)`: TimSort, the JDK's comparisons in the
+        // JDK's order.
         let sorted = self.sort_values(buffer, &comparator)?;
         for value in sorted {
             if self.cancelled(id, index + 1) {

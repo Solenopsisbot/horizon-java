@@ -129,13 +129,34 @@ public final class Probe {
 
     public static String restoreDuringForEach() {
         List<Integer> l = new ArrayList<>(List.of(1, 2, 3));
-        l.stream().forEach(x -> { log("e" + x); if (x == 1) { l.add(9); l.remove(3); } });
-        return take(l);
+        String c;
+        try { l.stream().forEach(x -> { log("e" + x); if (x == 1) { l.add(9); l.remove(3); } }); c = "ok"; } catch (ConcurrentModificationException e) { c = err(e); }
+        return take(c + "," + l);
     }
 
     public static String restoreDuringAnyMatch() {
         List<Integer> l = new LinkedList<>(List.of(1, 2, 3));
-        return take(l.stream().peek(x -> { if (x == 1) { l.add(9); l.remove(3); } }).anyMatch(x -> x == 3));
+        String c;
+        try { c = "" + l.stream().peek(x -> { log("p" + x); if (x == 1) { l.add(9); l.remove(3); } }).anyMatch(x -> x == 3); } catch (ConcurrentModificationException e) { c = err(e); }
+        return take(c + "," + l);
+    }
+
+    static final class K {
+        final int id;
+        K(int id) { this.id = id; }
+        @Override public int hashCode() { log("h" + id); return id; }
+        @Override public boolean equals(Object o) { log("q" + id); return o instanceof K k && k.id == id; }
+        @Override public String toString() { return "K" + id; }
+    }
+
+    public static String distinctRunsEqualsInThePush() {
+        List<Integer> out = new ArrayList<>();
+        Stream.of(new K(1), new K(1), new K(2)).peek(x -> log("p" + x)).distinct().forEach(x -> { log("e" + x); out.add(x.id); });
+        return take(out);
+    }
+
+    public static String toMapTableOrder() {
+        return take(Stream.of("b", "a", "c").collect(Collectors.toMap(x -> peekLog("k", x), x -> 1)));
     }
 
     public static String mapViewPutDuringForEach() {
@@ -156,10 +177,18 @@ public final class Probe {
     }
 
     public static String hashSetAddDuringForEach() {
-        Set<Integer> set = new HashSet<>(Set.of(1, 2));
+        Set<Integer> set = new HashSet<>(List.of(1, 2));
         String c;
         try { set.stream().forEach(x -> { log("s" + x); if (x == 1) set.add(5); }); c = "ok"; } catch (ConcurrentModificationException e) { c = err(e); }
         return take(c);
+    }
+
+    public static String listSetDuringForEach() {
+        List<Integer> list = new ArrayList<>(List.of(1, 2, 3));
+        LinkedList<Integer> linked = new LinkedList<>(List.of(1, 2, 3));
+        list.stream().forEach(x -> { log("e" + x); if (x == 1) list.set(2, 8); });
+        linked.stream().forEach(x -> { log("l" + x); if (x == 1) linked.set(1, 7); });
+        return take(list + "," + linked);
     }
 
     public static String listSetDuringFindFirst() {
@@ -198,6 +227,34 @@ fn to_map_and_host_collection_streams_run_as_jdk_25_does() {
             (
                 "unmodifiableCollectors",
                 " => java.lang.UnsupportedOperationException:null,npe",
+            ),
+            // A write restored before the next element still moved
+            // `modCount` (`mod_count.rs`): CME after the bulk push's last
+            // element, and right after the pulled element.
+            (
+                "restoreDuringForEach",
+                "e1 e2 e3 => java.util.ConcurrentModificationException:null,[1, 2, 3]",
+            ),
+            (
+                "restoreDuringAnyMatch",
+                "p1 => java.util.ConcurrentModificationException:null,[1, 2, 3]",
+            ),
+            // `distinct()`'s `HashSet` runs the elements' own
+            // `hashCode`/`equals`, inside the push.
+            (
+                "distinctRunsEqualsInThePush",
+                "pK1 h1 eK1 pK1 h1 q1 pK2 h2 eK2 => [1, 2]",
+            ),
+            // `toMap` collects into a `HashMap`: table order.
+            ("toMapTableOrder", "kb ka kc => {a=1, b=1, c=1}"),
+            // `sorted` is TimSort: the JDK's comparisons, in its order.
+            ("sortedLambda", "c13 c21 c23 c21 => [1, 2, 3]"),
+            // A `set` is no structural change: a list's spliterator reads
+            // the new element, pulled or pushed.
+            ("listSetDuringFindFirst", " => Optional[8]"),
+            (
+                "listSetDuringForEach",
+                "e1 e2 e8 l1 l7 l3 => [1, 2, 8],[1, 7, 3]",
             ),
         ],
     );
@@ -243,38 +300,6 @@ fn a_set_changed_during_a_bulk_traversal_is_counted() {
     );
 }
 
-/// Not decidable without `modCount`: a list of the same size with different
-/// elements (here a `set`, which the JDK does not count as a modification)
-/// is counted.
-#[test]
-fn a_same_size_list_change_during_a_stream_is_counted() {
-    let (_, unknown) = run("listSetDuringFindFirst");
-    assert_eq!(
-        unknown,
-        vec![(
-            "java/util/ArrayList#spliterator()Ljava/util/Spliterator;".to_owned(),
-            1
-        )]
-    );
-}
-
-/// Counted until #105's `modCount` is under this stack: a change that writes
-/// a collection and restores its contents moves the JDK's `modCount` (JDK 25:
-/// CME), which the contents cannot show; a write to the source during the
-/// traversal is counted.
-#[test]
-fn restoring_changes_during_a_stream_are_counted() {
-    for method in ["restoreDuringForEach", "restoreDuringAnyMatch"] {
-        let (_, unknown) = run(method);
-        assert!(
-            unknown
-                .iter()
-                .any(|(call, _)| call.ends_with("#spliterator()Ljava/util/Spliterator;")),
-            "{method}: {unknown:?}"
-        );
-    }
-}
-
 /// Counted: a map view's stream reads a copy, where the JDK's view sees a
 /// `put` to its map (and its iterator fails fast).
 #[test]
@@ -288,17 +313,4 @@ fn map_writes_behind_a_view_stream_are_counted() {
             "{method}: {unknown:?}"
         );
     }
-}
-
-/// Counted until #110's TimSort is under this stack: a comparator lambda would
-/// see the JDK's comparisons in another order.
-#[test]
-fn sorting_with_a_jar_comparator_is_counted() {
-    let (_, unknown) = run("sortedLambda");
-    assert!(
-        unknown
-            .iter()
-            .any(|(call, _)| call.starts_with("java/util/stream/Stream#sorted")),
-        "{unknown:?}"
-    );
 }

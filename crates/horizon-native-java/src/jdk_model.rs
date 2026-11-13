@@ -109,9 +109,9 @@ pub(crate) fn static_field(owner: &str, name: &str) -> Option<Value> {
             _ => None,
         },
         // A `WatchEvent.Kind` is only ever a token handed back to `register`
-        // or compared with `==` against the event a key reports. The marker
-        // keeps its enum name so `name()`/`toString` agree; the watch-service
-        // model below never produces an event, so none is ever compared.
+        // or compared with `==` against the event a key reports
+        // (`watch_service.rs`). The marker keeps its enum name so
+        // `name()`/`toString` agree.
         "java/nio/file/StandardWatchEventKinds" => match name {
             "ENTRY_CREATE" | "ENTRY_DELETE" | "ENTRY_MODIFY" | "OVERFLOW" => {
                 Some(Value::Ref(Some(format!("watch-kind/{name}"))))
@@ -275,8 +275,8 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
             let pattern = expect_string(args.first()?);
             Some(Ok(Value::Ref(Some(format!("regex-pattern/{pattern}")))))
         }
-        // The default filesystem. Opening a watch service over it is modelled
-        // below; no call here touches the host's disk.
+        // The default filesystem. Its watch services are `watch_service.rs`'s;
+        // no call here touches the host's disk.
         ("java/nio/file/FileSystems", "getDefault", "()Ljava/nio/file/FileSystem;") => {
             Some(Ok(Value::Ref(Some("file-system/default".into()))))
         }
@@ -396,37 +396,9 @@ pub(crate) fn instance_call(
         };
     }
     if marker == "file-system/default" {
+        // `newWatchService` is `watch_service.rs`'s.
         return match (r.name.as_str(), r.descriptor.as_str()) {
-            ("newWatchService", "()Ljava/nio/file/WatchService;") => {
-                Some(Ok(Value::Ref(Some("watch-service/default".into()))))
-            }
             ("getSeparator", "()Ljava/lang/String;") => Some(Ok(Value::Ref(Some("/".into())))),
-            _ => None,
-        };
-    }
-    if marker == "watch-service/default" {
-        return match (r.name.as_str(), r.descriptor.as_str()) {
-            // The virtual filesystem has no external writer, so no event is
-            // ever pending; `poll` answering null is the JVM's "nothing
-            // happened yet", not an invented event. `take` would block the
-            // single thread for ever, so it stays unmodelled and counted.
-            ("poll", "()Ljava/nio/file/WatchKey;") => Some(Ok(Value::Ref(None))),
-            ("poll", "(JLjava/util/concurrent/TimeUnit;)Ljava/nio/file/WatchKey;") => {
-                Some(Ok(Value::Ref(None)))
-            }
-            ("close", "()V") => Some(Ok(Value::Void)),
-            _ => None,
-        };
-    }
-    if marker.starts_with("watch-key/") {
-        return match (r.name.as_str(), r.descriptor.as_str()) {
-            ("pollEvents", "()Ljava/util/List;") => Some(Ok(Value::Ref(Some("list".into())))),
-            // A key with no pending events is still valid, so `reset` reports
-            // true and the mod keeps polling. `cancel` has no state to clear
-            // and `isValid` keeps answering true afterwards; a mod that
-            // cancels and then polls is outside the modelled surface.
-            ("reset" | "isValid", "()Z") => Some(Ok(Value::Int(1))),
-            ("cancel", "()V") => Some(Ok(Value::Void)),
             _ => None,
         };
     }
@@ -437,12 +409,6 @@ pub(crate) fn instance_call(
             }
             _ => None,
         };
-    }
-    // `Path.register(service, kinds...)`: the key names the watched path. The
-    // game never changes a file behind the mod's back, so the key will never
-    // report an event.
-    if r.owner == "java/nio/file/Path" && r.name == "register" {
-        return Some(Ok(Value::Ref(Some(format!("watch-key/{marker}")))));
     }
     None
 }
@@ -520,18 +486,24 @@ const TO_MAP_COLLECTOR_PREFIX: &str = "collector/to-map/";
 /// The leading operand that marks a `to-map` collector as Guava's.
 const GUAVA_COLLECTOR_FLAG: &str = "@guava";
 
-/// A `Collectors.toMap` collection in progress: its functions and the
-/// entries so far, in encounter order. The stream push feeds it one element
-/// at a time (`stream_pipeline.rs`), so the key and value functions run
-/// interleaved with the stages, as JDK 25's `ReduceOps` runs a collector's
-/// accumulator.
+/// A `Collectors.toMap` collection in progress: its functions and what it
+/// has collected so far. The stream push feeds it one element at a time
+/// (`stream_pipeline.rs`), so the key and value functions run interleaved
+/// with the stages, as JDK 25's `ReduceOps` runs a collector's accumulator.
+///
+/// `Collectors.toMap` collects into a host `HashMap` (`map`, made by
+/// [`crate::Runtime::begin_to_map`] as the sink's `begin` runs `HashMap::new`)
+/// through `hash_bulk.rs`'s `putIfAbsent`/`merge`, so the result iterates in
+/// JDK 25's table order. Guava's collectors keep `entries` in encounter
+/// order, as an `ImmutableMap` does.
 #[derive(Clone, Debug)]
 pub(crate) struct ToMap {
-    key_fn: Value,
-    value_fn: Value,
-    merge_fn: Option<Value>,
+    pub(crate) key_fn: Value,
+    pub(crate) value_fn: Value,
+    pub(crate) merge_fn: Option<Value>,
     guava: bool,
     entries: Vec<(Value, Value)>,
+    map: Option<Value>,
 }
 
 impl ToMap {
@@ -562,11 +534,15 @@ impl ToMap {
             merge_fn,
             guava,
             entries: Vec::new(),
+            map: None,
         }))
     }
 
     /// The collected map.
     pub(crate) fn finish(self) -> Value {
+        if let Some(map) = self.map {
+            return map;
+        }
         let flat = self
             .entries
             .into_iter()
@@ -937,21 +913,17 @@ pub(crate) fn platform_instance_of(marker: &str, wanted: &str) -> bool {
     if crate::reflect_generic::annotated_type_instance_of(marker, wanted) {
         return true;
     }
-    let class = if let Some((class, _)) = marker.split_once('#') {
-        class
-    } else {
-        match marker.split_once(':').map(|(prefix, _)| prefix) {
-            Some("integer") => "java/lang/Integer",
-            Some("long") => "java/lang/Long",
-            Some("short") => "java/lang/Short",
-            Some("byte") => "java/lang/Byte",
-            Some("float") => "java/lang/Float",
-            Some("double") => "java/lang/Double",
-            Some("character") => "java/lang/Character",
-            Some("boolean") => "java/lang/Boolean",
-            _ => return false,
-        }
+    let Some((class, _)) = marker.split_once('#') else {
+        return false;
     };
+    class_instance_of(class, wanted)
+}
+
+/// Whether an instance of the platform class `class` is a `wanted`.
+pub(crate) fn class_instance_of(class: &str, wanted: &str) -> bool {
+    if class == wanted {
+        return true;
+    }
     let known = match platform_supertypes(class) {
         [] => crate::java_immutable::supertypes(class),
         known => known,
@@ -993,6 +965,7 @@ pub(crate) fn adapt_to_primitive(value: &Value, descriptor: &str) -> Option<Valu
         return None;
     }
     let primitive = match value {
+        Value::Boxed(boxed) => boxed.primitive(),
         Value::Ref(Some(_)) => match descriptor {
             "C" => super::boxed_character(value).map(Value::Int),
             "Z" => super::boxed_boolean(value).map(|flag| Value::Int(i32::from(flag))),
@@ -1027,49 +1000,6 @@ pub(crate) fn class_access_flags(file: &crate::ClassFile) -> Option<u16> {
     reader.skip(4).ok()?;
     crate::read_pool(&mut reader).ok()?;
     reader.u2().ok()
-}
-
-/// The text `String.valueOf` gives a boxed value, for a concatenation
-/// operand typed `desc`.
-///
-/// `"" + Boolean.TRUE` is `"true"`; the runtime's box marker is
-/// `boolean:true`, and pasting the marker made Xaero's config codec reject a
-/// 12-character boolean against its 5-character bound. Only an operand typed
-/// as a box, `Number`, `Comparable`, `Serializable` or `Object` is read as a
-/// box: a `String` operand is text, whatever it spells.
-pub(crate) fn boxed_text(marker: &str, desc: &str) -> Option<String> {
-    if !matches!(
-        desc,
-        "Ljava/lang/Object;"
-            | "Ljava/lang/Number;"
-            | "Ljava/lang/Comparable;"
-            | "Ljava/io/Serializable;"
-            | "Ljava/lang/Boolean;"
-            | "Ljava/lang/Integer;"
-            | "Ljava/lang/Long;"
-            | "Ljava/lang/Short;"
-            | "Ljava/lang/Byte;"
-            | "Ljava/lang/Character;"
-            | "Ljava/lang/Float;"
-            | "Ljava/lang/Double;"
-    ) {
-        return None;
-    }
-    let (prefix, rest) = marker.split_once(':')?;
-    match prefix {
-        "boolean" => matches!(rest, "true" | "false").then(|| rest.to_owned()),
-        "integer" | "long" | "short" | "byte" => {
-            rest.parse::<i64>().ok().map(|value| value.to_string())
-        }
-        "character" => rest
-            .parse::<u32>()
-            .ok()
-            .and_then(char::from_u32)
-            .map(String::from),
-        "double" => rest.parse::<f64>().ok().map(super::format_java_float),
-        "float" => rest.parse::<f64>().ok().map(super::format_java_float32),
-        _ => None,
-    }
 }
 
 /// Whether `marker` names an object this runtime or the host built
@@ -1473,13 +1403,25 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         collector: &str,
         values: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let Some(mut state) = ToMap::begin(collector)? else {
+        let Some(mut state) = self.begin_to_map(collector)? else {
             return Ok(None);
         };
         for element in values {
             self.accept_to_map(&mut state, element)?;
         }
         Ok(Some(state.finish()))
+    }
+
+    /// [`ToMap::begin`], and for `Collectors.toMap` the `HashMap::new` its
+    /// supplier runs before the first element.
+    pub(crate) fn begin_to_map(&mut self, collector: &str) -> Result<Option<ToMap>, NativeError> {
+        let Some(mut state) = ToMap::begin(collector)? else {
+            return Ok(None);
+        };
+        if !state.guava {
+            state.map = Some(self.new_collector_hash_map()?);
+        }
+        Ok(Some(state))
     }
 
     /// `toMap`'s accumulator for one element: the key function, then the
@@ -1492,6 +1434,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         state: &mut ToMap,
         element: &Value,
     ) -> Result<(), NativeError> {
+        if let Some(map) = state.map.clone() {
+            // `Collectors.toMap`: `putIfAbsent` or `merge` on the `HashMap`.
+            return self.hash_map_collect_one(&map, state, element);
+        }
         let key = self.apply_function(&state.key_fn, element)?;
         let value = self.apply_function(&state.value_fn, element)?;
         if matches!(value, Value::Ref(None)) {
