@@ -113,12 +113,10 @@ impl<H: Host> Runtime<'_, H> {
             (COLLECTION, "stream" | "parallelStream") => {
                 // A `RandomAccess` list's `List.spliterator` reads it by
                 // index (`list.rs`).
-                let random_access = expect_ref(this)
-                    .and_then(|marker| jvm_dispatch::constructed_object_class(marker))
-                    .is_some_and(|class| {
-                        self.class_is_instance(class, "java/util/List")
-                            && self.class_is_instance(class, "java/util/RandomAccess")
-                    });
+                let random_access = crate::runtime::jar_object::object_class(this).is_some_and(|class| {
+                    self.class_is_instance(class, "java/util/List")
+                        && self.class_is_instance(class, "java/util/RandomAccess")
+                });
                 if random_access {
                     let values = self.random_access_values(this)?;
                     return Ok(self.new_stream("java/util/List", name, values));

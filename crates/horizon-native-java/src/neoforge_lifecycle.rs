@@ -379,15 +379,16 @@ impl NativeJar {
     /// How a queued `Runnable#run` or `Supplier#get` is reached: a lambda or method reference, or
     /// a jar object's method.
     fn work_callback(&self, task: &DeferredTask) -> Option<ListenerCallback> {
-        let text = expect_ref(&task.work)?;
-        if text.starts_with("@indy:") {
+        if let Some(text) = expect_ref(&task.work)
+            && text.starts_with("@indy:")
+        {
             let marker = crate::parse_callback_marker(text).ok()?;
             return Some(ListenerCallback::Indy {
                 target: marker.target,
                 captures: marker.captures,
             });
         }
-        let (class, _) = text.split_once('#')?;
+        let class = crate::jar_object::object_class(&task.work)?;
         let (name, descriptor) = if task.supplier {
             ("get", "()Ljava/lang/Object;")
         } else {

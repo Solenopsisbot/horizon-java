@@ -330,10 +330,10 @@ fn run_runnable<H: Host>(rt: &mut Runtime<'_, H>, task: &Value) -> Result<(), Na
     if rt.invoke_callback(task, &[])?.is_some() {
         return Ok(());
     }
-    let Some(marker) = expect_ref(task) else {
+    if *task == Value::Ref(None) {
         return Err(native_npe());
-    };
-    if let Some((class, _)) = marker.split_once('#')
+    }
+    if let Some(class) = crate::jar_object::object_class(task)
         && rt
             .class(class)
             .is_some_and(|file| file.method("run", RUNNABLE_RUN).is_some())
@@ -351,10 +351,10 @@ fn run_callable<H: Host>(rt: &mut Runtime<'_, H>, task: &Value) -> Result<Value,
     if let Some(value) = rt.invoke_callback(task, &[])? {
         return Ok(value);
     }
-    let Some(marker) = expect_ref(task) else {
+    if *task == Value::Ref(None) {
         return Err(native_npe());
-    };
-    if let Some((class, _)) = marker.split_once('#')
+    }
+    if let Some(class) = crate::jar_object::object_class(task)
         && rt
             .class(class)
             .is_some_and(|file| file.method("call", CALLABLE_CALL).is_some())

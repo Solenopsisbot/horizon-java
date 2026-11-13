@@ -181,12 +181,11 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        if let Some(marker) = receiver.and_then(expect_ref).filter(|marker| {
-            marker
-                .rsplit_once('#')
-                .is_some_and(|(class, _)| class == ATTRIBUTES_CLASS)
-        }) {
-            return self.attributes_call(r, &marker.clone());
+        if let Some(marker) = receiver
+            .and_then(crate::jar_object::object_key)
+            .filter(|marker| crate::jar_object::key_class(marker) == Some(ATTRIBUTES_CLASS))
+        {
+            return self.attributes_call(r, marker);
         }
         // `UnixPath.equals`/`hashCode` are the path kind's row (`host_path.rs`).
         if r.owner == "java/nio/file/Path"

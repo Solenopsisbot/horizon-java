@@ -112,8 +112,7 @@ impl<H: Host> Runtime<'_, H> {
     /// reaches a JDK throwable is itself; anything else keeps the name-based
     /// answer (`java/lang/Throwable` when the marker is not a throwable).
     pub(crate) fn throwable_class(&self, value: &Value) -> String {
-        if let Some(class) =
-            expect_ref(value).and_then(|marker| jvm_dispatch::constructed_object_class(marker))
+        if let Some(class) = crate::runtime::jar_object::object_class(value)
             && !is_throwable_owner(class)
             && self.jar_throwable(class)
         {
@@ -125,12 +124,12 @@ impl<H: Host> Runtime<'_, H> {
     /// The message a thrown value's `Throwable` constructor recorded, for a
     /// JDK throwable marker or a jar throwable object.
     pub(crate) fn thrown_text(&self, value: &Value) -> Option<String> {
-        let marker = expect_ref(value)?;
-        let jar = jvm_dispatch::constructed_object_class(marker)
-            .is_some_and(|class| self.jar_throwable(class));
-        if jar {
-            return self.host.throwable_message(marker);
+        if let Some(key) = crate::runtime::jar_object::object_key(value)
+            && crate::runtime::jar_object::key_class(key).is_some_and(|class| self.jar_throwable(class))
+        {
+            return self.host.throwable_message(key);
         }
+        expect_ref(value)?;
         thrown_message(value, self.host)
     }
 
@@ -177,7 +176,7 @@ impl<H: Host> Runtime<'_, H> {
         {
             return None;
         }
-        let class = jvm_dispatch::constructed_object_class(expect_ref(value)?)?;
+        let class = crate::runtime::jar_object::object_class(value)?;
         let root = if self.class(class).is_some() {
             self.throwable_root(class)?
         } else if is_throwable_owner(class) {
@@ -230,8 +229,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        let Some(class) = expect_ref(receiver)
-            .and_then(|marker| jvm_dispatch::constructed_object_class(marker))
+        let Some(class) = crate::runtime::jar_object::object_class(receiver)
             .filter(|class| self.jar_throwable(class))
             .map(str::to_owned)
         else {

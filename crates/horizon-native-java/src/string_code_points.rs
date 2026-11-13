@@ -53,7 +53,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 if self.string_builders.contains_key(text)
-                    || crate::jar_text::object_marker_class(text).is_some()
+                    || crate::jar_object::packaged_key_class(text).is_some()
                 {
                     return Ok(None);
                 }
@@ -99,7 +99,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 if self.string_builders.contains_key(text)
-                    || crate::jar_text::object_marker_class(text).is_some()
+                    || crate::jar_object::packaged_key_class(text).is_some()
                 {
                     return Ok(None);
                 }

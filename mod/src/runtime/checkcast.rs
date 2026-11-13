@@ -262,7 +262,7 @@ impl<H: Host> Runtime<'_, H> {
         // other serials, `#neutral0`, `#immutable0`). A `Class` is not told
         // apart: its marker is a bare class name, which a `ServiceLoader`
         // provider instance shares.
-        let class = crate::runtime::jar_text::object_marker_class(marker)?;
+        let class = crate::runtime::jar_object::packaged_object_class(value)?;
         (self.class(class).is_some() || class.starts_with("java/")).then(|| class.to_owned())
     }
 
@@ -346,7 +346,7 @@ impl<H: Host> Runtime<'_, H> {
         marker
             .strip_prefix("enum/")
             .and_then(|rest| rest.rsplit_once('/').map(|(class, _)| class))
-            .or_else(|| marker.split_once('#').map(|(class, _)| class))
+            .or_else(|| crate::runtime::jar_object::object_class(value))
             .or(Some(marker.as_str()))
             .filter(|class| self.class(class).is_some())
             .map(str::to_owned)
@@ -399,7 +399,7 @@ impl<H: Host> Runtime<'_, H> {
         let object_class = marker
             .strip_prefix("enum/")
             .and_then(|rest| rest.rsplit_once('/').map(|(class, _)| class))
-            .or_else(|| marker.split_once('#').map(|(class, _)| class))
+            .or_else(|| crate::runtime::jar_object::object_class(value))
             // A jar provider `ServiceLoader` hands out is its bare class name;
             // `instanceof` reads such a marker as an instance of that class,
             // and the cast agrees with it.
@@ -427,9 +427,7 @@ impl<H: Host> Runtime<'_, H> {
                                 "list" | "set" | "map" | "true" | "false"
             )
             // An object `new` made of a JDK class (`java/util/ArrayList#3`).
-            || marker
-                .split_once('#')
-                .is_some_and(|(class, _)| class.starts_with("java/"));
+            || crate::runtime::jar_object::value_marker_class(value).is_some_and(|class| class.starts_with("java/"));
         if jdk_kind {
             return (Verdict::No, class_of_value(value));
         }

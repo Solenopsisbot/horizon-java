@@ -1874,8 +1874,7 @@ pub(crate) fn indy_argument(args: &[Value]) -> Option<&str> {
 
 /// An object argument whose class the jar declares: `cls#N`.
 pub(crate) fn jar_object<'a>(jar: &NativeJar, value: &'a Value) -> Option<(&'a str, &'a Value)> {
-    let text = expect_ref(value)?;
-    let (class, _) = text.split_once('#')?;
+    let class = crate::jar_object::object_class(value)?;
     jar.classes.contains_key(class).then_some((class, value))
 }
 

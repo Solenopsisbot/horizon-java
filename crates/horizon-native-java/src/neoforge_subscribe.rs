@@ -139,13 +139,13 @@ impl<H: Host> Runtime<'_, H> {
 
     /// The class a `register` target names: a jar object's class, or a jar class itself.
     fn register_target(&self, target: &Value) -> Option<Target> {
-        let text = expect_ref(target)?;
-        if let Some((class, _)) = text.split_once('#')
+        if let Some(class) = crate::jar_object::object_class(target)
             && self.class(class).is_some()
         {
             return Some(Target::Object(class.to_owned()));
         }
         // Departure R2: a bare jar class name is that `Class`, or a `@Mod` class's instance.
+        let text = expect_ref(target)?;
         let file = self.class(text)?;
         let entry = file
             .annotations

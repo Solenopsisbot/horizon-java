@@ -33,7 +33,6 @@
 //! `useForNull`, a pattern or a `CharMatcher` separator) is counted.
 
 use super::*;
-use crate::runtime::jvm_dispatch::constructed_object_class;
 
 const SPLITTER: &str = "com/google/common/base/Splitter";
 const JOINER: &str = "com/google/common/base/Joiner";
@@ -179,7 +178,7 @@ impl StdHost {
             }
             // A jar object's `toString` is its own bytecode, which this host
             // can't run.
-            if expect_ref(part).is_some_and(|marker| constructed_object_class(marker).is_some()) {
+            if crate::runtime::jar_object::object_class(part).is_some() {
                 return self.unknown_host_call(r);
             }
             text.push(

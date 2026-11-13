@@ -148,10 +148,7 @@ pub(crate) fn is_tree(marker: &str) -> bool {
 }
 
 fn kind_of(marker: &str) -> Option<Kind> {
-    let (class, serial) = marker.split_once('#')?;
-    if serial.is_empty() || !serial.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
+    let class = crate::runtime::jar_object::key_class(marker)?;
     Some(match class {
         JSON_OBJECT => Kind::Object,
         JSON_ARRAY => Kind::Array,
@@ -175,7 +172,7 @@ pub(crate) fn static_field(r: &MethodRef) -> Option<Value> {
 
 /// `marker instanceof wanted` for the modelled classes.
 pub(crate) fn instance_of(marker: &str, wanted: &str) -> bool {
-    let Some(class) = kind_of(marker).and_then(|_| marker.split_once('#').map(|(c, _)| c)) else {
+    let Some(class) = kind_of(marker).and_then(|_| crate::runtime::jar_object::key_class(marker)) else {
         return false;
     };
     class == wanted
@@ -1014,14 +1011,14 @@ impl<H: Host> Runtime<'_, H> {
                     "getAsJsonArray" => JSON_ARRAY,
                     _ => JSON_OBJECT,
                 };
-                if let Some(actual) = expect_ref(&value).and_then(|m| m.split_once('#'))
-                    && actual.0 != wanted
+                if let Some(actual) = crate::runtime::jar_object::object_class(&value)
+                    && actual != wanted
                 {
                     return Err(thrown(
                         "java/lang/ClassCastException",
                         Some(format!(
                             "class {} cannot be cast to class {}",
-                            dotted(actual.0),
+                            dotted(actual),
                             dotted(wanted)
                         )),
                     ));
