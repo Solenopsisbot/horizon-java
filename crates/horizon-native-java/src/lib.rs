@@ -7839,8 +7839,7 @@ impl Host for StdHost {
                         Ok(map_entry_value(&key, &value))
                     })
                     .collect::<Result<Vec<_>, NativeError>>()?;
-                let copy = collection_value("set", &entries);
-                Ok(copy)
+                Ok(collection_value("set", &entries))
             }
             // `ConcurrentHashMap.keySet()` declares its `KeySetView`; the
             // snapshot is the same key set.
@@ -7856,8 +7855,7 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| parse_collection_value(&pair[0]))
                     .collect::<Result<Vec<_>, _>>()?;
-                let copy = collection_value("set", &keys);
-                Ok(copy)
+                Ok(collection_value("set", &keys))
             }
             (owner, "values", "()Ljava/util/Collection;") if is_map_owner(owner) => {
                 let values = host_collection_values(self, receiver)?;
@@ -7867,8 +7865,7 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| parse_collection_value(&pair[1]))
                     .collect::<Result<Vec<_>, _>>()?;
-                let copy = collection_value("list", &values);
-                Ok(copy)
+                Ok(collection_value("list", &values))
             }
             (owner, "toString", "()Ljava/lang/String;") if is_collection_owner(owner) => {
                 // A jar subclass's marker names its own class; the JDK owner
