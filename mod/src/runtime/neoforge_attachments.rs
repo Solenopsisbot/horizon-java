@@ -1279,6 +1279,7 @@ impl NativeJar {
         let mut callback_infos = crate::runtime::CallbackInfos::new();
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
