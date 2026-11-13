@@ -443,10 +443,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
-        if !marker.contains('#')
-            && !marker.starts_with("typetoken/")
-            && !marker.starts_with("method-type/")
-        {
+        if !marker.contains('#') && !marker.starts_with("typetoken/") {
             return Ok(None);
         }
         let to_string = MethodRef {
