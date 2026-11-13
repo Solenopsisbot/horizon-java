@@ -313,17 +313,27 @@ pub(crate) fn pure_equality(value: &Value) -> bool {
 }
 
 /// `instanceof` for a game class the runtime does not hold: its own
-/// supertypes, then whatever the hierarchy knows (a Mixin-added interface).
+/// supertypes, or an interface a loaded Mixin adds (the hierarchy). These
+/// classes' superclass chains are fixed (a Mixin adds interfaces, never a
+/// superclass), so any other *class* is a proved "no"; another interface is
+/// unknown (another jar's Mixin may add it, as #163 settles) and counted.
 fn instance_of(
     handle: &HostRef,
     wanted: &str,
     supertypes: &[&str],
     hierarchy: &dyn crate::runtime::host_ref::ClassHierarchy,
 ) -> Option<bool> {
-    if wanted == handle.class() || wanted == "java/lang/Object" || supertypes.contains(&wanted) {
+    // Every kind here has a fixed class.
+    let class = handle.class()?;
+    if wanted == class || wanted == "java/lang/Object" || supertypes.contains(&wanted) {
         return Some(true);
     }
-    hierarchy.is_instance(handle.class(), wanted)
+    if hierarchy.is_instance(class, wanted) == Some(true) {
+        return Some(true);
+    }
+    let a_class = [IDENTIFIER, RESOURCE_KEY, TAG_KEY, BLOCK_ITEM_ID].contains(&wanted)
+        || hierarchy.is_interface(wanted) == Some(false);
+    a_class.then_some(false)
 }
 
 fn named(handle: &HostRef) -> bool {

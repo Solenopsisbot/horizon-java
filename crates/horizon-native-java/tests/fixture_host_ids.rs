@@ -27,7 +27,7 @@ hashed={minecraft:stone=0, minecraft:silk_touch=4, demo:machine=1, a:x=2, z:q=3,
 keys=ResourceKey[minecraft:item / a:x]|a:x|minecraft:item|truefalse|truefalsefalse|net.minecraft.resources.ResourceKeytrue|ResourceKey[minecraft:dimension / minecraft:overworld]|[ResourceKey[minecraft:item / a:x], ResourceKey[minecraft:dimension / minecraft:overworld]]true|true\n\
 tags=TagKey[minecraft:item / a:t]|a:t|truefalse|truefalsefalsefalse|net.minecraft.tags.TagKeytrue|true\n\
 blockItems=BlockItemId[block=ResourceKey[minecraft:block / minecraft:lamp], item=ResourceKey[minecraft:item / minecraft:lamp]]|ResourceKey[minecraft:block / a:b]|ResourceKey[minecraft:item / a:i]|truefalsefalse|true|net.minecraft.references.BlockItemIdtrue|BlockItemId[block=ResourceKey[minecraft:block / minecraft:b], item=ResourceKey[minecraft:item / minecraft:i]]\n\
-types=mc:stonetruefalsetruefalsetrue,id:a:xtruefalsetruefalsefalse,key:a:kfalsetruefalsefalsefalse,tag:a:tfalsefalsefalsetruefalse,bii:minecraft:lampfalsefalsefalsetruefalse,str:a:xfalsefalsetruefalsefalse,truetruefalsea:xtrue\n\
+types=mc:stonetruefalsetruefalsetrue,id:a:xtruefalsetruefalsefalse,key:a:kfalsetruefalsefalsefalse,tag:a:tfalsefalsefalsetruefalse,bii:minecraft:lampfalsefalsefalsetruefalse,str:a:xfalsefalsefalsefalsefalse,truetruefalsea:xtrue\n\
 sorts=[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]|[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]|[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]|{a:a=3, b:a=0, a:b=1, c:b=6, c:b/c=5, minecraft:stone=2, z:stone=4}|a:az:stone3true|[a:a, b:a, a:b, c:b, c:b/c, minecraft:stone, z:stone]true|[z:stone, minecraft:stone, c:b/c, c:b, a:b, b:a, a:a]|z:stonea:a\n\
 keySort=CCE\n\
 collections=4,truetruetruetrue4|truetrue[b:y]|onetrue{a:x=one}|true5true1|{a:x=ResourceKey[minecraft:block / a:k], b:k=TagKey[minecraft:item / a:t]}TagKey[minecraft:item / a:t]true|a:x=3|101057,3127,[a:x]\n\
@@ -42,6 +42,7 @@ identifierIdentityMap=2\n\
 blockItemIdentity=false\n\
 keyHash=362479845\n\
 tagHash=1497761092\n\
+keyComparable=false\n\
 ";
 
 const IDENTIFIER_STUB: &str = r#"package net.minecraft.resources;
@@ -272,7 +273,7 @@ public final class Probe {
         StringBuilder out = new StringBuilder();
         for (Object o : values) {
             out.append(kind(o)).append(Identifier.class.isInstance(o)).append(ResourceKey.class.isInstance(o))
-                .append(Comparable.class.isInstance(o)).append(Record.class.isInstance(o))
+                .append(o instanceof Identifier && Comparable.class.isInstance(o)).append(Record.class.isInstance(o))
                 .append(o instanceof Identifier i && i.getPath().startsWith("s")).append(',');
         }
         Object o = id("a:x");
@@ -454,6 +455,11 @@ public final class Probe {
         return "" + (BlockItemId.create("lamp") == BlockItemId.create("lamp"));
     }
 
+    /** ResourceKey is not Comparable, but a Mixin may add an interface to a game class: counted. */
+    public static String keyComparable() {
+        return "" + Comparable.class.isInstance(ResourceKey.create(Registries.ITEM, id("a:x")));
+    }
+
     /** ResourceKey and TagKey hash by identity (no hashCode of their own over an identity hash). */
     public static String keyHash() {
         return "" + ResourceKey.create(Registries.ITEM, id("a:x")).hashCode();
@@ -586,7 +592,9 @@ fn identity_of_two_equal_identifiers_is_counted() {
     }
 }
 
-/// What only a JVM knows is counted: `ResourceKey.hashCode` is
+/// What only a JVM knows is counted (and `instanceof` an interface a game
+/// class does not declare, which another jar's Mixin may add):
+/// `ResourceKey.hashCode` is
 /// `Object.hashCode` and `TagKey`'s record hash mixes in its registry key's
 /// (identity hashes, a different number per JVM), and `ResourceKey` is not
 /// `Comparable` (Java 25 throws `ClassCastException` sorting two).
@@ -599,6 +607,11 @@ fn identity_hashes_and_a_key_sort_are_counted() {
         (
             "keySort",
             "java/lang/Comparable#compareTo(Ljava/lang/Object;)I",
+        ),
+        // Java: `false`; a Mixin may add an interface to a game class (#163).
+        (
+            "keyComparable",
+            "java/lang/Comparable#<instanceof>(Ljava/lang/Object;)Z",
         ),
     ] {
         let (_, unknown) = run(&fixture, method);
