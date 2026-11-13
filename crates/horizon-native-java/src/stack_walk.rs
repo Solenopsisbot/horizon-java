@@ -21,11 +21,6 @@ thread_local! {
     static FRAMES: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Marker prefix of one `StackWalker.StackFrame`: `stack-frame/<method>@<class>`.
-const FRAME_PREFIX: &str = "stack-frame/";
-/// The one walker marker `StackWalker.getInstance` answers.
-const WALKER_MARKER: &str = "stack-walker";
-
 /// Record entry into one jar frame. Paired with [`leave`]; the stack never
 /// grows past the interpreter's own recursion bound.
 pub(crate) fn enter(class: &str, method: &str) {
@@ -48,17 +43,6 @@ pub(crate) fn snapshot() -> Vec<(String, String)> {
     FRAMES.with(|frames| frames.borrow().iter().rev().cloned().collect())
 }
 
-fn frame_marker(class: &str, method: &str) -> Value {
-    Value::Ref(Some(format!("{FRAME_PREFIX}{method}@{class}")))
-}
-
-/// `(class, method)` of a frame marker.
-fn parse_frame(value: &Value) -> Option<(&str, &str)> {
-    let rest = expect_ref(value)?.strip_prefix(FRAME_PREFIX)?;
-    let (method, class) = rest.split_once('@')?;
-    Some((class, method))
-}
-
 impl<H: Host> Runtime<'_, H> {
     /// Answer the `StackWalker` surface, or `None` for any other call.
     pub(super) fn invoke_stack_walker(
@@ -69,9 +53,34 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         match (r.owner.as_str(), r.name.as_str()) {
             // Every overload (options, a set of options, an estimated depth)
-            // answers the same walker: the frames carry their class either way.
+            // walks the same way: the frames carry their class either way.
+            // JDK 25 answers its one `DEFAULT_WALKER` for `getInstance()` and
+            // for `getInstance(Set)` of an empty set (`Set.isEmpty`, then
+            // `getstatic DEFAULT_WALKER`); the option and depth overloads
+            // build a new walker.
             ("java/lang/StackWalker", "getInstance") => {
-                Ok(Some(Value::Ref(Some(WALKER_MARKER.into()))))
+                let options = match (r.descriptor.as_str(), args.first()) {
+                    ("()Ljava/lang/StackWalker;", _) => false,
+                    ("(Ljava/util/Set;)Ljava/lang/StackWalker;", Some(Value::Ref(None))) => {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
+                    ("(Ljava/util/Set;)Ljava/lang/StackWalker;", Some(set)) => {
+                        if self.host_collection_kind(set).is_none() {
+                            // Emptiness unknown: a key can't stand for "maybe
+                            // the default walker".
+                            self.host.unknown_operand_call(r)?;
+                            true
+                        } else {
+                            !self.collection_elements(set)?.is_empty()
+                        }
+                    }
+                    _ => true,
+                };
+                Ok(Some(crate::host_jdk::stack_walker(options)))
             }
             ("java/lang/StackWalker", "walk")
                 if r.descriptor == "(Ljava/util/function/Function;)Ljava/lang/Object;" =>
@@ -81,7 +90,9 @@ impl<H: Host> Runtime<'_, H> {
                 // frame the function sees is the method that called `walk`.
                 let frames = snapshot()
                     .iter()
-                    .map(|(class, method)| frame_marker(class, method))
+                    .map(|(class, method)| {
+                        crate::host_jdk::frame_value(HostKind::StackFrame, class, method)
+                    })
                     .collect();
                 let stream = self.new_stream("java/lang/StackWalker", "walk", frames);
                 // The frame stream's spliterator is not `SIZED`.
@@ -106,13 +117,15 @@ impl<H: Host> Runtime<'_, H> {
                 }
             }
             ("java/lang/StackWalker$StackFrame", name) => {
-                let Some((class, method)) = receiver.and_then(parse_frame) else {
+                let Some((class, method)) = receiver
+                    .and_then(|frame| crate::host_jdk::frame_parts(frame, HostKind::StackFrame))
+                else {
                     return Ok(None);
                 };
                 Ok(match name {
                     "getClassName" => Some(Value::Ref(Some(class.replace('/', ".")))),
-                    "getMethodName" => Some(Value::Ref(Some(method.to_owned()))),
-                    "getDeclaringClass" => Some(Value::Ref(Some(class.to_owned()))),
+                    "getMethodName" => Some(Value::Ref(Some(method))),
+                    "getDeclaringClass" => Some(Value::Ref(Some(class))),
                     _ => None,
                 })
             }

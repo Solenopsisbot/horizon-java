@@ -6,6 +6,7 @@
 //! by a mod's name.
 
 use super::*;
+use crate::host_jdk::{self, JAVA_BASE_MODULE, UNNAMED_MODULE};
 
 impl<H: Host> Runtime<'_, H> {
     /// The library and JDK calls this module answers, or `None` to leave the
@@ -18,6 +19,10 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        // Loggers named after a class (`jdk_model.rs`).
+        if let Some(value) = self.invoke_logger_factory(r, args)? {
+            return Ok(Some(value));
+        }
         // `Files.readAttributes`/`isDirectory` (`file_attributes.rs`), also
         // as a method reference (`filter(Files::isDirectory)`).
         if let Some(value) = self.invoke_file_attributes(r, receiver, args)? {
@@ -82,7 +87,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_array_views(r, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_module(r, receiver, args) {
+        if let Some(value) = self.invoke_module(r, receiver, args)? {
             return Ok(Some(value));
         }
         if let Some(value) = unboxed_to_string(r, receiver) {
@@ -597,22 +602,34 @@ impl<H: Host> Runtime<'_, H> {
         r: &MethodRef,
         receiver: Option<&Value>,
         args: &[Value],
-    ) -> Option<Value> {
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
         if r.owner == "java/lang/Class"
             && r.name == "getModule"
             && r.descriptor == "()Ljava/lang/Module;"
         {
-            let class = expect_ref(receiver?)?;
-            let java_base = class.starts_with("java/")
-                || class.starts_with('[')
-                || PRIMITIVE_CLASSES.contains(&class.as_str());
-            return Some(Value::Ref(Some(
-                if java_base && !self.has_class(class) {
-                    JAVA_BASE_MODULE
-                } else {
-                    UNNAMED_MODULE
-                }
-                .into(),
+            let Some(class) = expect_ref(receiver) else {
+                return Ok(None);
+            };
+            // An array is in its element type's module, a primitive (and a
+            // primitive array) in `java.base`, a JDK class in the module
+            // Java 25 puts its package in (`jdk_closure::module_of`).
+            let element = if class.starts_with('[') {
+                erased_field_type(class.trim_start_matches('['))
+            } else {
+                class.clone()
+            };
+            let module = if PRIMITIVE_CLASSES.contains(&element.as_str()) {
+                Some(JAVA_BASE_MODULE)
+            } else if self.has_class(&element) {
+                None
+            } else {
+                crate::jdk_closure::module_of(&element)
+            };
+            return Ok(Some(host_jdk::module_value(
+                module.unwrap_or(UNNAMED_MODULE),
             )));
         }
         // A primitive's package is `java.lang` and an array's is its
@@ -622,7 +639,9 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getPackageName"
             && r.descriptor == "()Ljava/lang/String;"
         {
-            let class = expect_ref(receiver?)?;
+            let Some(class) = expect_ref(receiver) else {
+                return Ok(None);
+            };
             let element = class.trim_start_matches('[');
             let element = if class.starts_with('[') {
                 erased_field_type(element)
@@ -630,42 +649,50 @@ impl<H: Host> Runtime<'_, H> {
                 element.to_owned()
             };
             if PRIMITIVE_CLASSES.contains(&element.as_str()) {
-                return Some(Value::Ref(Some("java.lang".into())));
+                return Ok(Some(Value::Ref(Some("java.lang".into()))));
             }
             if class.starts_with('[') {
                 let package = element.rsplit_once('/').map_or("", |(package, _)| package);
-                return Some(Value::Ref(Some(package.replace('/', "."))));
+                return Ok(Some(Value::Ref(Some(package.replace('/', ".")))));
             }
-            return None;
+            return Ok(None);
         }
         if r.owner != "java/lang/Module" {
-            return None;
+            return Ok(None);
         }
-        let module = expect_ref(receiver?)?.clone();
-        let named = module == JAVA_BASE_MODULE;
-        if !named && module != UNNAMED_MODULE {
-            return None;
-        }
-        Some(match (r.name.as_str(), r.descriptor.as_str()) {
+        let Some(name) = host_jdk::module_name(receiver).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let named = name != UNNAMED_MODULE;
+        let java_base = name == JAVA_BASE_MODULE;
+        Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("isNamed", "()Z") => Value::Int(i32::from(named)),
-            ("getName", "()Ljava/lang/String;") => {
-                Value::Ref(named.then(|| "java.base".to_owned()))
-            }
+            ("getName", "()Ljava/lang/String;") => Value::Ref(named.then_some(name)),
+            // Every system module is in the boot layer; an unnamed module is
+            // in none.
             ("getLayer", "()Ljava/lang/ModuleLayer;") => {
                 Value::Ref(named.then(|| "module-layer/boot".to_owned()))
             }
+            // A named module's descriptor is an object the runtime does not
+            // model: counted. An unnamed module has none.
+            ("getDescriptor", "()Ljava/lang/module/ModuleDescriptor;") if named => {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
             ("getDescriptor", "()Ljava/lang/module/ModuleDescriptor;") => Value::Ref(None),
-            ("getClassLoader", "()Ljava/lang/ClassLoader;") => {
-                Value::Ref((!named).then(|| "classloader/bootstrap".to_owned()))
+            // `java.base` is the bootstrap loader's (`null`); another system
+            // module may be the platform loader's: counted.
+            ("getClassLoader", "()Ljava/lang/ClassLoader;") if java_base => Value::Ref(None),
+            ("getClassLoader", "()Ljava/lang/ClassLoader;") if !named => {
+                Value::Ref(Some("classloader/bootstrap".to_owned()))
             }
             (
                 "isExported" | "isOpen",
                 "(Ljava/lang/String;)Z" | "(Ljava/lang/String;Ljava/lang/Module;)Z",
-            ) => {
+            ) if java_base || !named => {
                 // `java.base` exports `java.*`; it opens none of them to an
-                // unnamed module.
+                // unnamed module. An unnamed module exports and opens all.
                 let package = args.first().and_then(expect_ref).map(String::as_str);
-                Value::Int(i32::from(if named {
+                Value::Int(i32::from(if java_base {
                     r.name == "isExported"
                         && package.is_some_and(|package| package.starts_with("java."))
                 } else {
@@ -673,16 +700,12 @@ impl<H: Host> Runtime<'_, H> {
                 }))
             }
             ("canRead", "(Ljava/lang/Module;)Z") => Value::Int(1),
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(
-                if named {
-                    "module java.base"
-                } else {
-                    "unnamed module"
-                }
-                .into(),
-            )),
-            _ => return None,
-        })
+            // Another system module's loader and exports are not modelled.
+            ("getClassLoader" | "isExported" | "isOpen", _) => {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
+            _ => return Ok(None),
+        }))
     }
 
     /// A jar subclass of `java.io.FilterInputStream` reads through the
@@ -1124,24 +1147,20 @@ impl<H: Host> Runtime<'_, H> {
     /// has no Java frames below the entrypoint, so frames past the jar's own
     /// are not invented. `Thread.getStackTrace` lists its own JDK frame
     /// first, as the JVM does. Line numbers are not tracked (`-1`, the JVM's
-    /// "unknown"), and the file name is null.
+    /// "unknown"), and the file name is null; `toString`, which prints both,
+    /// is counted (`host_jdk.rs`).
     fn invoke_stack_trace(&mut self, r: &MethodRef, receiver: Option<&Value>) -> Option<Value> {
         if r.owner == "java/lang/StackTraceElement" {
-            let marker = receiver.and_then(expect_ref)?;
-            let rest = marker.strip_prefix(STACK_TRACE_ELEMENT_PREFIX)?;
-            let (method, class) = rest.split_once('@')?;
+            let (class, method) = host_jdk::frame_parts(receiver?, HostKind::StackTraceElement)?;
             let binary = class.replace('/', ".");
             return Some(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("getClassName", "()Ljava/lang/String;") => Value::Ref(Some(binary)),
-                ("getMethodName", "()Ljava/lang/String;") => Value::Ref(Some(method.to_owned())),
+                ("getMethodName", "()Ljava/lang/String;") => Value::Ref(Some(method)),
                 ("getLineNumber", "()I") => Value::Int(-1),
                 ("getFileName" | "getModuleName" | "getModuleVersion", "()Ljava/lang/String;") => {
                     Value::Ref(None)
                 }
                 ("isNativeMethod", "()Z") => Value::Int(0),
-                ("toString", "()Ljava/lang/String;") => {
-                    Value::Ref(Some(format!("{binary}.{method}(Unknown Source)")))
-                }
                 _ => return None,
             });
         }
@@ -1535,18 +1554,8 @@ const PRIMITIVE_CLASSES: &[&str] = &[
     "boolean", "byte", "char", "short", "int", "long", "float", "double", "void",
 ];
 
-/// The class loader's unnamed module every jar class is in.
-const UNNAMED_MODULE: &str = "module/unnamed";
-/// The JDK's `java.base` module.
-const JAVA_BASE_MODULE: &str = "module/java.base";
-
-/// Prefix of one `StackTraceElement`: `stack-trace-element/<method>@<class>`.
-const STACK_TRACE_ELEMENT_PREFIX: &str = "stack-trace-element/";
-
 fn stack_trace_element(class: &str, method: &str) -> Value {
-    Value::Ref(Some(format!(
-        "{STACK_TRACE_ELEMENT_PREFIX}{method}@{class}"
-    )))
+    host_jdk::frame_value(HostKind::StackTraceElement, class, method)
 }
 
 /// Where `ModContainer.getRootPaths()` puts each mod's root in the virtual

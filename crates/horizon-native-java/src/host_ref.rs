@@ -242,6 +242,18 @@ pub enum HostKind {
     GameEvent,
     /// The event a NeoForge loading stage posts: key its class and container.
     LifecycleEvent,
+    /// The thread callbacks run on (`host_jdk.rs`): key `main`.
+    Thread,
+    /// A logger: key `of_values([api, name])`.
+    Logger,
+    /// A `StackWalker`: key `""` for `getInstance()`'s, `options` otherwise.
+    StackWalker,
+    /// A `StackWalker.StackFrame` / `StackTraceElement` of a jar frame: key
+    /// `of_values([class, method])`.
+    StackFrame,
+    StackTraceElement,
+    /// A `java.lang.Module`: key `unnamed` or `java.base`.
+    Module,
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
@@ -785,6 +797,50 @@ const KINDS: &[KindInfo] = &[
         // A stage posts one event per container.
         canonical: always_canonical,
         methods: &crate::host_game_event::LIFECYCLE_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::Thread,
+        tag: "thr",
+        class: ClassRule::FromKey(|_| "java/lang/Thread"),
+        canonical: always_canonical,
+        methods: &crate::host_jdk::THREAD,
+    },
+    KindInfo {
+        kind: HostKind::Logger,
+        tag: "log",
+        class: ClassRule::Unknown {
+            declared: crate::host_jdk::logger_declared,
+        },
+        canonical: crate::host_jdk::logger_canonical,
+        methods: &crate::host_jdk::LOGGER,
+    },
+    KindInfo {
+        kind: HostKind::StackWalker,
+        tag: "walker",
+        class: ClassRule::Fixed("java/lang/StackWalker"),
+        canonical: canonical_when_empty,
+        methods: &crate::host_jdk::STACK_WALKER,
+    },
+    KindInfo {
+        kind: HostKind::StackFrame,
+        tag: "frame",
+        class: ClassRule::Fixed("java/lang/StackFrameInfo"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk::STACK_FRAME,
+    },
+    KindInfo {
+        kind: HostKind::StackTraceElement,
+        tag: "ste",
+        class: ClassRule::FromKey(|_| "java/lang/StackTraceElement"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk::STACK_TRACE_ELEMENT,
+    },
+    KindInfo {
+        kind: HostKind::Module,
+        tag: "module",
+        class: ClassRule::Fixed("java/lang/Module"),
+        canonical: always_canonical,
+        methods: &crate::host_jdk::MODULE,
     },
     KindInfo {
         kind: HostKind::StreamBuilder,
