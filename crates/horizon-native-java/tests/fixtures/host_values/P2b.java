@@ -2,6 +2,7 @@ package demo;
 
 import java.util.*;
 import org.apache.logging.log4j.LogManager;
+import org.slf4j.LoggerFactory;
 
 /**
  * #156 P2 (second half): the main thread, loggers, stack walking and modules
@@ -242,11 +243,32 @@ public final class P2b {
     return sb.toString() + (LogManager.getLogger("a,b") == LogManager.getLogger("a\\b"));
   }
 
+  /** A member class, for loggers named by a class. */
+  public static final class Inner {}
+
   /** `getInstance(Set)` of an empty set is the default walker (#173 B1). */
   public static String walkerEmptySet() {
     StackWalker d = StackWalker.getInstance();
     return "" + (StackWalker.getInstance(Set.of()) == d) + (StackWalker.getInstance(new HashSet<>()) == d)
         + (StackWalker.getInstance(Set.of(), 5) == d) + (StackWalker.getInstance(Set.of()) == StackWalker.getInstance(Set.of()));
+  }
+
+  /** log4j's getLogger() names the caller's class; Class/Object overloads use the canonical name. */
+  public static String log4jNames() {
+    Object anonymous = new Object() {};
+    return LogManager.getLogger().getName() + "|" + (LogManager.getLogger() == LogManager.getLogger("demo.P2b"))
+        + (LogManager.getLogger() == LogManager.getRootLogger()) + "|" + LogManager.getLogger(Inner.class).getName()
+        + (LogManager.getLogger(Inner.class) == LogManager.getLogger("demo.P2b.Inner"))
+        + (LogManager.getLogger(Inner.class) == LogManager.getLogger("demo.P2b$Inner")) + "|" + LogManager.getLogger(P2b.class).getName()
+        + "|" + LogManager.getLogger(anonymous.getClass()).getName() + "|" + LogManager.getLogger((Object) "x").getName()
+        + LogManager.getLogger((Object) new Inner()).getName() + (LogManager.getLogger((Object) "x") == LogManager.getLogger("x"))
+        + "|" + LogManager.getFormatterLogger().getName() + (LogManager.getFormatterLogger() == LogManager.getLogger());
+  }
+
+  /** Mojang's LogUtils.getLogger() is slf4j's logger of the caller's class. */
+  public static String logUtilsName() {
+    return com.mojang.logging.LogUtils.getLogger().getName() + (com.mojang.logging.LogUtils.getLogger() == LoggerFactory.getLogger(P2b.class))
+        + LoggerFactory.getLogger(Inner.class).getName();
   }
 
   /** A JDK class is in the module Java 25 puts its package in; an array in its element's. */

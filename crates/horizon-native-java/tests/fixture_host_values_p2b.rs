@@ -46,6 +46,14 @@ const CASES: &[(&str, Outcome)] = &[
     // As `genOrder`, through a TreeSet.
     ("genTreeSet", Counted),
     // log4j's `getLogger()` is the caller class's logger; `Class`/`Object` overloads name it by the canonical name (#173 review).
+    (
+        "log4jNames",
+        Exact(
+            r#"demo.P2b|truefalse|demo.P2b.Innertruefalse|demo.P2b|demo.P2b$1|java.lang.Stringdemo.P2b.Innerfalse|demo.P2bfalse"#,
+        ),
+    ),
+    // Mojang's `LogUtils.getLogger()` is slf4j's logger of the caller class (`getName`).
+    ("logUtilsName", Exact(r#"demo.P2btruedemo.P2b$Inner"#)),
     // Java 25: `org.apache.logging.log4j.core.Logger`; the backend's class is unknown (`ClassRule::Unknown`).
     ("loggerClass", Counted),
     // A logger matches its declared type exactly.
@@ -136,8 +144,28 @@ const LOG_MANAGER_STUB: &str = r#"
 package org.apache.logging.log4j;
 public final class LogManager {
   public static Logger getLogger(String name) { return null; }
+  public static Logger getLogger(Class<?> clazz) { return null; }
+  public static Logger getLogger(Object value) { return null; }
+  public static Logger getLogger() { return null; }
+  public static Logger getFormatterLogger() { return null; }
+  public static Logger getRootLogger() { return null; }
 }
 "#;
+
+const SLF4J_STUBS: [(&str, &str); 3] = [
+    (
+        "org/slf4j/Logger.java",
+        "package org.slf4j;\npublic interface Logger { String getName(); }\n",
+    ),
+    (
+        "org/slf4j/LoggerFactory.java",
+        "package org.slf4j;\npublic final class LoggerFactory { public static Logger getLogger(Class<?> c) { return null; } }\n",
+    ),
+    (
+        "com/mojang/logging/LogUtils.java",
+        "package com.mojang.logging;\npublic final class LogUtils { public static org.slf4j.Logger getLogger() { return null; } }\n",
+    ),
+];
 
 const LOGGER_STUB: &str = r#"
 package org.apache.logging.log4j;
@@ -155,6 +183,9 @@ fn p2b_handles_answer_as_java_25_or_count() {
             ),
             ("org/apache/logging/log4j/LogManager.java", LOG_MANAGER_STUB),
             ("org/apache/logging/log4j/Logger.java", LOGGER_STUB),
+            SLF4J_STUBS[0],
+            SLF4J_STUBS[1],
+            SLF4J_STUBS[2],
         ],
     );
     let mut failures = Vec::new();
