@@ -22,7 +22,7 @@ spelledStrings=Stringtrue911338280,Stringtrue793652700,Stringtrue1216354522,Stri
 slashStrings=falsefalse,falsefalse,falsefalse,falsefalse,5is|identifier/a:xa:xtag-key/registry/minecraft:item|a:t\n\
 identifiers=a:x|3127|truefalsefalsetrue|-11|truetrue|net.minecraft.resources.Identifier|a:x3127true|[a:x, b:x]true1\n\
 hashed={minecraft:stone=0, minecraft:silk_touch=4, demo:machine=1, a:x=2, z:q=3, b:long/path/here=5}|[minecraft:stone, minecraft:silk_touch, demo:machine, a:x, z:q, b:long/path/here]|2truefalse|[b:long/path/here, demo:machine, z:q, minecraft:silk_touch, minecraft:stone, a:x]\n\
-keys=ResourceKey[minecraft:item / a:x]|a:x|minecraft:item|truefalse|truefalsefalse|net.minecraft.resources.ResourceKeytrue|ResourceKey[minecraft:dimension / minecraft:overworld]|[ResourceKey[minecraft:item / a:x], ResourceKey[minecraft:dimension / minecraft:overworld]]true\n\
+keys=ResourceKey[minecraft:item / a:x]|a:x|minecraft:item|truefalse|truefalsefalse|net.minecraft.resources.ResourceKeytrue|ResourceKey[minecraft:dimension / minecraft:overworld]|[ResourceKey[minecraft:item / a:x], ResourceKey[minecraft:dimension / minecraft:overworld]]true|true\n\
 tags=TagKey[minecraft:item / a:t]|a:t|truefalse|truefalsefalsefalse|net.minecraft.tags.TagKeytrue|true\n\
 blockItems=BlockItemId[block=ResourceKey[minecraft:block / minecraft:lamp], item=ResourceKey[minecraft:item / minecraft:lamp]]|ResourceKey[minecraft:block / a:b]|ResourceKey[minecraft:item / a:i]|truefalsefalse|true|net.minecraft.references.BlockItemIdtrue|BlockItemId[block=ResourceKey[minecraft:block / minecraft:b], item=ResourceKey[minecraft:item / minecraft:i]]\n\
 types=mc:stonetruefalsetruefalsetrue,id:a:xtruefalsetruefalsefalse,key:a:kfalsetruefalsefalsefalse,tag:a:tfalsefalsefalsetruefalse,bii:minecraft:lampfalsefalsefalsetruefalse,str:a:xfalsefalsetruefalsefalse,truetruefalsea:xtrue\n\
@@ -190,7 +190,8 @@ public final class Probe {
         return k + "|" + k.identifier() + "|" + k.registry() + "|" + k.isFor(Registries.ITEM) + k.isFor(Registries.BLOCK)
             + "|" + k.equals(ResourceKey.create(Registries.ITEM, id("a:x"))) + k.equals(ResourceKey.create(Registries.BLOCK, id("a:x")))
             + k.equals(id("a:x")) + "|" + o.getClass().getName() + (o instanceof ResourceKey) + "|" + dim + "|"
-            + List.of(k, dim) + List.of(k).contains(ResourceKey.create(Registries.ITEM, id("a:x")));
+            + List.of(k, dim) + List.of(k).contains(ResourceKey.create(Registries.ITEM, id("a:x")))
+            + "|" + (((ResourceKey<?>) (Object) Registries.BLOCK) != null);
     }
 
     /** TagKey: text, parts, equals, class. */

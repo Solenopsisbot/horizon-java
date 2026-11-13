@@ -95,6 +95,14 @@ pub(crate) fn registry_name(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether a value that is still text is an object of handle class `target`:
+/// a `registry/<id>` value is also its registry key (`Registries.X` is a
+/// `ResourceKey`) until #156 P4's second half makes registries handles.
+pub(crate) fn text_is_a(value: &Value, target: &str) -> bool {
+    target == RESOURCE_KEY
+        && crate::expect_ref(value).is_some_and(|text| text.starts_with("registry/"))
+}
+
 /// The key of a `ResourceKey`/`TagKey` made from `registry` and `location`:
 /// `registry|location` when both name ids, else the unnamed key `?` + the
 /// two arguments' markers (the location as an `Identifier` when the host
