@@ -19448,7 +19448,9 @@ impl<H: Host> Runtime<'_, H> {
                     .into_iter()
                     .map(|value| parse_collection_value(&value))
                     .collect::<Result<Vec<_>, _>>()?;
-                return Ok(Some(self.new_stream("callback", "stream", values)));
+                let stream = self.new_stream("callback", "stream", values);
+                self.mark_stream_origin(&stream, &receiver);
+                return Ok(Some(stream));
             }
             // Reflection is the interpreter's own surface (it knows the jar's
             // hierarchy, annotations and fields); the host only answers it
@@ -22519,6 +22521,9 @@ impl<H: Host> Runtime<'_, H> {
                 .map(|value| parse_collection_value(&value))
                 .collect::<Result<Vec<_>, _>>()?;
             let stream = self.new_stream(class, method, values);
+            // A fail-fast collection's stream binds late and checks for
+            // modification (`stream_pipeline.rs`).
+            self.mark_stream_origin(&stream, receiver);
             if r.name == "parallelStream" {
                 self.mark_parallel_stream(&stream);
             }
@@ -22565,7 +22570,7 @@ impl<H: Host> Runtime<'_, H> {
         if !stream_pipeline::takes_output(&r.name) {
             return Ok(None);
         }
-        let values = self.stream_values(receiver)?;
+        let values = self.stream_output(receiver, &r.name)?;
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
             ("toList", "()Ljava/util/List;") => collection_value("list", &values),
             ("toArray", "()[Ljava/lang/Object;") => {
@@ -35839,6 +35844,41 @@ mandatory = true
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
+        // A stream takes one stage or terminal (`linkedOrConsumed`): each
+        // use below gets a fresh stream over the same list.
+        let list_stream = |runtime: &mut Runtime<'_, StdHost>| {
+            runtime
+                .invoke_stream(
+                    &MethodRef {
+                        owner: "java/util/List".into(),
+                        name: "stream".into(),
+                        descriptor: "()Ljava/util/stream/Stream;".into(),
+                    },
+                    Some(&list),
+                    &[],
+                    "demo/Stream",
+                    "probe",
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let distinct_stream = |runtime: &mut Runtime<'_, StdHost>| {
+            let stream = list_stream(runtime);
+            runtime
+                .invoke_stream(
+                    &MethodRef {
+                        owner: "java/util/stream/Stream".into(),
+                        name: "distinct".into(),
+                        descriptor: "()Ljava/util/stream/Stream;".into(),
+                    },
+                    Some(&stream),
+                    &[],
+                    "demo/Stream",
+                    "probe",
+                )
+                .unwrap()
+                .unwrap()
+        };
         let stream = runtime
             .invoke_stream(
                 &MethodRef {
@@ -35869,6 +35909,7 @@ mandatory = true
                 .unwrap(),
             Some(Value::Long(3))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -35945,6 +35986,7 @@ mandatory = true
                 .unwrap(),
             Some(Value::Long(0))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -35961,6 +36003,7 @@ mandatory = true
                 .unwrap(),
             Some(Value::Int(0))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -35977,6 +36020,7 @@ mandatory = true
                 .unwrap(),
             Some(Value::Int(1))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -35993,6 +36037,7 @@ mandatory = true
                 .unwrap(),
             Some(Value::Ref(Some("optional/alpha".into())))
         );
+        let stream = list_stream(&mut runtime);
         let distinct = runtime
             .invoke_stream(
                 &MethodRef {
@@ -36027,6 +36072,7 @@ mandatory = true
             ))
         );
         let collector = Value::Ref(Some("collector/list".into()));
+        let distinct = distinct_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -36046,6 +36092,7 @@ mandatory = true
                 &[Value::Ref(Some("alpha".into())), Value::Int(2)],
             ))
         );
+        let distinct = distinct_stream(&mut runtime);
         let array = runtime
             .invoke_stream(
                 &MethodRef {
