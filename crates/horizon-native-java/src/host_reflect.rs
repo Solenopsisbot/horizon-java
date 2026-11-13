@@ -938,7 +938,7 @@ fn instance_of(handle: &HostRef, wanted: &str, _: &dyn ClassHierarchy) -> Option
         "java/lang/reflect/GenericDeclaration",
     ];
     Some(
-        wanted == handle.class()
+        handle.class() == Some(wanted)
             || MEMBER.contains(&wanted)
             || (handle.kind() != HostKind::ReflectField && EXECUTABLE.contains(&wanted)),
     )
