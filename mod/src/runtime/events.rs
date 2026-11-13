@@ -1173,8 +1173,9 @@ fn original_marker(uuid: u128) -> Value {
     ))
 }
 
+/// `Level.OVERWORLD`…: `ResourceKey[minecraft:dimension / <id>]`.
 fn dimension_key(id: &str) -> Value {
-    marker(format!("resource-key/dimension/{id}"))
+    crate::runtime::host_ids::resource_key_named("minecraft:dimension", id)
 }
 
 fn event_marker(event: GameEvent) -> Value {
@@ -1276,7 +1277,7 @@ impl StdHost {
         // `Event.DEFAULT_PHASE` and the `EventPriority` constants: what a
         // listener's order is registered with (`order.rs`).
         if r.owner == FABRIC_EVENT && r.name == "DEFAULT_PHASE" {
-            return Some(marker(format!("identifier/{}", order::DEFAULT_PHASE)));
+            return Some(crate::runtime::host_ids::identifier_of_text(order::DEFAULT_PHASE));
         }
         if order::PRIORITY_CLASSES.contains(&r.owner.as_str())
             && order::PRIORITIES.contains(&r.name.as_str())
@@ -1892,13 +1893,14 @@ fn fabric_source(row: &FabricField) -> String {
     )
 }
 
-/// The phase id an `Identifier` argument names (`identifier/mymod:late` →
-/// `mymod:late`). Anything else keeps its text, so two registrations with
-/// the same unmodelled value still share a phase.
+/// The phase id an `Identifier` argument names (`mymod:late`). Any other
+/// reference keeps its text, so two registrations with the same unmodelled
+/// value still share a phase.
 fn phase_id(value: &Value) -> String {
-    match expect_ref(value) {
-        Some(text) => text.strip_prefix("identifier/").unwrap_or(text).to_owned(),
-        None => order::DEFAULT_PHASE.to_owned(),
+    match (crate::runtime::host_ids::identifier_key(value), expect_ref(value)) {
+        (Some(id), _) => id.to_owned(),
+        (None, Some(text)) => text.clone(),
+        (None, None) => order::DEFAULT_PHASE.to_owned(),
     }
 }
 
@@ -2639,7 +2641,7 @@ mod tests {
                 &can_send,
                 &[
                     player_marker(alex),
-                    Value::Ref(Some(format!("identifier/{channel}"))),
+                    crate::runtime::host_ids::identifier_of_text(channel),
                 ],
             )
             .unwrap()

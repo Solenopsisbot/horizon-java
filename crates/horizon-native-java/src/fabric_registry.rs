@@ -14,16 +14,9 @@ use super::*;
 const BUILDER: &str = "net/fabricmc/fabric/api/event/registry/FabricRegistryBuilder";
 const BUILDER_PREFIX: &str = "fabric-registry-builder/";
 
-/// The `<namespace>:<path>` an identifier or registry marker names.
+/// The `<namespace>:<path>` an `Identifier` or registry value names.
 fn registry_id(value: &Value) -> Option<String> {
-    let marker = expect_ref(value)?;
-    if let Some(id) = marker.strip_prefix("registry/") {
-        return Some(id.to_owned());
-    }
-    marker.starts_with("identifier/").then(|| {
-        let (namespace, path) = identifier_parts(value);
-        format!("{namespace}:{path}")
-    })
+    crate::host_ids::named_id(value)
 }
 
 pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value, NativeError>> {

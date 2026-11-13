@@ -198,7 +198,7 @@ impl<H: Host> Runtime<'_, H> {
             });
         }
         HostKind::of_class(target)?;
-        if *value == Value::Ref(None) {
+        if *value == Value::Ref(None) || crate::host_ids::text_is_a(value, target) {
             return Some(HostCast::Fits);
         }
         Some(match self.exact_class(value) {
@@ -535,22 +535,41 @@ impl<H: Host> Runtime<'_, H> {
     /// `class` among its targets. The class file of `class` does not list
     /// that interface, so the plain walk cannot see it.
     fn mixin_adds_interface(&self, class: &str, target: &str) -> bool {
-        self.classes.values().any(|mixin| {
-            let provides = mixin.name == target
-                || mixin.interface_names().iter().any(|interface| {
-                    interface == target || self.interface_extends(interface, target)
-                });
-            provides
-                && mixin
-                    .annotations
-                    .iter()
-                    .filter(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)
-                    .any(|annotation| {
-                        mixin_target_owners(annotation)
-                            .iter()
-                            .any(|owner| owner == class)
+        self.mixins_targeting(class)
+            .iter()
+            .filter_map(|name| self.classes.get(name))
+            .any(|mixin| {
+                mixin.name == target
+                    || mixin.interface_names().iter().any(|interface| {
+                        interface == target || self.interface_extends(interface, target)
                     })
-        })
+            })
+    }
+
+    /// The jar's `@Mixin` classes that name `class` among their targets, from
+    /// the index built once per runtime (`Runtime::mixin_index`).
+    fn mixins_targeting(&self, class: &str) -> &[String] {
+        self.mixin_index
+            .get_or_init(|| {
+                let mut index: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for mixin in self.classes.values() {
+                    for annotation in mixin
+                        .annotations
+                        .iter()
+                        .filter(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)
+                    {
+                        for owner in mixin_target_owners(annotation) {
+                            let mixins = index.entry(owner).or_default();
+                            if !mixins.contains(&mixin.name) {
+                                mixins.push(mixin.name.clone());
+                            }
+                        }
+                    }
+                }
+                index
+            })
+            .get(class)
+            .map_or(&[], Vec::as_slice)
     }
 }
 

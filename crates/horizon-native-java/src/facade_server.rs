@@ -284,23 +284,21 @@ pub(crate) fn player_member(
 }
 
 /// The id a registry key argument names: `registry/<id>` (a `Registries`
-/// static) or `resource-key/minecraft:root/<id>`.
-fn registry_key(value: &Value) -> Option<&str> {
-    let text = expect_ref(value)?;
-    text.strip_prefix("registry/").or_else(|| {
-        text.strip_prefix("resource-key/minecraft:root/")
-            .map(|id| id.strip_prefix("identifier/").unwrap_or(id))
-    })
+/// static) or a `ResourceKey` in `minecraft:root`.
+fn registry_key(value: &Value) -> Option<String> {
+    if let Some((registry, id)) = crate::host_ids::resource_key_parts(value)
+        && registry == "minecraft:root"
+    {
+        return Some(id);
+    }
+    expect_ref(value)?
+        .strip_prefix("registry/")
+        .map(str::to_owned)
 }
 
 /// The `namespace:path` an `Identifier` argument names.
 fn identifier_text(value: &Value) -> Option<String> {
-    let text = expect_ref(value)?.strip_prefix("identifier/")?;
-    Some(if text.contains(':') {
-        text.to_owned()
-    } else {
-        format!("minecraft:{text}")
-    })
+    crate::host_ids::identifier_key(value).map(str::to_owned)
 }
 
 /// Answer one call on a marker [`owns`] says is this module's.
@@ -382,7 +380,7 @@ pub(crate) fn answer(
                 "lookupOrThrow",
                 "(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/HolderLookup$RegistryLookup;",
             ) => match args.first().and_then(registry_key) {
-                Some(id) if facts.registries.contains_key(id) => {
+                Some(id) if facts.registries.contains_key(&id) => {
                     Ok(marker(format!("{REGISTRY}{id}")))
                 }
                 _ => refuse(r),
@@ -767,7 +765,7 @@ mod tests {
                 &facts,
                 &blocks,
                 &contains,
-                &[marker("identifier/minecraft:dirt")]
+                &[crate::host_ids::identifier_of_text("minecraft:dirt")]
             )
             .unwrap(),
             Value::Int(1)
@@ -777,7 +775,7 @@ mod tests {
                 &facts,
                 &blocks,
                 &contains,
-                &[marker("identifier/minecraft:glass")]
+                &[crate::host_ids::identifier_of_text("minecraft:glass")]
             )
             .unwrap(),
             Value::Int(0)
@@ -879,7 +877,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            channel_of(&marker("identifier/demo:sync"), |_| None).as_deref(),
+            channel_of(&crate::host_ids::identifier_of_text("demo:sync"), |_| None).as_deref(),
             Some("demo:sync")
         );
     }

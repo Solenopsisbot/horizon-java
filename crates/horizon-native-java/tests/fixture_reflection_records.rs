@@ -129,7 +129,7 @@ final class Probe {
     }
 
     public static int invokeBump() throws Exception {
-        Method method = Class.forName("demo.Model").getMethod("bump", new Class[0]);
+        Method method = Class.forName("demo.Model").getMethod("bump", new Class[]{int.class});
         Object result = method.invoke(new Model("boxed", 5), new Object[]{Integer.valueOf(3)});
         return ((Integer) result).intValue();
     }
@@ -522,5 +522,8 @@ fn method_lookup_keeps_the_primitive_parameter() {
 
 #[test]
 fn method_invoke_unboxes_primitive_arguments() {
+    // `getMethod("bump", int.class)`: with no parameter types the JVM throws
+    // `NoSuchMethodException: demo.Model.bump()` (OpenJDK 25), which the
+    // runtime now does too; this probe used to rely on a name-only lookup.
     assert_eq!(Fixture::build("boxed-invoke").number("invokeBump"), 8);
 }

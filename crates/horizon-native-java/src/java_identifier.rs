@@ -1,7 +1,8 @@
 //! `net.minecraft.resources.Identifier` (26.3), and `ResourceLocation`, its
 //! name before the 1.21 rename, answered from the class's own rules.
 //!
-//! An id is the marker `identifier/<namespace>:<path>`. The factories run
+//! An id is an `Identifier` handle keyed `<namespace>:<path>` (`host_ids.rs`).
+//! The factories run
 //! vanilla's checks (`javap -c` of 26.3's `Identifier`): a namespace is
 //! `[a-z0-9_.-]*` and not `..`, a path `[a-z0-9/._-]*`. `bySeparator` (and
 //! `parse`, which is `bySeparator(s, ':')`) splits at the first separator; no
@@ -35,9 +36,32 @@ fn raise(owner: &str, message: String) -> NativeError {
     };
     NativeError::UncaughtException {
         class: class.into(),
-        message: Some(message),
+        message: Some(escape_java(&message)),
         frame: None,
     }
+}
+
+/// commons-lang3 `StringEscapeUtils.escapeJava`, which the exception's
+/// constructor applies to its message (26.3 `IdentifierException`): `"` and
+/// `\` escaped, `\b \t \n \f \r` by name, and every other UTF-16 unit
+/// below `0x20` or above `0x7f` as `\uXXXX` (upper-case hex, a surrogate pair
+/// as two).
+fn escape_java(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for unit in text.encode_utf16() {
+        match unit {
+            0x22 => out.push_str("\\\""),
+            0x5c => out.push_str("\\\\"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            0x20..=0x7f => out.push(char::from(unit as u8)),
+            _ => out.push_str(&format!("\\u{unit:04X}")),
+        }
+    }
+    out
 }
 
 fn valid_namespace_char(c: char) -> bool {
@@ -57,7 +81,7 @@ fn is_valid_path(path: &str) -> bool {
 }
 
 /// `assertValidNamespace` then `assertValidPath`, with their messages.
-fn checked(owner: &str, namespace: &str, path: &str) -> Result<Value, NativeError> {
+pub(crate) fn checked(owner: &str, namespace: &str, path: &str) -> Result<Value, NativeError> {
     if !is_valid_namespace(namespace) {
         let word = if owner.ends_with("ResourceLocation") {
             "location"
@@ -88,20 +112,27 @@ fn split(identifier: &str, separator: char) -> (&str, &str) {
     }
 }
 
-/// The `(namespace, path)` an `identifier/` marker names.
-pub(crate) fn parts(marker: &str) -> Option<(&str, &str)> {
-    marker.strip_prefix("identifier/")?.split_once(':')
+/// The `namespace:path` an id value names: an `Identifier` handle, or an
+/// object `new ResourceLocation(..)` built (its id kept by the host).
+pub(crate) fn id_text(host: &StdHost, value: &Value) -> Option<String> {
+    crate::host_ids::identifier_key(value)
+        .or_else(|| {
+            host.identifier_objects
+                .get(expect_ref(value)?)
+                .map(String::as_str)
+        })
+        .map(str::to_owned)
 }
 
-/// The id a value names: an id marker, or an object a constructor built.
+/// [`id_text`] split into `(namespace, path)`.
 fn id_parts(host: &StdHost, value: &Value) -> Option<(String, String)> {
-    let marker = expect_ref(value)?;
-    let marker = host.identifier_objects.get(marker).unwrap_or(marker);
-    parts(marker).map(|(namespace, path)| (namespace.to_owned(), path.to_owned()))
+    let id = id_text(host, value)?;
+    let (namespace, path) = id.split_once(':')?;
+    Some((namespace.to_owned(), path.to_owned()))
 }
 
 /// Java's `String.compareTo`: UTF-16 code units, then length.
-fn java_compare(left: &str, right: &str) -> i32 {
+pub(crate) fn java_compare(left: &str, right: &str) -> i32 {
     let (mut left, mut right) = (left.encode_utf16(), right.encode_utf16());
     loop {
         match (left.next(), right.next()) {
@@ -126,6 +157,33 @@ pub(crate) fn invoke_static(
 ) -> Option<Result<Value, NativeError>> {
     if !owns(&r.owner) {
         return None;
+    }
+    // A `null` the factory dereferences: Java 25's helpful message names
+    // the 26.3 method's own parameter (`bySeparator(identifier, ..)`,
+    // `isValidNamespace(namespace)` via `namespace.equals("..")`,
+    // `isValidPath(path)` via `path.length()`).
+    let null = |index: usize| matches!(args.get(index), Some(Value::Ref(None)));
+    let npe = |call: &str, name: &str| {
+        Some(Err(NativeError::UncaughtException {
+            class: "java/lang/NullPointerException".into(),
+            message: Some(format!(
+                "Cannot invoke \"{call}\" because \"{name}\" is null"
+            )),
+            frame: None,
+        }))
+    };
+    match r.name.as_str() {
+        "parse" | "tryParse" | "bySeparator" | "tryBySeparator" if null(0) => {
+            return npe("String.indexOf(int)", "identifier");
+        }
+        "fromNamespaceAndPath" | "tryBuild" if null(0) => {
+            return npe("String.equals(Object)", "namespace");
+        }
+        "fromNamespaceAndPath" | "tryBuild" if null(1) => {
+            return npe("String.length()", "path");
+        }
+        "withDefaultNamespace" if null(0) => return npe("String.length()", "path"),
+        _ => {}
     }
     let text = |index: usize| args.get(index).map(expect_string).unwrap_or("");
     let char_arg = |index: usize| match args.get(index) {
@@ -195,8 +253,9 @@ pub(crate) fn invoke_instance(
             _ => return Some(host.unknown_host_call(r)),
         };
         return Some(built.map(|id| {
-            host.identifier_objects
-                .insert(marker, expect_string(&id).to_owned());
+            if let Some(id) = crate::host_ids::identifier_key(&id) {
+                host.identifier_objects.insert(marker, id.to_owned());
+            }
             Value::Void
         }));
     }
@@ -297,7 +356,9 @@ impl<H: Host> Runtime<'_, H> {
         let (Some(receiver), Some(modifier)) = (receiver, args.first()) else {
             return Ok(None);
         };
-        let Some((_, path)) = expect_ref(receiver).and_then(|marker| parts(marker)) else {
+        let Some((_, path)) =
+            crate::host_ids::identifier_key(receiver).and_then(|id| id.split_once(':'))
+        else {
             return Ok(None);
         };
         let new_path = self.apply_callback(modifier, &[Value::Ref(Some(path.to_owned()))])?;
