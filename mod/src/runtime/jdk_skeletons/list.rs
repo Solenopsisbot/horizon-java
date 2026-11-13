@@ -140,20 +140,6 @@ const NSEE: &str = "java/util/NoSuchElementException";
 /// `java.util.ConcurrentModificationException`.
 const CME: &str = "java/util/ConcurrentModificationException";
 
-/// `Throwable.toString()` of a caught exception: its class's binary name,
-/// then `": " + message` when it has one (`NoSuchElementException(cause)`'s
-/// message).
-fn throwable_text(error: &NativeError) -> Option<String> {
-    let NativeError::UncaughtException { class, message, .. } = error else {
-        return None;
-    };
-    let name = class.replace('/', ".");
-    Some(match message {
-        Some(message) => format!("{name}: {message}"),
-        None => name,
-    })
-}
-
 /// `Objects.checkIndex(index, length)`.
 fn check_index(index: i32, length: i32) -> Result<(), NativeError> {
     if index < 0 || index >= length {
@@ -283,9 +269,10 @@ impl<H: Host> Runtime<'_, H> {
                 self.put_jdk_field(itr, CURSOR, Value::Int(if forward { i + 1 } else { i }));
                 Ok(value)
             }
+            // `throw new NoSuchElementException(e)`: `e` is the cause.
             Err(error) if self.catches(&error, IOOBE) => {
                 self.itr_check(itr)?;
-                Err(throw(NSEE, throwable_text(&error)))
+                Err(self.throw_caused(NSEE, error))
             }
             Err(error) => Err(error),
         }
@@ -724,7 +711,7 @@ impl<H: Host> Runtime<'_, H> {
                     let found = if o == Value::Ref(None) {
                         e == Value::Ref(None)
                     } else {
-                        self.java_equals(&o, &e)?
+                        self.virtual_equals(&o, &e)?
                     };
                     if found {
                         return iterator(self, report, "()I");
@@ -819,7 +806,7 @@ impl<H: Host> Runtime<'_, H> {
                     let equal = if o1 == Value::Ref(None) {
                         o2 == Value::Ref(None)
                     } else {
-                        self.java_equals(&o1, &o2)?
+                        self.virtual_equals(&o1, &o2)?
                     };
                     if !equal {
                         return Ok(boolean(false));
@@ -837,7 +824,7 @@ impl<H: Host> Runtime<'_, H> {
                     let h = if e == Value::Ref(None) {
                         0
                     } else {
-                        self.java_hash(&e)?
+                        self.virtual_hash(&e)?
                     };
                     hash = hash.wrapping_mul(31).wrapping_add(h);
                 }

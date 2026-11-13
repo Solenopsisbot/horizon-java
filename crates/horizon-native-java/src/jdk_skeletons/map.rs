@@ -207,7 +207,7 @@ impl<H: Host> Runtime<'_, H> {
         if *a == Value::Ref(None) {
             return Ok(false);
         }
-        self.java_equals(a, b)
+        self.virtual_equals(a, b)
     }
 
     /// `AbstractMap.SimpleEntry.eq(a, b)`: no identity short-circuit.
@@ -215,7 +215,7 @@ impl<H: Host> Runtime<'_, H> {
         if *a == Value::Ref(None) {
             return Ok(*b == Value::Ref(None));
         }
-        self.java_equals(a, b)
+        self.virtual_equals(a, b)
     }
 
     /// Run a SimpleEntry constructor on a jar subclass object.
@@ -282,7 +282,7 @@ impl<H: Host> Runtime<'_, H> {
                     let found = if wanted == Value::Ref(None) {
                         candidate == Value::Ref(None)
                     } else {
-                        self.java_equals(&wanted, &candidate)?
+                        self.virtual_equals(&wanted, &candidate)?
                     };
                     if found {
                         return if name == "get" {
@@ -309,7 +309,7 @@ impl<H: Host> Runtime<'_, H> {
                     let found = if key == Value::Ref(None) {
                         k == Value::Ref(None)
                     } else {
-                        self.java_equals(&key, &k)?
+                        self.virtual_equals(&key, &k)?
                     };
                     if found {
                         correct = Some(e);
@@ -394,7 +394,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut h = 0i32;
                 while self.has_next(&i)? {
                     let e = self.next(&i)?;
-                    h = h.wrapping_add(self.java_hash(&e)?);
+                    h = h.wrapping_add(self.virtual_hash(&e)?);
                 }
                 Ok(Value::Int(h))
             }
@@ -415,7 +415,7 @@ impl<H: Host> Runtime<'_, H> {
                         if part == this {
                             text.push_str("(this Map)");
                         } else {
-                            text.push_str(&self.java_text(part)?);
+                            text.push_str(&self.virtual_text(part)?);
                         }
                     }
                     if !self.has_next(&i)? {
@@ -471,7 +471,7 @@ impl<H: Host> Runtime<'_, H> {
                             &[key],
                         )?)
                 } else {
-                    self.java_equals(&value, &theirs)?
+                    self.virtual_equals(&value, &theirs)?
                 };
                 if !same {
                     return Ok(false);
@@ -526,17 +526,21 @@ impl<H: Host> Runtime<'_, H> {
                 let k = if key == Value::Ref(None) {
                     0
                 } else {
-                    self.java_hash(&key)?
+                    self.virtual_hash(&key)?
                 };
                 let v = if value == Value::Ref(None) {
                     0
                 } else {
-                    self.java_hash(&value)?
+                    self.virtual_hash(&value)?
                 };
                 Ok(Value::Int(k ^ v))
             }
             _ => {
-                let text = format!("{}={}", self.java_text(&key)?, self.java_text(&value)?);
+                let text = format!(
+                    "{}={}",
+                    self.virtual_text(&key)?,
+                    self.virtual_text(&value)?
+                );
                 Ok(Value::Ref(Some(text)))
             }
         }
@@ -810,20 +814,10 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `catch (IllegalStateException ise) { throw new
     /// ConcurrentModificationException(ise); }` around an entry access.
-    fn state_as_cme<T>(&self, result: Result<T, NativeError>) -> Result<T, NativeError> {
+    fn state_as_cme<T>(&mut self, result: Result<T, NativeError>) -> Result<T, NativeError> {
         match result {
             Err(error) if self.catches(&error, "java/lang/IllegalStateException") => {
-                let cause = match &error {
-                    NativeError::UncaughtException { class, message, .. } => {
-                        let name = class.replace('/', ".");
-                        Some(match message {
-                            Some(message) => format!("{name}: {message}"),
-                            None => name,
-                        })
-                    }
-                    _ => None,
-                };
-                Err(throw("java/util/ConcurrentModificationException", cause))
+                Err(self.throw_caused("java/util/ConcurrentModificationException", error))
             }
             other => other,
         }
