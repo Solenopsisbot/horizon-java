@@ -89,6 +89,35 @@ pub(crate) enum FieldLookup {
 /// stops deciding.
 const MAX_FIELD_SEARCH: usize = 64;
 
+/// What `Class.getMethod` finds, read off the classes the runtime holds.
+pub(crate) enum MethodLookup {
+    /// The method's declaring class and descriptor.
+    Found(String, String),
+    /// Every class the search visits is held and none has it: Java's
+    /// `NoSuchMethodException`.
+    Absent,
+    /// The search reaches a class the runtime does not hold, or a choice it
+    /// cannot rank.
+    Unknown,
+}
+
+/// `Object`'s public methods (Java 25), which every class's `getMethod`
+/// reaches last (an interface's does not).
+const OBJECT_PUBLIC_METHODS: &[(&str, &str)] = &[
+    ("getClass", "()Ljava/lang/Class;"),
+    ("hashCode", "()I"),
+    ("equals", "(Ljava/lang/Object;)Z"),
+    ("toString", "()Ljava/lang/String;"),
+    ("notify", "()V"),
+    ("notifyAll", "()V"),
+    ("wait", "()V"),
+    ("wait", "(J)V"),
+    ("wait", "(JI)V"),
+];
+
+/// A public method `getMethod` collects: its declaring class and descriptor.
+type Candidate = (String, String);
+
 /// `NoSuchFieldException(name)`, as `getField`/`getDeclaredField` throw it.
 pub(crate) fn no_such_field(name: &str) -> NativeError {
     NativeError::UncaughtException {
@@ -150,6 +179,132 @@ impl<H: Host> Runtime<'_, H> {
     /// field). `Object` declares no public field.
     pub(crate) fn field_lookup(&self, class: &str, name: &str, declared: bool) -> FieldLookup {
         self.field_search(class, name, declared, 0)
+    }
+
+    /// `Class.getMethod(name, parameters)` on `class`, `parameters` the
+    /// descriptor's `(…)` part, searched as JDK 25's `getMethodsRecursive`
+    /// does: the class's own public methods with that signature (statics
+    /// too); if none, the superclass's search, then each superinterface's
+    /// (without statics) merged in as `PublicMethods.MethodList.merge` does;
+    /// then `getMostSpecific` picks the most specific return type.
+    pub(crate) fn method_lookup(&self, class: &str, name: &str, parameters: &str) -> MethodLookup {
+        let Some(candidates) = self.public_methods(class, name, parameters, true, 0) else {
+            return MethodLookup::Unknown;
+        };
+        let Some(first) = candidates.first() else {
+            return MethodLookup::Absent;
+        };
+        let mut best = first.clone();
+        for candidate in &candidates[1..] {
+            let (best_return, other_return) = (return_desc(&best.1), return_desc(&candidate.1));
+            if best_return == other_return {
+                continue;
+            }
+            match self.return_assignable(best_return, other_return) {
+                Some(true) => best = candidate.clone(),
+                Some(false) => {}
+                None => return MethodLookup::Unknown,
+            }
+        }
+        MethodLookup::Found(best.0, best.1)
+    }
+
+    /// `Class.isAssignableFrom` between two return descriptors: a primitive
+    /// only from itself, a class by the held hierarchy (`None` past it).
+    fn return_assignable(&self, wide: &str, narrow: &str) -> Option<bool> {
+        let class = |descriptor: &str| -> Option<String> {
+            if descriptor.starts_with('[') {
+                return Some(descriptor.to_owned());
+            }
+            descriptor
+                .strip_prefix('L')
+                .and_then(|name| name.strip_suffix(';'))
+                .map(str::to_owned)
+        };
+        match (class(wide), class(narrow)) {
+            (Some(wide), Some(narrow)) => {
+                crate::host_ref::ClassHierarchy::is_instance(self, &narrow, &wide)
+            }
+            _ => Some(false),
+        }
+    }
+
+    /// The public methods `getMethod` collects for `class` (JDK 25's
+    /// `getMethodsRecursive`), `None` when the search leaves the held classes.
+    fn public_methods(
+        &self,
+        class: &str,
+        name: &str,
+        parameters: &str,
+        include_static: bool,
+        depth: usize,
+    ) -> Option<Vec<Candidate>> {
+        if class == "java/lang/Object" {
+            return Some(
+                OBJECT_PUBLIC_METHODS
+                    .iter()
+                    .filter(|(method, descriptor)| {
+                        *method == name && descriptor.starts_with(parameters)
+                    })
+                    .map(|(_, descriptor)| (class.to_owned(), (*descriptor).to_owned()))
+                    .collect(),
+            );
+        }
+        let file = self.class(class).filter(|_| depth < MAX_FIELD_SEARCH)?;
+        let own: Vec<Candidate> = file
+            .methods
+            .iter()
+            .filter(|method| {
+                method.name == name
+                    && method.access & 1 != 0
+                    && (include_static || !method.is_static())
+                    && method.descriptor.starts_with(parameters)
+            })
+            .map(|method| (class.to_owned(), method.descriptor.clone()))
+            .collect();
+        if !own.is_empty() {
+            return Some(own);
+        }
+        let interface = crate::jdk_model::class_access_flags(file)
+            .is_some_and(|access| access & ACC_INTERFACE != 0);
+        let mut list = if !interface && !file.super_name.is_empty() {
+            self.public_methods(
+                &file.super_name,
+                name,
+                parameters,
+                include_static,
+                depth + 1,
+            )?
+        } else {
+            Vec::new()
+        };
+        for parent in file.interface_names() {
+            for method in self.public_methods(&parent, name, parameters, false, depth + 1)? {
+                self.merge_method(&mut list, method)?;
+            }
+        }
+        Some(list)
+    }
+
+    /// `PublicMethods.MethodList.merge`: a method with the same return type
+    /// as one already listed replaces it when its class is a subtype of the
+    /// listed one's, is dropped when its class is a supertype, and is added
+    /// otherwise. `None` when the hierarchy cannot tell.
+    fn merge_method(&self, list: &mut Vec<Candidate>, method: Candidate) -> Option<()> {
+        for listed in list.iter_mut() {
+            if return_desc(&listed.1) != return_desc(&method.1) {
+                continue;
+            }
+            if crate::host_ref::ClassHierarchy::is_instance(self, &method.0, &listed.0)? {
+                *listed = method;
+                return Some(());
+            }
+            if crate::host_ref::ClassHierarchy::is_instance(self, &listed.0, &method.0)? {
+                return Some(());
+            }
+        }
+        list.push(method);
+        Some(())
     }
 
     fn field_search(&self, class: &str, name: &str, declared: bool, depth: usize) -> FieldLookup {

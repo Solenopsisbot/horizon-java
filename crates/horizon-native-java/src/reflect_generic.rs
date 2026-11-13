@@ -183,13 +183,17 @@ fn erased(descriptor: &str) -> Value {
 
 /// The `(class, name, descriptor)` a `Method` handle names, when it carries
 /// its descriptor.
+///
+/// A lookup the runtime could not settle carries only the parameters it was
+/// asked for (`(I)`, no return type) and the class it was asked on (maybe a
+/// subclass of the declaring one), so none of its facts is answered here
+/// (counted).
 fn method_marker(value: Option<&Value>) -> Option<(String, String, String)> {
     let method = host_reflect::method_of(value?)?;
-    Some((
-        method.class.to_owned(),
-        method.name.to_owned(),
-        method.descriptor?.to_owned(),
-    ))
+    let descriptor = method
+        .descriptor
+        .filter(|descriptor| !descriptor.ends_with(')'))?;
+    Some((method.class, method.name, descriptor))
 }
 
 /// The `Type` a type marker (a class name or a `type/` node) names.
@@ -463,7 +467,9 @@ impl<H: Host> Runtime<'_, H> {
             ("getModifiers", "()I") => {
                 let file = self.class(&class)?;
                 let method = file.method(&name, &descriptor)?;
-                Value::Int(i32::from(method.access) & 0x0fff)
+                // The JVM's recognized method flags (`Method.getModifiers`),
+                // bridge, varargs and synthetic included: a bridge is `4161`.
+                Value::Int(i32::from(method.access) & 0x1dff)
             }
             ("isDefault", "()Z") => {
                 let file = self.class(&class)?;

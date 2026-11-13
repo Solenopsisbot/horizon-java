@@ -21064,6 +21064,35 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Err(host_reflect::no_such_method(class, name, &parameters));
             }
+            // `getMethod` searches the public methods of the class, its
+            // superclasses (to `Object`) and superinterfaces as the JDK does,
+            // so it finds the declaring class's method and never a private
+            // one; a search that leaves the held classes keeps the lookup
+            // unread (its facts are counted).
+            if r.name == "getMethod"
+                && let Some(signature) = parameter_types
+                    .iter()
+                    .map(class_descriptor)
+                    .collect::<Option<String>>()
+            {
+                match self.method_lookup(class, name, &format!("({signature})")) {
+                    host_reflect::MethodLookup::Found(declaring, descriptor) => {
+                        return Ok(Some(self.reflected_method(
+                            &declaring,
+                            name,
+                            Some(&descriptor),
+                        )));
+                    }
+                    host_reflect::MethodLookup::Absent => {
+                        let parameters = parameter_types
+                            .iter()
+                            .filter_map(|parameter| expect_ref(parameter).cloned())
+                            .collect::<Vec<_>>();
+                        return Err(host_reflect::no_such_method(class, name, &parameters));
+                    }
+                    host_reflect::MethodLookup::Unknown => {}
+                }
+            }
             return Ok(Some(self.reflected_method(
                 class,
                 name,
@@ -21273,9 +21302,10 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 ("newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
                     if !self.has_class(class) {
-                        return Err(NativeError::MissingMethod(format!(
-                            "{class}#<init>{descriptor}"
-                        )));
+                        // A JDK or game constructor: the runtime has no body
+                        // to run (counted, answered neutral as any unmodelled
+                        // call).
+                        return self.host.unknown_operand_call(r).map(Some);
                     }
                     let arguments = StdHost::argument(r, args, 0)?;
                     let arguments = if matches!(arguments, Value::Ref(None)) {
@@ -21330,9 +21360,12 @@ impl<H: Host> Runtime<'_, H> {
                     let answer = self.host.invoke(&target, &invocation_args)?;
                     return reflected_return(self, descriptor, answer).map(Some);
                 }
-                return Err(NativeError::MissingMethod(format!("{owner}#{name}")));
+                // A JDK or game method the runtime has no body for: counted
+                // (answered neutral, as any unmodelled call), never a
+                // made-up answer.
+                return self.host.unknown_operand_call(r).map(Some);
             };
-            let target = class_file
+            let Some(target) = class_file
                 .methods
                 .iter()
                 .find(|candidate| {
@@ -21341,7 +21374,11 @@ impl<H: Host> Runtime<'_, H> {
                         && arg_count(&candidate.descriptor) == invocation_args.len()
                 })
                 .cloned()
-                .ok_or_else(|| NativeError::MissingMethod(format!("{owner}#{name}")))?;
+            else {
+                // A lookup the runtime could not settle (its method is in a
+                // class it does not hold): counted.
+                return self.host.unknown_operand_call(r).map(Some);
+            };
             let target_receiver = if target.is_static() {
                 None
             } else {

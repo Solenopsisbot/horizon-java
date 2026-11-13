@@ -27,7 +27,16 @@ public class Refl {
   public static class Super {
     public int sf = 7;
     public static final String TAG = "t";
+    public String foo() { return "super-foo"; }
   }
+
+  public static class Base { public Object get() { return "b"; } }
+
+  public static class Cov extends Base { public String get() { return "c"; } }
+
+  public static class Cmp implements Comparable<Cmp> { public int compareTo(Cmp o) { return 0; } }
+
+  public static String fmt(String format, Object... args) { return String.format(format, args); }
 
   public static class Sub extends Super implements Api {
     public String name() { return "sub"; }
@@ -257,8 +266,47 @@ public class Refl {
     return Integer.class.getField("MAX_VALUE").getDeclaringClass().getName();
   }
 
+  static String getMethodOf(Class<?> c, String name, Class<?>... parameters) {
+    try {
+      Method m = c.getMethod(name, parameters);
+      return m.getDeclaringClass().getName() + ":" + m;
+    } catch (NoSuchMethodException e) {
+      return "NSME:" + e.getMessage();
+    }
+  }
+
+  /** getMethod: public members only, inherited from superclasses, superinterfaces and Object. */
+  public static String getMethodRules() throws Exception {
+    Method foo = Sub.class.getMethod("foo");
+    return getMethodOf(Refl.class, "hidden") + "|" + getMethodOf(Sub.class, "foo") + "|" + foo.equals(Super.class.getMethod("foo"))
+        + (foo.hashCode() == Super.class.getMethod("foo").hashCode()) + foo.invoke(new Sub())
+        + "|" + getMethodOf(Sub.class, "size") + "=" + Sub.class.getMethod("size").invoke(new Sub())
+        + "|" + Sub.class.getMethod("hashCode").getDeclaringClass().getName() + "," + Sub.class.getMethod("wait", long.class, int.class).getDeclaringClass().getName()
+        + "|" + getMethodOf(Sub.class, "nope") + "|" + getMethodOf(Api.class, "hashCode") + "|" + getMethodOf(Sub.class, "util")
+        + "|" + getMethodOf(Api.class, "util") + "|" + getMethodOf(Refl.class, "target", long.class)
+        + "|" + Cov.class.getMethod("get").getReturnType().getName() + "," + Cov.class.getMethod("get").getDeclaringClass().getName();
+  }
+
+  /** getModifiers keeps the bridge, varargs and synthetic flags. */
+  public static String methodModifiers() throws Exception {
+    Method bridge = Cmp.class.getDeclaredMethod("compareTo", Object.class);
+    return bridge.getModifiers() + "," + bridge.isBridge() + bridge.isSynthetic() + "," + Cmp.class.getMethod("compareTo", Object.class).isBridge()
+        + "," + Refl.class.getMethod("fmt", String.class, Object[].class).getModifiers()
+        + "," + Cmp.class.getDeclaredMethod("compareTo", Cmp.class).getModifiers();
+  }
+
+  /** A JDK method has no body in the run: counted. */
+  public static String jdkInvoke() throws Exception {
+    return "" + String.class.getMethod("length").invoke("abcd");
+  }
+
+  /** A JDK constructor has no body in the run: counted. */
+  public static String jdkNewInstance() throws Exception {
+    return "" + StringBuilder.class.getConstructor(String.class).newInstance("xy").append('z');
+  }
+
   public static void main(String[] args) throws Exception {
-    for (String name : new String[] {"spelled", "text", "real", "collections", "sameHandle", "fieldCopies", "methodCopies", "constructorCopies", "fieldStream", "methodMap", "forgedNames", "forgedCopies", "inheritedFields", "jdkFieldModifiers", "jdkFieldDeclaring"}) {
+    for (String name : new String[] {"getMethodRules", "methodModifiers", "jdkInvoke", "jdkNewInstance", "spelled", "text", "real", "collections", "sameHandle", "fieldCopies", "methodCopies", "constructorCopies", "fieldStream", "methodMap", "forgedNames", "forgedCopies", "inheritedFields", "jdkFieldModifiers", "jdkFieldDeclaring"}) {
       System.out.println("== " + name);
       System.out.println(Refl.class.getMethod(name).invoke(null));
     }
