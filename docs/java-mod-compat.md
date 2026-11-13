@@ -314,7 +314,8 @@ listener for an `EventFiring` (the event, an `EventFacade` snapshot of tick coun
 resident heap, under an `ExecutionBudget`, with the host's call log rolled back afterwards.
 A `handler::accept` method reference on a
 captured lambda runs that lambda. The façade markers (`game/server`, `game/player-list`, `game/level/<id>`,
-`game/player/<uuid>`, `game/connection/<uuid>`, `game-event/<event>`) answer the calls listeners make first
+`game/player/<uuid>`, `game/connection/<uuid>`) and the event object (a host handle of the listener's event
+class, one per firing, `host_game_event.rs`) answer the calls listeners make first
 (`getTickCount`, `getPlayerList().getPlayers()`, `level.dimension() == Level.OVERWORLD`, `player.getUUID()`,
 `handler.player`, `event.getServer()`, `setCanceled`); any other instance call on one is
 `NativeError::UnknownHostCall`, which the game turns into "disable this listener, log once". The fixture
