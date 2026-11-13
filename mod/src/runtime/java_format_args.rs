@@ -74,7 +74,7 @@ impl<H: Host> Runtime<'_, H> {
         // A jar object prints its own `toString` (`jar_text.rs`); one that
         // throws, or that only the JVM can print (an identity hash), is
         // refused here and counted by the host.
-        if jar_text::object_marker_class(marker).is_some() {
+        if crate::runtime::jar_object::packaged_object_class(value).is_some() {
             return match self.runtime_value_of(value, "java/util/Formatter", "format") {
                 Ok(Some(Value::Ref(Some(text)))) => Arg::Str(text),
                 Ok(Some(Value::Ref(None))) => Arg::Null,

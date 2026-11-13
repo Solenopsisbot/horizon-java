@@ -135,7 +135,7 @@ impl<H: Host> Runtime<'_, H> {
         };
         // A store loop: the same jar object's class into the same component
         // as last time (only a held class's verdict is kept).
-        if let Some(class) = crate::jar_text::object_marker_class(text) {
+        if let Some(class) = crate::jar_object::packaged_key_class(text) {
             if class == component {
                 return Some(true);
             }
@@ -207,7 +207,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(rest) = text.strip_prefix("enum/") {
             return rest.rsplit_once('/').map(|(class, _)| class);
         }
-        let class = crate::jar_text::object_marker_class(text)?;
+        let class = crate::jar_object::packaged_key_class(text)?;
         (self.class(class).is_some() || class.starts_with("java/")).then_some(class)
     }
 

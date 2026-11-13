@@ -65,7 +65,7 @@ pub(crate) fn owner(marker: &str) -> Option<String> {
     // A class marker (`class#n`): only a class the host models has a body to
     // answer, so a jar object keeps the caller's text. A builder's text lives
     // in the runtime ([`Runtime::invoke_value_of_builder`]), not the host.
-    if let Some((class, _)) = marker.split_once('#')
+    if let Some(class) = crate::runtime::jar_object::marker_class(marker)
         && crate::runtime::host_models_class(class)
         && !matches!(class, "java/lang/StringBuilder" | "java/lang/StringBuffer")
     {

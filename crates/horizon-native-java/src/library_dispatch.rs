@@ -170,10 +170,13 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         const SIMPLE: &str = "java/util/AbstractMap$SimpleEntry";
         const IMMUTABLE: &str = "java/util/AbstractMap$SimpleImmutableEntry";
-        let Some(marker) = receiver.and_then(expect_ref).cloned() else {
+        let Some(marker) = receiver
+            .and_then(crate::jar_object::instance_key)
+            .map(str::to_owned)
+        else {
             return Ok(None);
         };
-        let Some((class, _)) = marker.split_once('#') else {
+        let Some(class) = crate::jar_object::marker_class(&marker) else {
             return Ok(None);
         };
         if class != SIMPLE && class != IMMUTABLE {
@@ -721,10 +724,13 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         const FILTER: &str = "java/io/FilterInputStream";
         const IN_FIELD: &str = "#inLjava/io/InputStream;";
-        let Some(marker) = receiver.and_then(expect_ref).cloned() else {
+        let Some(marker) = receiver
+            .and_then(crate::jar_object::instance_key)
+            .map(str::to_owned)
+        else {
             return Ok(None);
         };
-        let Some((receiver_class, _)) = marker.split_once('#') else {
+        let Some(receiver_class) = crate::jar_object::marker_class(&marker) else {
             return Ok(None);
         };
         let receiver_class = receiver_class.to_owned();
@@ -788,15 +794,14 @@ impl<H: Host> Runtime<'_, H> {
         // Filters stack (`new Reader(new BufferedInputStream(resource))`):
         // forward through every JDK filter until a stream that reads itself.
         for _ in 0..MAX_FILTER_CHAIN {
-            let Some(next) = expect_ref(&wrapped)
+            let Some(next) = crate::jar_object::instance_key(&wrapped)
                 .and_then(|inner| self.fields.get(&format!("{inner}|{FILTER}{IN_FIELD}")))
                 .cloned()
             else {
                 break;
             };
-            let wrapped_class = expect_ref(&wrapped)
-                .and_then(|inner| inner.split_once('#'))
-                .map(|(class, _)| class.to_owned())
+            let wrapped_class = crate::jar_object::object_class(&wrapped)
+                .map(str::to_owned)
                 .unwrap_or_default();
             if self
                 .member_owner(&wrapped_class, &r.name, &r.descriptor)
@@ -825,9 +830,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         // A wrapped jar stream runs its own body.
-        if let Some(wrapped_class) = expect_ref(&wrapped)
-            .and_then(|marker| marker.split_once('#'))
-            .map(|(class, _)| class.to_owned())
+        if let Some(wrapped_class) = crate::jar_object::object_class(&wrapped).map(str::to_owned)
             && let Some((owner, true)) = self.member_owner(&wrapped_class, &r.name, &r.descriptor)
         {
             return self
@@ -1091,9 +1094,8 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(component) = value_class::component_of_array_class(&class)
             && let Some(misfit) = self.first_misfit(&class, &component, &values)?
         {
-            let array_list = expect_ref(receiver)
-                .and_then(|marker| crate::jar_text::object_marker_class(marker))
-                == Some("java/util/ArrayList");
+            let array_list =
+                crate::jar_object::packaged_object_class(receiver) == Some("java/util/ArrayList");
             let error = array_list
                 .then(|| self.arraycopy_store_exception("java/lang/Object", &component))
                 .flatten();
