@@ -249,4 +249,9 @@ public final class P2b {
         + (StackWalker.getInstance(Set.of(), 5) == d) + (StackWalker.getInstance(Set.of()) == StackWalker.getInstance(Set.of()));
   }
 
+  /** Unmodelled Thread members are counted, not run stoppers. */
+  public static String threadMembers() {
+    Thread t = Thread.currentThread();
+    return "" + t.isAlive() + t.getPriority() + t.getState() + t.isInterrupted() + t.isVirtual();
+  }
 }

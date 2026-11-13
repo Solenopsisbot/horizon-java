@@ -6212,10 +6212,10 @@ impl Host for StdHost {
                 ("getContextClassLoader", "()Ljava/lang/ClassLoader;") => {
                     Ok(Value::Ref(Some("classloader/bootstrap".into())))
                 }
-                _ => Err(NativeError::MissingMethod(format!(
-                    "java/lang/Thread#{}{}",
-                    r.name, r.descriptor
-                ))),
+                // Any other `Thread` member (`isAlive`, `getPriority`,
+                // `getState`, `setName`...) is not modelled: counted, never a
+                // run stopper.
+                _ => self.unknown_host_call(r),
             };
         }
         if r.owner == "java/lang/Runtime" {

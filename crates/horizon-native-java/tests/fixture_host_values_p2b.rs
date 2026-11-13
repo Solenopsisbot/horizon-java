@@ -102,6 +102,8 @@ const CASES: &[(&str, Outcome)] = &[
     ("stackText", Counted),
     // Two walks hand out two frame objects with equal keys: identity counted.
     ("stackTwo", Counted),
+    // Java 25: `true5RUNNABLEfalsefalse`; unmodelled Thread members are counted, not a MissingMethod stop.
+    ("threadMembers", Counted),
     // One thread: canonical, so an IdentityHashMap holds it once.
     (
         "threadReal",
