@@ -24,6 +24,9 @@ use crate::jdk_model::class_access_flags;
 /// wraps (a class name or a `type/` node).
 pub(crate) const ANNOTATED_TYPE_PREFIX: &str = "annotated-type/";
 
+/// `java.lang.reflect.AnnotatedType[]`.
+const ANNOTATED_TYPES: &str = "[Ljava/lang/reflect/AnnotatedType;";
+
 impl ClassFile {
     /// The class's own generic `Signature` attribute, when it carries one.
     pub(crate) fn class_signature(&self) -> Option<String> {
@@ -292,9 +295,7 @@ impl<H: Host> Runtime<'_, H> {
                 .map(GenericType::Class)
                 .collect(),
         };
-        Ok(Some(
-            self.generic_type_array("getGenericInterfaces", &types),
-        ))
+        Ok(Some(self.generic_type_array(TYPE_ARRAY, &types)))
     }
 
     /// `Class.getDeclaredMethods()` (`declared`) or `Class.getMethods()` as
@@ -447,7 +448,7 @@ impl<H: Host> Runtime<'_, H> {
             },
             ("getParameterTypes", "()[Ljava/lang/Class;") => {
                 let types = erased_parameters();
-                self.generic_type_array("getParameterTypes", &types)
+                self.generic_type_array("[Ljava/lang/Class;", &types)
             }
             ("getGenericParameterTypes", "()[Ljava/lang/reflect/Type;") => {
                 let types = generic()
@@ -456,7 +457,7 @@ impl<H: Host> Runtime<'_, H> {
                         parameters.len() == descriptor_arguments(&descriptor).len()
                     })
                     .unwrap_or_else(erased_parameters);
-                self.generic_type_array("getGenericParameterTypes", &types)
+                self.generic_type_array(TYPE_ARRAY, &types)
             }
             ("getDeclaringClass", "()Ljava/lang/Class;") => Value::Ref(Some(class)),
             ("getModifiers", "()I") => {
@@ -502,11 +503,7 @@ impl<H: Host> Runtime<'_, H> {
             (
                 "getAnnotations" | "getDeclaredAnnotations",
                 "()[Ljava/lang/annotation/Annotation;",
-            ) => {
-                let array = self.new_array("java/lang/annotation/Annotation", "getAnnotations");
-                self.arrays.insert(array.clone(), Vec::new());
-                Value::Ref(Some(array))
-            }
+            ) => self.new_array_value("[Ljava/lang/annotation/Annotation;", Vec::new()),
             (
                 "getAnnotation" | "getDeclaredAnnotation",
                 "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;",
@@ -517,12 +514,7 @@ impl<H: Host> Runtime<'_, H> {
                     return None;
                 };
                 let values = args.iter().map(annotated).collect::<Vec<_>>();
-                let array = self.new_array(
-                    "java/lang/reflect/AnnotatedType",
-                    "getAnnotatedActualTypeArguments",
-                );
-                self.arrays.insert(array.clone(), values);
-                Value::Ref(Some(array))
+                self.new_array_value(ANNOTATED_TYPES, values)
             }
             ("getAnnotatedUpperBounds", "()[Ljava/lang/reflect/AnnotatedType;") => {
                 let GenericType::Wildcard { upper, .. } = node else {
@@ -532,20 +524,14 @@ impl<H: Host> Runtime<'_, H> {
                     .iter()
                     .map(annotated)
                     .collect::<Vec<_>>();
-                let array =
-                    self.new_array("java/lang/reflect/AnnotatedType", "getAnnotatedUpperBounds");
-                self.arrays.insert(array.clone(), values);
-                Value::Ref(Some(array))
+                self.new_array_value(ANNOTATED_TYPES, values)
             }
             ("getAnnotatedLowerBounds", "()[Ljava/lang/reflect/AnnotatedType;") => {
                 let GenericType::Wildcard { lower, .. } = node else {
                     return None;
                 };
                 let values = lower.iter().map(annotated).collect::<Vec<_>>();
-                let array =
-                    self.new_array("java/lang/reflect/AnnotatedType", "getAnnotatedLowerBounds");
-                self.arrays.insert(array.clone(), values);
-                Value::Ref(Some(array))
+                self.new_array_value(ANNOTATED_TYPES, values)
             }
             ("toString", "()Ljava/lang/String;") => Value::Ref(Some(generic_type_display(&node))),
             _ => return None,

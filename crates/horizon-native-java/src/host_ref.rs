@@ -151,6 +151,13 @@ pub enum HostKind {
     /// `java.util.OptionalDouble`: key `""` when empty, else the `double`'s
     /// `Double.doubleToLongBits` (every `NaN` one key, `-0.0` not `0.0`).
     OptionalDouble,
+    /// A Java array: key `<array class>#<n>`, its elements in the runtime's
+    /// `arrays` table (`host_array.rs`).
+    Array,
+    /// Vanilla's `ColorCollection` record, its sixteen values in the
+    /// runtime's `arrays` table: key `color-collection#<n>`
+    /// (`color_collection.rs`).
+    ColorCollection,
 }
 
 /// How a kind's Java class follows from its key.
@@ -159,8 +166,7 @@ pub(crate) enum ClassRule {
     /// Every object of the kind is this class.
     Fixed(&'static str),
     /// A family whose objects are of many classes (jar objects, collections,
-    /// game objects): the class is read from the key.
-    #[allow(dead_code)] // The first family kinds arrive in P12/P14/P16.
+    /// game objects, arrays): the class is read from the key.
     FromKey(fn(&str) -> &str),
 }
 
@@ -237,7 +243,6 @@ pub(crate) fn canonical_when_empty(key: &str) -> bool {
 }
 
 /// The canonical predicate of a kind with one object per key.
-#[allow(dead_code)] // The first canonical families arrive in P1 (identifiers, enums).
 pub(crate) fn always_canonical(_key: &str) -> bool {
     true
 }
@@ -287,6 +292,21 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("java/util/OptionalDouble"),
         canonical: canonical_when_empty,
         methods: &crate::host_optional::OPTIONAL_DOUBLE,
+    },
+    KindInfo {
+        kind: HostKind::Array,
+        tag: "arr",
+        class: ClassRule::FromKey(crate::host_array::class_of_key),
+        canonical: crate::host_array::canonical,
+        methods: &crate::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::ColorCollection,
+        tag: "colors",
+        class: ClassRule::Fixed(crate::color_collection::OWNER),
+        // One key per collection the runtime built.
+        canonical: always_canonical,
+        methods: &crate::color_collection::COLOR_COLLECTION,
     },
 ];
 

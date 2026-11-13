@@ -191,7 +191,10 @@ impl<H: Host> Runtime<'_, H> {
                 None => HostCast::Unknown,
             });
         }
-        HostKind::of_class(target)?;
+        // An array class's objects are array handles only (`host_array.rs`).
+        if !target.starts_with('[') {
+            HostKind::of_class(target)?;
+        }
         if *value == Value::Ref(None) {
             return Some(HostCast::Fits);
         }
@@ -202,8 +205,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// The exact class of a value that is no handle, where the runtime knows
-    /// it: a string, a box, an array whose component was recorded, a jar
-    /// object, a JDK object a jar constructed
+    /// it: a string, a box, a jar object, a JDK object a jar constructed
     /// (`java/util/ArrayList#3`). Not a host model's collection or entry,
     /// whose JDK class (`List12` or `ListN`, `KeyValueHolder`) is not kept.
     fn exact_class(&self, value: &Value) -> Option<String> {
@@ -216,9 +218,6 @@ impl<H: Host> Runtime<'_, H> {
         };
         if crate::runtime::value_class::is_plain_string(marker) {
             return Some("java/lang/String".into());
-        }
-        if let Some(component) = self.array_component(marker) {
-            return Some(crate::runtime::value_class::array_class_marker(&component));
         }
         // `class#n`: an object `new` built (a host model's own copies use
         // other serials, `#neutral0`, `#immutable0`). A `Class` is not told
@@ -270,6 +269,10 @@ impl<H: Host> Runtime<'_, H> {
             // `null` is never an instance; a box is a JDK object.
             _ => return false,
         };
+        // Every array is a handle (`host_array.rs`): no other value is one.
+        if target.starts_with('[') {
+            return false;
+        }
         if ["java/", "javax/", "jdk/"]
             .iter()
             .any(|prefix| target.starts_with(prefix))

@@ -562,7 +562,7 @@ impl<H: Host> Runtime<'_, H> {
             return Err(thrown("java/nio/file/ClosedWatchServiceException", None));
         }
         if let Some(modifiers) = args.get(2)
-            && !matches!(modifiers, Value::Ref(Some(_)) if self.array(modifiers)?.is_empty())
+            && !matches!(modifiers, Value::Host(_) if self.array(modifiers)?.is_empty())
         {
             return self.host.unknown_operand_call(r).map(Some);
         }

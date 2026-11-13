@@ -25,13 +25,10 @@
 //! Then the elements are copied as if through a temporary array, so an
 //! overlapping copy within one array is exact in either direction.
 //!
-//! Only arrays whose component the runtime recorded (`newarray`, `anewarray`,
-//! and now `Arrays.copyOf`/`copyOfRange`, which keep the original's class) are
-//! copied. A reference copy runs when the
-//! destination's component is the source's or `Object`: any other pair needs
-//! JDK's per-element store check (`element type mismatch`), and is counted.
-//! So is an array with no recorded component, and a destination that is not
-//! an array.
+//! Every array handle carries its class (`host_array.rs`). A reference copy
+//! runs when the destination's component is the source's or `Object`: any
+//! other pair needs JDK's per-element store check (`element type mismatch`),
+//! and is counted. So is a destination that is not an array.
 
 use super::*;
 
@@ -75,14 +72,16 @@ impl<H: Host> Runtime<'_, H> {
         let (Some(src), Some(dst)) = (args.first(), args.get(2)) else {
             return Ok(None);
         };
-        let (Value::Ref(Some(src_marker)), Value::Ref(Some(dst_marker))) = (src, dst) else {
+        if *src == Value::Ref(None) || *dst == Value::Ref(None) {
             return Err(thrown("java/lang/NullPointerException", None));
-        };
+        }
         let int = |index: usize| expect_int(r, StdHost::argument(r, args, index)?);
         let (src_pos, dst_pos, length) = (int(1)?, int(3)?, int(4)?);
-        if !src_marker.starts_with("array/") {
+        if host_array::array_key(src).is_none() {
             // A string is the one non-array value whose class is certain.
-            if value_class::is_plain_string(src_marker) {
+            if let Value::Ref(Some(text)) = src
+                && value_class::is_plain_string(text)
+            {
                 return Err(thrown(
                     "java/lang/ArrayStoreException",
                     Some("arraycopy: source type java.lang.String is not an array".into()),
@@ -90,9 +89,10 @@ impl<H: Host> Runtime<'_, H> {
             }
             return self.host.unknown_operand_call(r).map(Some);
         }
-        let (Some(src_component), Some(dst_component)) = (
-            self.array_component(src_marker),
-            self.array_component(dst_marker),
+        let (Some(src_component), Some(dst_component), Some(dst_key)) = (
+            value_class::array_component(src),
+            value_class::array_component(dst),
+            host_array::array_key(dst),
         ) else {
             return self.host.unknown_operand_call(r).map(Some);
         };
@@ -146,7 +146,7 @@ impl<H: Host> Runtime<'_, H> {
             )));
         }
         let slice = src_values[src_pos..src_pos + length].to_vec();
-        let Some(target) = self.arrays.get_mut(dst_marker) else {
+        let Some(target) = self.arrays.get_mut(dst_key) else {
             return self.host.unknown_operand_call(r).map(Some);
         };
         target[dst_pos..dst_pos + length].clone_from_slice(&slice);

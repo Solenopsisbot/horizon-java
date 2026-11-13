@@ -104,7 +104,7 @@ impl<H: Host> Runtime<'_, H> {
         if class == "java/lang/String" || class == "java/lang/CharSequence" {
             let claimed = class_of_value(value).is_some()
                 || marker.contains('#')
-                || ["array/", "@", "enum/", "game/", "registry/", "identifier/"]
+                || ["@", "enum/", "game/", "registry/", "identifier/"]
                     .iter()
                     .any(|prefix| marker.starts_with(prefix));
             return !claimed;

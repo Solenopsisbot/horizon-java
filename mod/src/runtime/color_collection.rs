@@ -5,12 +5,16 @@
 //! (`ColorCollection.prefixWithColor(ColorCollection.create("canvas_sign"))
 //! .map(...)`, then `white()`... in Farmer's Delight). `map` runs a jar
 //! function per colour, so the collection lives in the interpreter: its values
-//! are a runtime array, and every member answers from that array exactly as
-//! the record's own code would.
+//! are kept like an array's (the runtime's `arrays` table), and every member
+//! answers from them exactly as the record's own code would. The collection
+//! is a [`HostKind::ColorCollection`] handle (#156 P11), not text: it used to
+//! be an `array/color-collection/<n>` marker, which a jar string could spell
+//! and which read as an array.
 
 use super::*;
+use crate::runtime::host_ref::{HostKind, HostRef, Methods};
 
-const OWNER: &str = "net/minecraft/world/level/block/ColorCollection";
+pub(crate) const OWNER: &str = "net/minecraft/world/level/block/ColorCollection";
 const DESCRIPTOR: &str = "Lnet/minecraft/world/level/block/ColorCollection;";
 
 /// `DyeColor` order: the record's components, `getName()` of each constant
@@ -36,18 +40,20 @@ const COLORS: [(&str, &str, &str); 16] = [
 
 impl<H: Host> Runtime<'_, H> {
     fn color_collection(&mut self, values: Vec<Value>) -> Value {
-        let marker = self.new_array("color-collection", "values");
-        self.arrays.insert(marker.clone(), values);
-        Value::Ref(Some(marker))
+        let key = format!("color-collection#{}", self.next_array);
+        self.next_array += 1;
+        self.arrays.insert(key.clone(), values);
+        Value::Host(HostRef::new(HostKind::ColorCollection, key))
     }
 
     /// The sixteen values of a collection this runtime built.
     fn color_values(&self, value: &Value) -> Option<Vec<Value>> {
-        let marker = expect_ref(value)?;
-        if !marker.starts_with("array/color-collection/") {
-            return None;
+        match value {
+            Value::Host(handle) if handle.kind() == HostKind::ColorCollection => {
+                self.arrays.get(handle.key()).cloned()
+            }
+            _ => None,
         }
-        self.arrays.get(marker).cloned()
     }
 
     pub(super) fn invoke_color_collection(
@@ -158,3 +164,30 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 }
+
+/// The record's `Object` methods. Its `toString`/`hashCode` and its `equals`
+/// against another collection read the sixteen values, which live in the
+/// runtime, not the handle: unknown here, so the caller counts them. Only
+/// what the handle alone settles is answered: the same collection, and any
+/// object that is no `ColorCollection`.
+pub(crate) const COLOR_COLLECTION: Methods = Methods {
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    equals: |handle, other, _| {
+        Ok(match other {
+            Value::Host(other) if other.kind() == HostKind::ColorCollection => {
+                handle.same_object(other).filter(|same| *same)
+            }
+            _ => Some(false),
+        })
+    },
+    // A record: `ColorCollection`, `Record`, `Object`; the game class is
+    // final and implements nothing.
+    instance_of: |_, wanted, _| {
+        Some(matches!(
+            wanted,
+            OWNER | "java/lang/Record" | "java/lang/Object"
+        ))
+    },
+    crosses_jars: |_, _| false,
+};

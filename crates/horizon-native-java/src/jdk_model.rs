@@ -149,7 +149,12 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
     match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
         // `Arrays.asList(new T[0])`: the shared empty array has no elements,
         // so the list is empty rather than a one-element list holding it.
-        ("java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;") if matches!(args.first(), Some(Value::Ref(Some(marker))) if marker == "array/empty") => {
+        ("java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;")
+            if args
+                .first()
+                .and_then(crate::host_array::array_key)
+                .is_some_and(crate::host_array::is_shared_empty) =>
+        {
             Some(Ok(Value::Ref(Some("list".into()))))
         }
         // `Modifier`'s predicates over the access flags reflection answers
@@ -964,11 +969,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         };
         let elements: Vec<Value> = match r.descriptor.as_str() {
             "(Ljava/lang/CharSequence;[Ljava/lang/CharSequence;)Ljava/lang/String;" => {
-                let Some(values) = args
-                    .get(1)
-                    .and_then(expect_ref)
-                    .and_then(|array| self.arrays.get(array))
-                else {
+                let Some(values) = args.get(1).and_then(|array| self.owned_array(array)) else {
                     return Ok(None);
                 };
                 values.clone()
@@ -1586,13 +1587,19 @@ mod tests {
             "([Ljava/lang/Object;)Ljava/util/List;",
         );
         assert_eq!(
-            static_call(&as_list, &[text("array/empty")])
-                .unwrap()
-                .unwrap(),
+            static_call(
+                &as_list,
+                &[crate::host_array::shared_empty("[Ljava/lang/String;")]
+            )
+            .unwrap()
+            .unwrap(),
             text("list")
         );
-        // A runtime-owned array is the interpreter's to expand.
-        assert!(static_call(&as_list, &[text("array/demo/Probe/run/0")]).is_none());
+        // A runtime-owned array is the interpreter's to expand, and a string
+        // spelled like the old shared empty array is no array.
+        let owned = crate::host_array::handle(crate::host_array::key("[Ljava/lang/Object;", 0));
+        assert!(static_call(&as_list, &[owned]).is_none());
+        assert!(static_call(&as_list, &[text("array/empty")]).is_none());
     }
 
     #[test]

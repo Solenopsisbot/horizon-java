@@ -8,23 +8,16 @@
 //! `validator = o -> o instanceof String` refused FarmersDelight's own string
 //! defaults ("Config defaults are invalid").
 //!
-//! An array marker (`array/<class>/<method>/<n>`) names the frame that built
-//! it, not its element type, so `array.getClass()` was null and
-//! `getComponentType()` of it too. Architectury's
-//! `EventFactory.createLoop(T... empty)` reads its event interface exactly
-//! that way, and the null reached `Proxy.newProxyInstance` as an NPE. The
-//! component a creating instruction names is now kept beside the array, as a
-//! field of the array marker, so the resident heap keeps and drops it with
-//! the array.
+//! An array once named the frame that built it, not its element type, so
+//! `array.getClass()` was null and `getComponentType()` of it too.
+//! Architectury's `EventFactory.createLoop(T... empty)` reads its event
+//! interface exactly that way, and the null reached `Proxy.newProxyInstance`
+//! as an NPE. An array handle's key now carries its class (`host_array.rs`).
 
 use super::*;
 
-/// Field key suffix (after the array marker) holding an array's component
-/// class marker: `java/lang/String`, `int`, `[I`.
-pub(crate) const ARRAY_COMPONENT_FIELD: &str = "|[#component";
-
 /// `java.lang.String` and every type it extends or implements.
-const STRING_TYPES: &[&str] = &[
+pub(crate) const STRING_TYPES: &[&str] = &[
     "java/lang/String",
     "java/lang/CharSequence",
     "java/lang/Comparable",
@@ -138,47 +131,47 @@ pub(crate) fn primitive_array_component(atype: u8) -> Option<&'static str> {
     })
 }
 
+/// The component class of an array (`java/lang/String`, `int`, `[I`);
+/// `None` for any other value, and for a shared empty array, whose exact
+/// class is unknown (`host_array.rs`).
+pub(crate) fn array_component(value: &Value) -> Option<String> {
+    let key = host_array::array_key(value)?;
+    if host_array::is_shared_empty(key) {
+        return None;
+    }
+    component_of_array_class(host_array::class_of_key(key))
+}
+
 impl<H: Host> Runtime<'_, H> {
-    /// Remember the component class the instruction or call that built
-    /// `array` named.
-    pub(super) fn record_array_component(&mut self, array: &str, component: &str) {
-        self.fields.insert(
-            format!("{array}{ARRAY_COMPONENT_FIELD}"),
-            Value::Ref(Some(component.to_owned())),
-        );
-    }
-
-    /// The component class recorded for `array`, if any.
-    pub(super) fn array_component(&self, array: &str) -> Option<String> {
-        match self.fields.get(&format!("{array}{ARRAY_COMPONENT_FIELD}")) {
-            Some(Value::Ref(Some(component))) => Some(component.clone()),
-            _ => None,
-        }
-    }
-
-    /// `array.getClass()` for an array whose component is known, and
-    /// `Class.getComponentType()` of an array class (null for any other
-    /// class, as on the JVM).
+    /// `array.getClass()`, and `Class.getComponentType()` of an array class
+    /// (null for any other class, as on the JVM).
+    /// A shared empty array's exact class is unknown (`host_array.rs`):
+    /// its `getClass()` is counted.
     pub(super) fn invoke_array_class(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
-    ) -> Option<Value> {
-        let marker = receiver.and_then(expect_ref)?;
-        match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
-            ("java/lang/Object", "getClass", "()Ljava/lang/Class;") => {
-                let Some(Value::Ref(Some(component))) =
-                    self.fields.get(&format!("{marker}{ARRAY_COMPONENT_FIELD}"))
-                else {
-                    return None;
-                };
-                Some(Value::Ref(Some(array_class_marker(component))))
-            }
-            ("java/lang/Class", "getComponentType", "()Ljava/lang/Class;") => {
-                Some(Value::Ref(component_of_array_class(marker)))
-            }
-            _ => None,
-        }
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        Ok(
+            match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+                ("java/lang/Object", "getClass", "()Ljava/lang/Class;") => {
+                    let Some(key) = host_array::array_key(receiver) else {
+                        return Ok(None);
+                    };
+                    if host_array::is_shared_empty(key) {
+                        return self.host.unknown_operand_call(r).map(Some);
+                    }
+                    Some(Value::Ref(Some(host_array::class_of_key(key).to_owned())))
+                }
+                ("java/lang/Class", "getComponentType", "()Ljava/lang/Class;") => {
+                    expect_ref(receiver).map(|class| Value::Ref(component_of_array_class(class)))
+                }
+                _ => None,
+            },
+        )
     }
 }
 

@@ -1,0 +1,257 @@
+//! Java arrays as host handles (#156 P11).
+//!
+//! An array used to be marker text, `array/<class>/<method>/<n>`, the same
+//! `Value::Ref` a `String` is, so a jar string spelled like one was that
+//! array to every reader that checked the prefix (`System.arraycopy`, the
+//! heap, `Arrays.asList`), and an array was text to any reader that did not.
+//! Now an array is a [`HostKind::Array`] handle, and its elements stay where
+//! they were: the runtime's `arrays` table, keyed by the handle's key.
+//!
+//! **Key:** `<array class>#<n>`, the class in descriptor form (`[I`,
+//! `[Ljava/lang/String;`, `[[I`) and `n` the runtime's array counter, so the
+//! key names one allocation and carries the array's class: `getClass()`,
+//! `instanceof` and `checkcast` read it from the handle, for every array
+//! however it was built (the class used to be a side record that only some
+//! producers wrote). A key ends in its allocation number, like a jar object's
+//! `class#n`, so the resident heap's collector finds it wherever it is held.
+//!
+//! The one key that is not one allocation is `<array class>#empty`
+//! ([`shared_empty`]): the empty array the runtime answers for a call it does
+//! not model whose declared result is an array. It has no table row (it has
+//! no elements to keep) and stands for whatever array that call would have
+//! returned, so its class is the call's declared result type, which the real
+//! array may be a subclass of: `instanceof` that type or a supertype is
+//! `true`, and anything else needing the exact class (`getClass()`, a
+//! narrowing cast) is unknown and counted.
+//!
+//! **Identity:** an array is an object with identity (`new int[0]` twice is
+//! two objects), and its `equals`/`hashCode` are `Object`'s. Every
+//! allocation mints its own key and no key is ever minted twice, so two
+//! handles with one allocation key are that one array, however they got
+//! there (a local, a field, a collection, a capture read back from text):
+//! the key is canonical ([`canonical`]). Two separate arrays always have two
+//! keys, so `new int[0] == new int[0]` is `false` without counting. The one
+//! exception is the shared empty array: one key standing for every array an
+//! unmodelled call returned, so two of them are one object only when the
+//! same construction flows to both sides (`HostRef::same_object`), and
+//! identity on them is counted otherwise.
+//!
+//! **Text:** `toString()` is `getClass().getName() + "@" +
+//! Integer.toHexString(hashCode())` and `hashCode()` is the identity hash: a
+//! number the VM picks, which Java does not define and the runtime does not
+//! have. Both answer unknown, and the caller counts the call; neither is ever
+//! invented. `Arrays.toString`/`hashCode`/`equals` read the elements, not the
+//! handle.
+
+use crate::runtime::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, Nested};
+use crate::runtime::{NativeError, Value};
+
+/// The suffix of [`shared_empty`]'s key.
+const SHARED_EMPTY: &str = "empty";
+
+/// A new array's key: its class and allocation number.
+pub(crate) fn key(class: &str, number: u64) -> String {
+    format!("{class}#{number}")
+}
+
+/// The handle of the array whose elements are at `key` in the `arrays` table.
+/// Call it once per allocation and clone the value from then on: two calls
+/// are two constructions, which identity cannot tell apart.
+pub(crate) fn handle(key: impl Into<std::sync::Arc<str>>) -> Value {
+    Value::Host(HostRef::new(HostKind::Array, key))
+}
+
+/// The empty array of `class` (`[Ljava/lang/String;`) the runtime answers
+/// where it has no array of its own to give (see the module notes).
+pub(crate) fn shared_empty(class: &str) -> Value {
+    handle(key_of_empty(class))
+}
+
+fn key_of_empty(class: &str) -> String {
+    format!("{class}#{SHARED_EMPTY}")
+}
+
+/// The kind's canonical predicate: an allocation key is one array; the
+/// shared empty key is not one object.
+pub(crate) fn canonical(key: &str) -> bool {
+    !is_shared_empty(key)
+}
+
+/// Whether `key` is a [`shared_empty`] array's.
+pub(crate) fn is_shared_empty(key: &str) -> bool {
+    key.rsplit_once('#')
+        .is_some_and(|(_, number)| number == SHARED_EMPTY)
+}
+
+/// The `arrays`-table key of an array handle; `None` for any other value (a
+/// `String` spelled like an array is no array).
+pub(crate) fn array_key(value: &Value) -> Option<&str> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::Array => Some(handle.key()),
+        _ => None,
+    }
+}
+
+/// The array class a key carries: `[I` of `[I#3`.
+pub(crate) fn class_of_key(key: &str) -> &str {
+    key.rsplit_once('#').map_or(key, |(class, _)| class)
+}
+
+/// The exact class of an array handle: `None` for any other value and for
+/// a shared empty array, whose exact class is unknown.
+pub(crate) fn exact_class(value: &Value) -> Option<&str> {
+    array_key(value)
+        .filter(|key| !is_shared_empty(key))
+        .map(class_of_key)
+}
+
+/// `Object.equals`: `this == obj`. Another array is this one only when
+/// identity can tell; two shared empty arrays from separate constructions
+/// are unknown.
+fn equals(
+    handle: &HostRef,
+    other: &Value,
+    _nested: &mut dyn Nested,
+) -> Result<Option<bool>, NativeError> {
+    Ok(match other {
+        Value::Host(other) => handle.same_object(other),
+        _ => Some(false),
+    })
+}
+
+/// `array instanceof wanted`: an array class is assignable to `Object`,
+/// `Cloneable` and `Serializable`, and to another array class when its
+/// components are (JLS 4.10.3: `String[]` is an `Object[]`, `int[]` is not).
+fn instance_of(handle: &HostRef, wanted: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
+    let wanted = if wanted.starts_with('[') {
+        wanted.to_owned()
+    } else {
+        format!("L{wanted};")
+    };
+    let answer = assignable(handle.class(), &wanted, hierarchy);
+    if is_shared_empty(handle.key()) {
+        // Only the declared type is known, not the exact class.
+        return answer.filter(|fits| *fits);
+    }
+    answer
+}
+
+/// Whether a value of field descriptor `from` is a `to`, `None` where the
+/// hierarchy cannot tell (a jar component whose chain leaves it).
+fn assignable(from: &str, to: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
+    if from == to {
+        return Some(true);
+    }
+    match (from.strip_prefix('['), to.strip_prefix('[')) {
+        (Some(from), Some(to)) => {
+            // Primitive components match only themselves.
+            if from.len() == 1 || to.len() == 1 {
+                return Some(false);
+            }
+            assignable(from, to, hierarchy)
+        }
+        (Some(_), None) => Some(matches!(
+            to,
+            "Ljava/lang/Object;" | "Ljava/lang/Cloneable;" | "Ljava/io/Serializable;"
+        )),
+        (None, Some(_)) => Some(false),
+        (None, None) => {
+            let class = from.strip_prefix('L')?.strip_suffix(';')?;
+            let wanted = to.strip_prefix('L')?.strip_suffix(';')?;
+            if class == "java/lang/String" {
+                // A `String[]` is a `CharSequence[]`, `Comparable[]`, ...
+                return Some(
+                    wanted == "java/lang/Object"
+                        || crate::runtime::value_class::STRING_TYPES.contains(&wanted),
+                );
+            }
+            hierarchy.is_instance(class, wanted)
+        }
+    }
+}
+
+pub(crate) const ARRAY: Methods = Methods {
+    // `[I@1b6d3586`: the identity hash only the VM has.
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    equals,
+    instance_of,
+    // An array is one jar runtime's mutable state.
+    crosses_jars: |_, _| false,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::host_ref::JdkHierarchy;
+
+    fn array(class: &str) -> HostRef {
+        HostRef::new(HostKind::Array, key(class, 0))
+    }
+
+    /// JLS 4.10.3 array subtyping, against what Java 25 answers for
+    /// `instanceof` (the fixture checks the same through bytecode).
+    #[test]
+    fn array_classes_are_assignable_as_the_jls_says() {
+        let strings = array("[Ljava/lang/String;");
+        let ints = array("[I");
+        let grid = array("[[I");
+        for (handle, wanted, expected) in [
+            (&strings, "[Ljava/lang/Object;", true),
+            (&strings, "[Ljava/lang/CharSequence;", true),
+            (&strings, "[Ljava/lang/Integer;", false),
+            (&strings, "java/lang/Cloneable", true),
+            (&strings, "java/io/Serializable", true),
+            (&strings, "java/lang/Comparable", false),
+            (&ints, "[Ljava/lang/Object;", false),
+            (&ints, "[J", false),
+            (&ints, "[I", true),
+            (&ints, "java/lang/Object", true),
+            (&grid, "[Ljava/lang/Object;", true),
+            (&grid, "[Ljava/lang/Cloneable;", true),
+            (&grid, "[[J", false),
+            (&grid, "[I", false),
+        ] {
+            assert_eq!(
+                handle.instance_of(wanted, &JdkHierarchy),
+                Some(expected),
+                "{} instanceof {wanted}",
+                handle.class()
+            );
+        }
+    }
+
+    /// Every key, shared empties too, carries its class; only the shared
+    /// empties are marked as such.
+    #[test]
+    fn a_key_carries_its_class() {
+        assert_eq!(
+            class_of_key(&key("[Ljava/lang/String;", 12)),
+            "[Ljava/lang/String;"
+        );
+        assert_eq!(
+            array_key(&shared_empty("[[I")).map(class_of_key),
+            Some("[[I")
+        );
+        assert!(is_shared_empty(&key_of_empty("[I")));
+        // A shared empty array is its declared type, maybe a subclass of it.
+        let Value::Host(objects) = shared_empty("[Ljava/lang/Object;") else {
+            unreachable!()
+        };
+        assert_eq!(
+            objects.instance_of("[Ljava/lang/Object;", &JdkHierarchy),
+            Some(true)
+        );
+        assert_eq!(
+            objects.instance_of("java/lang/Cloneable", &JdkHierarchy),
+            Some(true)
+        );
+        assert_eq!(
+            objects.instance_of("[Ljava/lang/String;", &JdkHierarchy),
+            None
+        );
+        assert_eq!(objects.instance_of("[I", &JdkHierarchy), None);
+        assert!(!is_shared_empty(&key("[I", 0)));
+        assert_eq!(array_key(&Value::Ref(Some(key("[I", 0)))), None);
+    }
+}

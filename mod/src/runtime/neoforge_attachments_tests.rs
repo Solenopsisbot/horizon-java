@@ -600,7 +600,7 @@ fn compound_copy_is_deep_and_get_compound_or_empty_answers_the_live_child() {
         .host
         .resident_heap()
         .arrays
-        .get(expect_ref(&answer).unwrap())
+        .get(crate::runtime::host_array::array_key(&answer).unwrap())
         .unwrap()
         .clone();
     let read = |fixture: &mut Fixture, value: &Value| {
@@ -637,7 +637,7 @@ fn compound_put_answers_the_previous_tag_and_refuses_null_as_the_server_jar_does
         .host
         .resident_heap()
         .arrays
-        .get(expect_ref(&answer).unwrap())
+        .get(crate::runtime::host_array::array_key(&answer).unwrap())
         .unwrap()
         .clone();
     // The oracle's first put answered null and the second the tag it replaced.
