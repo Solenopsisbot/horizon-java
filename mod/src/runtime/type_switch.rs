@@ -59,26 +59,33 @@ impl<H: Host> Runtime<'_, H> {
     /// The index a `typeSwitch` site answers for `value`, starting at
     /// `restart`.
     pub(crate) fn type_switch_index(
-        &self,
+        &mut self,
         labels: &[SwitchLabel],
         value: &Value,
         restart: i32,
-    ) -> i32 {
+    ) -> Result<i32, NativeError> {
         if *value == Value::Ref(None) {
-            return -1;
+            return Ok(-1);
         }
         let start = usize::try_from(restart).unwrap_or(0);
         for (index, label) in labels.iter().enumerate().skip(start) {
-            let matched = match label {
-                SwitchLabel::Class(class) => self.switch_instance_of(value, class),
-                SwitchLabel::String(text) => expect_ref(value).is_some_and(|marker| marker == text),
-                SwitchLabel::Int(expected) => boxed_int(value) == Some(*expected),
+            let matched = match (label, value) {
+                // A host handle by its kind's row (`host_ref.rs`), as the
+                // `instanceof` opcode decides it.
+                (SwitchLabel::Class(class), Value::Host(handle)) => {
+                    class == "java/lang/Object" || self.handle_instance_of(handle, class)?
+                }
+                (SwitchLabel::Class(class), _) => self.switch_instance_of(value, class),
+                (SwitchLabel::String(text), _) => {
+                    expect_ref(value).is_some_and(|marker| marker == text)
+                }
+                (SwitchLabel::Int(expected), _) => boxed_int(value) == Some(*expected),
             };
             if matched {
-                return index as i32;
+                return Ok(index as i32);
             }
         }
-        labels.len() as i32
+        Ok(labels.len() as i32)
     }
 
     /// `value instanceof class` for a switch label: jar objects through their
@@ -105,9 +112,15 @@ impl<H: Host> Runtime<'_, H> {
             return true;
         }
         // A string is a bare marker: no object, boxed, collection, array,
-        // callback, enum or game prefix claims it.
+        // callback, enum or game prefix claims it. A `#` claims it only as an
+        // object's `class#n` (`[I#0` is a string: arrays are handles).
         if class == "java/lang/String" || class == "java/lang/CharSequence" {
-            return value_class::is_plain_string(marker);
+            let claimed = class_of_value(value).is_some()
+                || marker.contains('#') && !value_class::is_plain_string(marker)
+                || ["@", "enum/", "game/", "registry/", "identifier/"]
+                    .iter()
+                    .any(|prefix| marker.starts_with(prefix));
+            return !claimed;
         }
         self.object_is_instance_of(marker, class)
     }

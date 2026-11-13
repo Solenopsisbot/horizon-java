@@ -211,6 +211,8 @@ pub(crate) const ARRAY: Methods = Methods {
     instance_of,
     // An array is one jar runtime's mutable state.
     crosses_jars: |_, _| false,
+    // Not `Comparable`.
+    compare_to: None,
 };
 
 #[cfg(test)]

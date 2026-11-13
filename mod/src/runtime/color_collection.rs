@@ -190,4 +190,6 @@ pub(crate) const COLOR_COLLECTION: Methods = Methods {
         ))
     },
     crosses_jars: |_, _| false,
+    // Not `Comparable`.
+    compare_to: None,
 };
