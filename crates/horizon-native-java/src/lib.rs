@@ -6381,8 +6381,8 @@ impl Host for StdHost {
             };
         }
         let receiver_marker = expect_ref(receiver).cloned();
-        if let Some(marker) = receiver_marker.as_deref()
-            && let Some(value) = functional_composition_marker(r, marker, args)
+        if let Some(marker) = callback_text(receiver)
+            && let Some(value) = functional_composition_marker(r, &marker, args)
         {
             return Ok(value);
         }
@@ -8771,8 +8771,8 @@ impl Host for StdHost {
                     && let Some(rest) = marker.strip_prefix("@fn:consumer.then:")
                     && let Some((left, right)) = rest.split_once('|')
                 {
-                    self.invoke_instance(r, &Value::Ref(Some(left.to_owned())), args)?;
-                    self.invoke_instance(r, &Value::Ref(Some(right.to_owned())), args)?;
+                    self.invoke_instance(r, &composed_callback(left), args)?;
+                    self.invoke_instance(r, &composed_callback(right), args)?;
                 }
                 Ok(Value::Void)
             }
@@ -18647,12 +18647,32 @@ fn predicate_marker_value(marker: &str) -> bool {
 /// both the host surface and a jar callback's own combinator call read it the
 /// same way: composing two callbacks must not execute the receiver as if it
 /// were the argument (which is what a callback marker otherwise means).
+/// A callback's text inside a composition marker: its marker, or a host
+/// handle's encoded form (a `Stream.Builder` is a `Consumer`), which
+/// [`composed_callback`] reads back.
+fn callback_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Ref(Some(marker)) => Some(marker.clone()),
+        Value::Host(handle) => Some(handle.encode()),
+        _ => None,
+    }
+}
+
+/// One side of a composition marker as the callback it was.
+fn composed_callback(text: &str) -> Value {
+    match HostRef::decode(text) {
+        Some(handle) => Value::Host(handle),
+        None => Value::Ref(Some(text.to_owned())),
+    }
+}
+
 fn functional_composition_marker(
     r: &MethodRef,
     receiver_marker: &str,
     args: &[Value],
 ) -> Option<Value> {
-    let other = || args.first().and_then(expect_ref).map(String::as_str);
+    let other_text = args.first().and_then(callback_text);
+    let other = || other_text.as_deref();
     match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
         (
             "java/util/function/Predicate",
@@ -19992,8 +20012,9 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(rest) = marker.strip_prefix("@fn:consumer.then:")
             && let Some((left, right)) = rest.split_once('|')
         {
-            self.invoke_callback(&Value::Ref(Some(left.to_owned())), args)?;
-            self.invoke_callback(&Value::Ref(Some(right.to_owned())), args)?;
+            // A side may be a host handle's encoded form (`callback_text`).
+            self.invoke_callback(&composed_callback(left), args)?;
+            self.invoke_callback(&composed_callback(right), args)?;
             return Ok(Some(Value::Void));
         }
         if let Some(rest) = marker.strip_prefix("@fn:function.then:")
@@ -23271,7 +23292,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn new_stream(&mut self, class: &str, method: &str, values: Vec<Value>) -> Value {
-        let marker = format!("stream/{class}/{method}/{}", self.next_stream);
+        let marker = stream_pipeline::stream_marker(class, method, self.next_stream);
         self.next_stream += 1;
         self.streams.insert(marker.clone(), values);
         Value::Ref(Some(marker))
@@ -24484,7 +24505,8 @@ impl<H: Host> Runtime<'_, H> {
                     let unboxed = self.library_instance_of(&value, &wanted);
                     let matches = unboxed
                         || expect_ref(&value).is_some_and(|marker| {
-                            self.object_is_instance_of(marker, &wanted)
+                            self.forged_stream_instance_of(marker, &wanted)
+                                || self.object_is_instance_of(marker, &wanted)
                                 || self.host.host_instance_of(marker, &wanted)
                                 || jdk_model::platform_instance_of(marker, &wanted)
                                 || generic_type_instance_of(marker, &wanted)
@@ -25132,7 +25154,7 @@ impl<H: Host> Runtime<'_, H> {
                                     // combinator returns.
                                     if let Some(value) = functional_composition_marker(
                                         &resolved,
-                                        expect_ref(receiver).map(String::as_str).unwrap_or(""),
+                                        callback_text(receiver).as_deref().unwrap_or(""),
                                         &args,
                                     ) {
                                         value

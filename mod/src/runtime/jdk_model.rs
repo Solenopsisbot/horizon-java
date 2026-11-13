@@ -504,6 +504,8 @@ pub(crate) struct ToMap {
     guava: bool,
     entries: Vec<(Value, Value)>,
     map: Option<Value>,
+    /// The 4-argument form's map supplier (`TreeMap::new`, ...).
+    supplier: Option<Value>,
 }
 
 impl ToMap {
@@ -523,9 +525,15 @@ impl ToMap {
             .into_iter()
             .map(|marker| super::parse_collection_value(&marker))
             .collect::<Result<Vec<_>, _>>()?;
-        let (key_fn, value_fn, merge_fn) = match functions.as_slice() {
-            [key, value] => (key.clone(), value.clone(), None),
-            [key, value, merge] => (key.clone(), value.clone(), Some(merge.clone())),
+        let (key_fn, value_fn, merge_fn, supplier) = match functions.as_slice() {
+            [key, value] => (key.clone(), value.clone(), None, None),
+            [key, value, merge] => (key.clone(), value.clone(), Some(merge.clone()), None),
+            [key, value, merge, supplier] if !guava => (
+                key.clone(),
+                value.clone(),
+                Some(merge.clone()),
+                Some(supplier.clone()),
+            ),
             _ => return Ok(None),
         };
         Ok(Some(Self {
@@ -535,6 +543,7 @@ impl ToMap {
             guava,
             entries: Vec::new(),
             map: None,
+            supplier,
         }))
     }
 
@@ -567,12 +576,17 @@ pub(crate) fn to_map_collector(r: &MethodRef, args: &[Value]) -> Option<Value> {
         "(Ljava/util/function/Function;Ljava/util/function/Function;)Ljava/util/stream/Collector;" => {
             2
         }
-        // The merge overload, and the one that also names the map supplier:
-        // the bounded map keeps insertion order whichever map type was asked
-        // for, so the supplier is not called.
-        "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;)Ljava/util/stream/Collector;"
-        | "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;Ljava/util/function/Supplier;)Ljava/util/stream/Collector;" => {
+        // The merge overload (`HashMap::new`).
+        "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;)Ljava/util/stream/Collector;" => {
             3
+        }
+        // The one that also names the map supplier: the supplier makes the
+        // map and each element is `map.merge(k, v, merge)` on it
+        // (`ToMap::supplier`).
+        "(Ljava/util/function/Function;Ljava/util/function/Function;Ljava/util/function/BinaryOperator;Ljava/util/function/Supplier;)Ljava/util/stream/Collector;"
+            if !guava =>
+        {
+            4
         }
         _ => return None,
     };
@@ -1418,7 +1432,18 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let Some(mut state) = ToMap::begin(collector)? else {
             return Ok(None);
         };
-        if !state.guava {
+        if let Some(supplier) = state.supplier.clone() {
+            // `mapFactory.get()` in the sink's `begin`.
+            let map = self.call_sam("java/util/function/Supplier", &supplier, &[])?;
+            if map == Value::Ref(None) {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: None,
+                    frame: None,
+                });
+            }
+            state.map = Some(map);
+        } else if !state.guava {
             state.map = Some(self.new_collector_hash_map()?);
         }
         Ok(Some(state))
@@ -1434,6 +1459,24 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         state: &mut ToMap,
         element: &Value,
     ) -> Result<(), NativeError> {
+        if let (Some(map), Some(merge)) = (
+            state.map.clone(),
+            state.supplier.as_ref().and(state.merge_fn.clone()),
+        ) {
+            // `toMap(k, v, merge, mapFactory)`'s accumulator:
+            // `map.merge(keyMapper.apply(t), valueMapper.apply(t), merge)`.
+            let key = self.apply_function(&state.key_fn, element)?;
+            let value = self.apply_function(&state.value_fn, element)?;
+            self.call_virtual(
+                crate::runtime::jdk_call::Site::Interface,
+                "java/util/Map",
+                "merge",
+                "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+                &map,
+                &[key, value, merge],
+            )?;
+            return Ok(());
+        }
         if let Some(map) = state.map.clone() {
             // `Collectors.toMap`: `putIfAbsent` or `merge` on the `HashMap`.
             return self.hash_map_collect_one(&map, state, element);
