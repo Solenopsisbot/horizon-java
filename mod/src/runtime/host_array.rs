@@ -93,7 +93,11 @@ pub(crate) fn shared_empty(class: &str) -> Value {
 /// Its declared array class is in the key, and the kind's `instance_of`
 /// reads it from there.
 pub(crate) fn surely(_key: &str) -> &'static [&'static str] {
-    &["java/lang/Object", "java/lang/Cloneable", "java/io/Serializable"]
+    &[
+        "java/lang/Object",
+        "java/lang/Cloneable",
+        "java/io/Serializable",
+    ]
 }
 
 fn key_of_empty(class: &str) -> String {
@@ -128,6 +132,25 @@ pub(crate) fn array_key(value: &Value) -> Option<&str> {
 /// The array class a key carries: `[I` of `[I#3`.
 pub(crate) fn class_of_key(key: &str) -> &str {
     key.rsplit_once('#').map_or(key, |(class, _)| class)
+}
+
+/// The component of an array class, borrowed (`java/lang/String` of
+/// `[Ljava/lang/String;`, `[I` of `[[I`, `int` of `[I`): `None` for any
+/// other text. Nothing is allocated: it runs on every array store.
+pub(crate) fn component_of(class: &str) -> Option<&str> {
+    let element = class.strip_prefix('[')?;
+    Some(match element {
+        "Z" => "boolean",
+        "B" => "byte",
+        "C" => "char",
+        "S" => "short",
+        "I" => "int",
+        "J" => "long",
+        "F" => "float",
+        "D" => "double",
+        nested if nested.starts_with('[') => nested,
+        object => object.strip_prefix('L')?.strip_suffix(';')?,
+    })
 }
 
 /// The exact class of an array handle: `None` for any other value and for
@@ -165,53 +188,58 @@ fn instance_of(handle: &HostRef, wanted: &str, hierarchy: &dyn ClassHierarchy) -
 }
 
 /// Whether an object of class `class` is a `wanted` (each an internal name
-/// or an array descriptor), `None` where the hierarchy cannot tell.
+/// or an array descriptor), `None` where the hierarchy cannot tell. JLS
+/// 4.10.3: an array class is an `Object`, `Cloneable` and `Serializable`,
+/// and another array class when its components are (`String[]` is an
+/// `Object[]`, `int[]` is not). Allocates nothing: it runs on array stores.
 pub(crate) fn class_assignable(
     class: &str,
     wanted: &str,
     hierarchy: &dyn ClassHierarchy,
 ) -> Option<bool> {
-    let descriptor = |name: &str| {
-        if name.starts_with('[') {
-            name.to_owned()
-        } else {
-            format!("L{name};")
-        }
-    };
-    assignable(&descriptor(class), &descriptor(wanted), hierarchy)
-}
-
-/// Whether a value of field descriptor `from` is a `to`, `None` where the
-/// hierarchy cannot tell (a jar component whose chain leaves it).
-fn assignable(from: &str, to: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
-    if from == to {
+    if class == wanted || wanted == "java/lang/Object" {
         return Some(true);
     }
-    match (from.strip_prefix('['), to.strip_prefix('[')) {
-        (Some(from), Some(to)) => {
-            // Primitive components match only themselves.
-            if from.len() == 1 || to.len() == 1 {
-                return Some(false);
+    match (class.strip_prefix('['), wanted.strip_prefix('[')) {
+        (Some(from), Some(to)) => match (element(from)?, element(to)?) {
+            (Element::Primitive(a), Element::Primitive(b)) => Some(a == b),
+            (Element::Primitive(_), _) | (_, Element::Primitive(_)) => Some(false),
+            (Element::Reference(from), Element::Reference(to)) => {
+                class_assignable(from, to, hierarchy)
             }
-            assignable(from, to, hierarchy)
-        }
+        },
         (Some(_), None) => Some(matches!(
-            to,
-            "Ljava/lang/Object;" | "Ljava/lang/Cloneable;" | "Ljava/io/Serializable;"
+            wanted,
+            "java/lang/Cloneable" | "java/io/Serializable"
         )),
         (None, Some(_)) => Some(false),
         (None, None) => {
-            let class = from.strip_prefix('L')?.strip_suffix(';')?;
-            let wanted = to.strip_prefix('L')?.strip_suffix(';')?;
             if class == "java/lang/String" {
                 // A `String[]` is a `CharSequence[]`, `Comparable[]`, ...
-                return Some(
-                    wanted == "java/lang/Object"
-                        || crate::runtime::value_class::STRING_TYPES.contains(&wanted),
-                );
+                return Some(crate::runtime::value_class::STRING_TYPES.contains(&wanted));
             }
             hierarchy.is_instance(class, wanted)
         }
+    }
+}
+
+/// An array's element type, from its descriptor after the `[`.
+enum Element<'a> {
+    Primitive(u8),
+    /// An internal class name, or an array class's descriptor.
+    Reference(&'a str),
+}
+
+fn element(descriptor: &str) -> Option<Element<'_>> {
+    match descriptor.as_bytes() {
+        [code @ (b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D')] => {
+            Some(Element::Primitive(*code))
+        }
+        [b'[', ..] => Some(Element::Reference(descriptor)),
+        _ => descriptor
+            .strip_prefix('L')?
+            .strip_suffix(';')
+            .map(Element::Reference),
     }
 }
 

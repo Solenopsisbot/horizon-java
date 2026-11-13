@@ -75,7 +75,7 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     {
         return host_array::handle_only_class(class);
     }
-    if !marker.contains('#') && class_of_value(&Value::Ref(Some(marker.to_owned()))).is_some() {
+    if !marker.contains('#') && class_of_text(marker).is_some() {
         return false;
     }
     if let Some((head, _)) = marker.split_once('/')

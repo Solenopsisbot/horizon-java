@@ -76,55 +76,161 @@ fn final_value_supertypes(class: &str) -> Option<&'static [&'static str]> {
     })
 }
 
-/// `java.lang.Class` and every type it is (JDK 25).
-const CLASS_TYPES: &[&str] = &[
+/// The last store verdict for a jar object's class against a component.
+pub(crate) struct StoreVerdict {
+    class: String,
+    component: String,
+    fits: Option<bool>,
+}
+
+/// The final `java.lang` classes an array component can be: an array of one
+/// holds only that exact class.
+const FINAL_COMPONENTS: &[&str] = &[
+    "java/lang/String",
+    "java/lang/Integer",
+    "java/lang/Long",
+    "java/lang/Short",
+    "java/lang/Byte",
+    "java/lang/Character",
+    "java/lang/Boolean",
+    "java/lang/Float",
+    "java/lang/Double",
     "java/lang/Class",
-    "java/io/Serializable",
-    "java/lang/constant/Constable",
-    "java/lang/invoke/TypeDescriptor",
-    "java/lang/invoke/TypeDescriptor$OfField",
-    "java/lang/reflect/AnnotatedElement",
-    "java/lang/reflect/GenericDeclaration",
-    "java/lang/reflect/Type",
 ];
+
+/// The boxes: no text value is ever one (boxes are `Value::Boxed`).
+fn is_box(class: &str) -> bool {
+    FINAL_COMPONENTS[1..9].contains(&class)
+}
+
+/// Whether an object of the final value class `class` is a `component`.
+fn value_class_fits(class: &str, component: &str) -> bool {
+    class == component
+        || final_value_supertypes(class).is_some_and(|supertypes| supertypes.contains(&component))
+}
 
 impl<H: Host> Runtime<'_, H> {
     /// Whether `value` may be stored into an array of `component` (an
     /// internal name, or a descriptor for an array component): `None` when
-    /// the runtime cannot tell.
+    /// the runtime cannot tell. Runs on every `aastore`, so the common
+    /// answers come first and nothing is allocated on the way.
     ///
-    /// Known: a handle (its kind's row), any other value against an array
-    /// component (only handles are arrays), a `String` or box (its whole
-    /// type is known), and a jar object against a component whose chain the
-    /// runtime holds.
+    /// Known: a handle (its kind's row); any other value against an array
+    /// component (only handles are arrays); a `String` or box (its whole
+    /// type); an object whose class the runtime knows (a jar object, a JDK
+    /// object a jar constructed, an enum constant) against a final
+    /// component (only that class fits), a component it is, or a component
+    /// the runtime can rule out (a jar class whose chain ends at `Object`,
+    /// `Object` itself); a lambda against a final component.
     pub(crate) fn store_fits(&self, component: &str, value: &Value) -> Option<bool> {
         if *value == Value::Ref(None) || component == "java/lang/Object" {
             return Some(true);
         }
-        if let Value::Host(handle) = value {
-            return handle.instance_of(component, self);
+        let text = match value {
+            Value::Host(handle) => return handle.instance_of(component, self),
+            _ if component.starts_with('[') => return Some(false),
+            Value::Ref(Some(text)) => text.as_str(),
+            Value::Boxed(boxed) => return Some(value_class_fits(boxed.class(), component)),
+            other => return Some(value_class_fits(&class_of_value(other)?, component)),
+        };
+        // A store loop: the same jar object's class into the same component
+        // as last time (only a held class's verdict is kept).
+        if let Some(class) = crate::runtime::jar_text::object_marker_class(text) {
+            if class == component {
+                return Some(true);
+            }
+            if let Some(cached) = self.store_verdict.borrow().as_ref()
+                && cached.class == class
+                && cached.component == component
+            {
+                return cached.fits;
+            }
         }
-        if component.starts_with('[') {
-            return Some(false);
+        if let Some(class) = self.marker_class(text) {
+            if class == component {
+                return Some(true);
+            }
+            if FINAL_COMPONENTS.contains(&component) {
+                return Some(false);
+            }
+            if self.class(class).is_some() {
+                // A jar object: its chain, trusted for a "no" only when it
+                // ends at `Object` (a JDK superclass's interfaces are not all
+                // known here). The answer depends on the two classes only.
+                let fits = match self.known_instance_of(value, component) {
+                    Some(false) if !self.chain_ends_at_object(class) => None,
+                    fits => fits,
+                };
+                *self.store_verdict.borrow_mut() = Some(StoreVerdict {
+                    class: class.to_owned(),
+                    component: component.to_owned(),
+                    fits,
+                });
+                return fits;
+            }
+            // A JDK object: `Object` implements nothing; any other is only
+            // known where Java 25's tables say "yes".
+            return match class {
+                "java/lang/Object" => Some(false),
+                _ => crate::runtime::jdk_model::class_instance_of(class, component).then_some(true),
+            };
         }
-        let Some(class) = self.exact_class(value) else {
-            // A lambda or another marker: `checkcast`'s verdict against a
-            // class the runtime holds (a lambda is its functional interface).
+        if text.starts_with("@indy:") {
+            // A lambda's hidden class is no `String`, box or `Class`.
+            if FINAL_COMPONENTS.contains(&component) {
+                return Some(false);
+            }
             self.class(component)?;
             return self.known_instance_of(value, component);
-        };
-        if let Some(supertypes) = final_value_supertypes(&class) {
-            let fits = class == component || supertypes.contains(&component);
-            // A `Class` is still text until #156 P13 (`int.class` is `"int"`):
-            // a text that does not fit as a `String` may be a `Class` that does.
-            if !fits && matches!(value, Value::Ref(Some(_))) && CLASS_TYPES.contains(&component) {
-                return None;
-            }
-            return Some(fits);
         }
-        // A jar object: `checkcast`'s own verdict.
+        // A `String`, a `Class` (text until #156 P13: `int.class` is "int")
+        // or a host marker whose class is unknown. A `String`'s components
+        // fit, or this is undecided either way.
+        if is_box(component) {
+            return Some(false);
+        }
+        if value_class_fits("java/lang/String", component) {
+            // A `String` fits; any other text is undecided.
+            return value_class::is_plain_string(text).then_some(true);
+        }
+        if value_class::is_plain_string(text) && !self.text_may_be_class(text) {
+            return Some(false);
+        }
         self.class(component)?;
         self.known_instance_of(value, component)
+    }
+
+    /// The class of a marker the runtime knows exactly: a jar object or a
+    /// JDK object a jar constructed (`class#n`), or a host enum constant
+    /// (`enum/<class>/<NAME>`, the class `getClass()` answers for it).
+    fn marker_class<'t>(&self, text: &'t str) -> Option<&'t str> {
+        if let Some(rest) = text.strip_prefix("enum/") {
+            return rest.rsplit_once('/').map(|(class, _)| class);
+        }
+        let class = crate::runtime::jar_text::object_marker_class(text)?;
+        (self.class(class).is_some() || class.starts_with("java/")).then_some(class)
+    }
+
+    /// Whether a text value may be a `Class` (a class name, a primitive's,
+    /// an array descriptor), since `Class` objects are still text.
+    fn text_may_be_class(&self, text: &str) -> bool {
+        class_marker_like(text, self.classes, &self.linked)
+    }
+
+    /// Whether every superclass of the held class `class` is held, up to
+    /// `java/lang/Object`: then its whole type is the runtime's to decide.
+    fn chain_ends_at_object(&self, class: &str) -> bool {
+        let mut current = class;
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            let Some(file) = self.class(current) else {
+                return current == "java/lang/Object";
+            };
+            if file.super_name.is_empty() || file.super_name == current {
+                return false;
+            }
+            current = &file.super_name;
+        }
+        false
     }
 
     /// Whether an undecided store into an array of `component` is counted:
@@ -149,6 +255,14 @@ impl<H: Host> Runtime<'_, H> {
                 host_array::exact_class(value).map(str::to_owned)
             }
             Value::Host(handle) => handle.class().map(str::to_owned),
+            Value::Ref(Some(text)) => match self.marker_class(text) {
+                Some(class) => Some(class.to_owned()),
+                // A text is a `String` unless it may be a `Class`.
+                None if value_class::is_plain_string(text) && !self.text_may_be_class(text) => {
+                    Some("java/lang/String".to_owned())
+                }
+                None => None,
+            },
             other => self.exact_class(other),
         }
     }
@@ -172,22 +286,19 @@ impl<H: Host> Runtime<'_, H> {
         array: &Value,
         value: &Value,
     ) -> Result<(), NativeError> {
-        let (Some(class), Some(component)) = (
-            host_array::exact_class(array),
-            value_class::array_component(array),
-        ) else {
+        let Some(class) = host_array::exact_class(array) else {
             return Ok(());
         };
-        match self.store_fits(&component, value) {
+        let Some(component) = host_array::component_of(class) else {
+            return Ok(());
+        };
+        match self.store_fits(component, value) {
             Some(true) => Ok(()),
             Some(false) => match self.stored_class(value) {
                 Some(stored) => Err(array_store_exception(binary_name(&stored))),
                 None => self.count_store(class),
             },
-            None if self.store_counted(&component) => {
-                let class = class.to_owned();
-                self.count_store(&class)
-            }
+            None if self.store_counted(component) => self.count_store(class),
             None => Ok(()),
         }
     }

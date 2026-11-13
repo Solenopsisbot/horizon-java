@@ -18,6 +18,7 @@ const SOURCE: &str = r#"
 package demo;
 
 import java.util.*;
+import java.util.stream.*;
 
 public final class ArrayValues {
   /** Strings spelled like the arrays' old markers, or a handle's text form, stay Strings. */
@@ -195,6 +196,81 @@ public final class ArrayValues {
     return classes[0].getName() + classes[1].getName() + types.length;
   }
 
+  /** F2: stores the runtime can decide from the value's class, into final and JDK component types. */
+  static String st(Object[] array, Object value) {
+    try { array[0] = value; return "ok"; } catch (ArrayStoreException e) { return "ASE:" + e.getMessage(); }
+  }
+  public static String storesDecided() {
+    return st(new String[1], new Base()) + "|" + st(new Integer[1], Mode.A) + "|" + st(new String[1], new Object())
+        + "|" + st(new String[1], new StringBuilder()) + "|" + st(new Integer[1], new ArrayList<>())
+        + "|" + st(new Integer[1], new HashMap<>()) + "|" + st(new String[1], java.nio.file.StandardOpenOption.READ)
+        + "|" + st(new Comparable[1], new Object()) + "|" + st(new Runnable[1], new Base())
+        + "|" + st(new java.io.Serializable[1], new Base()) + "|" + st(new Iterable[1], new Base())
+        + "|" + st(new Boolean[1], new Sub()) + "|" + st(new Class[1], "x") + "|" + st(new Class[1], int.class)
+        + "|" + st(new CharSequence[1], new StringBuilder()) + "|" + st(new String[1], "x")
+        + "|" + st(new Mode[1], Mode.B) + "|" + st(new Base[1], new Sub())
+        + "|" + store(() -> { Object unused = Arrays.copyOf(new Object[] {new Object()}, 1, String[].class); });
+  }
+
+  /** F2: a lambda's class is a hidden class: a misfit, but its name is unknown. */
+  public static String storeLambdaIntoStrings() {
+    Runnable r = () -> {};
+    return st(new String[1], r).startsWith("ASE:demo.ArrayValues$$Lambda") + "";
+  }
+
+  /** F2: a host collection's exact class (List12) is not kept: a misfit, its name unknown. */
+  public static String storeListIntoIntegers() {
+    return st(new Integer[1], List.of(1));
+  }
+
+  /** F3: count() of a SIZED pipeline does not traverse: no sort, no peek, no map. */
+  public static String sizedCount() {
+    List<Object> log = new ArrayList<>();
+    int[] a = new int[0];
+    int[] b = new int[0];
+    return List.of(a, b).stream().sorted().count() + "," + Stream.of(a, b).sorted().map(x -> 1).count()
+        + "," + Stream.of(a, b).sorted().limit(5).count() + "," + Stream.of(a, b).sorted().skip(1).count()
+        + "," + Stream.of(1, 2, 3).peek(log::add).count() + log.size()
+        + "," + Stream.of(1, 2).peek(log::add).map(x -> x).count() + log.size()
+        + "," + Arrays.stream(new Object[] {a, b}).sorted().peek(log::add).count() + log.size()
+        + "," + IntStream.range(0, 5).sorted().count() + "," + Stream.of(a, b).sorted().sorted().count();
+  }
+
+  /** F3: a pipeline that is not SIZED (filter) traverses: peek runs, the sort compares. */
+  public static String traversedCount() {
+    List<Object> log = new ArrayList<>();
+    String peeked = Stream.of(1, 2, 3).filter(x -> true).peek(log::add).count() + "" + log.size()
+        + Stream.of(4, 5).peek(log::add).toList() + log.size();
+    String sorted;
+    try { sorted = "" + Stream.of(new int[0], new int[0]).sorted().toList().size(); } catch (ClassCastException e) { sorted = e.getMessage(); }
+    String filtered;
+    try { filtered = "" + Stream.of(new int[0], new int[0]).filter(x -> true).sorted().count(); } catch (ClassCastException e) { filtered = e.getMessage(); }
+    return peeked + "|" + sorted + "|" + filtered + "|" + Stream.of(3, 1, 2).sorted().toList() + Stream.concat(Stream.of(1), Stream.of(2)).peek(log::add).count() + log.size();
+  }
+
+  /** Sorting an array and a String: String.compareTo's bridge casts the array. */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public static String naturalOrderMixed() {
+    List<Object> list = new ArrayList<>(List.of(new int[0], "s"));
+    try { Collections.sort((List) list); return "sorted"; } catch (ClassCastException e) { return e.getMessage(); }
+  }
+
+  /** Direct System.arraycopy: bounds first, then each element against the destination. */
+  public static String arraycopies() {
+    String[] d = {"p", "q", "r"};
+    String[] e = new String[2];
+    return store(() -> System.arraycopy(new Integer[] {1}, 0, new String[1], 0, 5))
+        + "|" + store(() -> System.arraycopy(new Integer[] {null}, 0, new String[1], 0, 1))
+        + "|" + store(() -> System.arraycopy(new Integer[] {1}, 0, new String[1], 0, 1))
+        + "|" + store(() -> System.arraycopy(new CharSequence[] {"a"}, 0, new Integer[1], 0, 1))
+        + "|" + store(() -> System.arraycopy(new Object[] {"a", 1, "c"}, 0, d, 0, 3)) + d[0] + d[1] + d[2]
+        + "|" + store(() -> System.arraycopy(new Object[] {"a"}, 0, new String[1], 0, 5))
+        + "|" + store(() -> System.arraycopy(new Object[] {"a", "b"}, 0, e, 0, 2)) + e[1]
+        + "|" + store(() -> System.arraycopy(new Object[] {new int[0]}, 0, new long[1][], 0, 1))
+        + "|" + store(() -> System.arraycopy(new int[1][], 0, new long[1][], 0, 1))
+        + "|" + store(() -> System.arraycopy(new Base[] {new Sub(), new Base()}, 0, new Sub[2], 0, 2));
+  }
+
   /** Another collection's toArray store failure (its message and partial writes are its own). */
   public static String storeOtherCollection() {
     return store(() -> { Object unused = new HashSet<Object>(List.of(1)).toArray(new String[0]); });
@@ -348,6 +424,28 @@ const EXACT: &[(&str, &str)] = &[
     ("sameHandle", "truetruetruefalse"),
     // Two `getStackTrace()` arrays of the current thread: two objects.
     ("twoTraces", "false"),
+    // Stores decided from the value's class: jar objects and enums, JDK objects a jar built, a host enum constant, into final classes (`String[]`, `Integer[]`, `Boolean[]`, `Class[]`) and JDK interfaces a jar class whose chain ends at `Object` is not; and stores that fit.
+    (
+        "storesDecided",
+        "ASE:demo.ArrayValues$Base|ASE:demo.ArrayValues$Mode|ASE:java.lang.Object|ASE:java.lang.StringBuilder|ASE:java.util.ArrayList|ASE:java.util.HashMap|ASE:java.nio.file.StandardOpenOption|ASE:java.lang.Object|ASE:demo.ArrayValues$Base|ASE:demo.ArrayValues$Base|ASE:demo.ArrayValues$Base|ASE:demo.ArrayValues$Sub|ASE:java.lang.String|ok|ok|ok|ok|ok|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.String",
+    ),
+    // `count()` of a SIZED pipeline does not traverse (JDK 25 `ReduceOps`): no sort compares two arrays, no `peek` or `map` runs, `limit`/`skip` adjust the size.
+    ("sizedCount", "2,2,2,1,30,20,20,5,2"),
+    // A pipeline that is not SIZED (`filter`), or a terminal that traverses (`toList`), runs `peek` and sorts (Java's `ClassCastException` for arrays).
+    (
+        "traversedCount",
+        "33[4, 5]5|class [I cannot be cast to class java.lang.Comparable ([I and java.lang.Comparable are in module java.base of loader 'bootstrap')|class [I cannot be cast to class java.lang.Comparable ([I and java.lang.Comparable are in module java.base of loader 'bootstrap')|[1, 2, 3]25",
+    ),
+    // `"s".compareTo(int[])`: `String.compareTo`'s bridge casts the array.
+    (
+        "naturalOrderMixed",
+        "class [I cannot be cast to class java.lang.String ([I and java.lang.String are in module java.base of loader 'bootstrap')",
+    ),
+    // Direct `System.arraycopy`: bounds first, then each element against the destination, copying up to the first misfit; `null` fits.
+    (
+        "arraycopies",
+        "ArrayIndexOutOfBoundsException:arraycopy: last source index 5 out of bounds for object array[1]|ok|ArrayStoreException:arraycopy: type mismatch: can not copy java.lang.Integer[] into java.lang.String[]|ArrayStoreException:arraycopy: type mismatch: can not copy java.lang.CharSequence[] into java.lang.Integer[]|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, java.lang.Stringaqr|ArrayIndexOutOfBoundsException:arraycopy: last source index 5 out of bounds for object array[1]|okb|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of java.lang.Object[] to the type of the destination array, [J|ok|ArrayStoreException:arraycopy: element type mismatch: can not cast one of the elements of demo.ArrayValues$Base[] to the type of the destination array, demo.ArrayValues$Sub",
+    ),
 ];
 
 /// The methods whose answer the runtime does not have: Java 25's answer, and
@@ -495,6 +593,18 @@ const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
         "arrayIdentityHash",
         "true",
         &[("java/lang/System#identityHashCode(Ljava/lang/Object;)I", 2)],
+    ),
+    // A lambda into a `String[]`: a misfit, but its hidden class's name is unknown.
+    (
+        "storeLambdaIntoStrings",
+        "true",
+        &[("[Ljava/lang/String;#<aastore>(Ljava/lang/Object;)V", 1)],
+    ),
+    // `List.of(1)` into an `Integer[]`: a misfit, but the runtime does not keep its class (`List12`).
+    (
+        "storeListIntoIntegers",
+        "ASE:java.util.ImmutableCollections$List12",
+        &[("[Ljava/lang/Integer;#<aastore>(Ljava/lang/Object;)V", 1)],
     ),
 ];
 

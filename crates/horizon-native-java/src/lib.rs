@@ -9606,31 +9606,35 @@ fn class_of_value(value: &Value) -> Option<String> {
         Value::Host(host) => host.class().map(Into::into),
         Value::Void => None,
         Value::Ref(None) => None,
-        Value::Ref(Some(marker)) => {
-            if let Some((class, _)) = marker.split_once('#') {
-                // A text `#` in a string (`#ff0000`, `[I#0`) names no class.
-                if value_class::is_plain_string(marker) {
-                    return Some("java/lang/String".into());
-                }
-                return Some(class.to_owned());
-            }
-            let class = if marker.starts_with("string-builder/") {
-                "java/lang/StringBuilder"
-            } else if marker.starts_with("stream/") {
-                "java/util/stream/Stream"
-            } else if marker == "list" || marker.starts_with("list/") {
-                "java/util/ArrayList"
-            } else if marker == "set" || marker.starts_with("set/") {
-                "java/util/LinkedHashSet"
-            } else if marker == "map" || marker.starts_with("map/") {
-                "java/util/LinkedHashMap"
-            } else {
-                let rest = marker.strip_prefix("enum/")?;
-                return rest.rsplit_once('/').map(|(class, _)| class.to_owned());
-            };
-            Some(class.to_owned())
-        }
+        Value::Ref(Some(marker)) => class_of_text(marker),
     }
+}
+
+/// [`class_of_value`] of a reference's text, without building a `Value` (it
+/// runs inside `is_plain_string`, on every array store of a string).
+fn class_of_text(marker: &str) -> Option<String> {
+    if let Some((class, _)) = marker.split_once('#') {
+        // A text `#` in a string (`#ff0000`, `[I#0`) names no class.
+        if value_class::is_plain_string(marker) {
+            return Some("java/lang/String".into());
+        }
+        return Some(class.to_owned());
+    }
+    let class = if marker.starts_with("string-builder/") {
+        "java/lang/StringBuilder"
+    } else if marker.starts_with("stream/") {
+        "java/util/stream/Stream"
+    } else if marker == "list" || marker.starts_with("list/") {
+        "java/util/ArrayList"
+    } else if marker == "set" || marker.starts_with("set/") {
+        "java/util/LinkedHashSet"
+    } else if marker == "map" || marker.starts_with("map/") {
+        "java/util/LinkedHashMap"
+    } else {
+        let rest = marker.strip_prefix("enum/")?;
+        return rest.rsplit_once('/').map(|(class, _)| class.to_owned());
+    };
+    Some(class.to_owned())
 }
 
 fn class_binary_name(value: &Value) -> String {
@@ -16282,6 +16286,8 @@ impl NativeJar {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget,
         };
@@ -16445,6 +16451,8 @@ impl NativeJar {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget,
         };
@@ -16592,6 +16600,8 @@ impl NativeJar {
             anchor_hooks,
             modify_hooks,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -19061,6 +19071,12 @@ struct Runtime<'a, H> {
     /// call.  LIFO, because a constructor argument may itself construct an
     /// object before the outer `<init>` runs.
     pending_skipped_new: Vec<String>,
+    /// Stream stages recorded, not yet run (`jdk_stream::StreamPlan`).
+    stream_plan: jdk_stream::StreamPlan,
+    /// The last array-store verdict for a jar object's class against a
+    /// component (`array_store.rs`): a store loop asks the same question
+    /// every iteration, and the class hierarchy cannot change during a run.
+    store_verdict: std::cell::RefCell<Option<array_store::StoreVerdict>>,
     /// Jar frames currently on this runtime's call chain. Bounded by the
     /// thread's stack (`frame_bound.rs`) in [`Runtime::invoke`] before a frame
     /// starts.
@@ -23292,7 +23308,9 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(None);
             };
             let values = optional_payload(receiver).into_iter().collect();
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            self.mark_sized(&stream);
+            return Ok(Some(stream));
         }
         if r.name == "stream"
             && r.descriptor == "()Ljava/util/stream/Stream;"
@@ -23304,7 +23322,15 @@ impl<H: Host> Runtime<'_, H> {
                 .into_iter()
                 .map(|value| parse_collection_value(&value))
                 .collect::<Result<Vec<_>, _>>()?;
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            // A JDK collection's spliterator reports SIZED, a concurrent
+            // one's does not.
+            if !expect_ref(receiver)
+                .is_some_and(|marker| marker.starts_with("java/util/concurrent/"))
+            {
+                self.mark_sized(&stream);
+            }
+            return Ok(Some(stream));
         }
         // `Arrays.stream` is the array counterpart of `Collection.stream`,
         // and config/bootstrap code uses it for enum and constant tables.
@@ -23319,7 +23345,9 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(None);
             }
             let values = self.array(array)?.clone();
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            self.mark_sized(&stream);
+            return Ok(Some(stream));
         }
         if r.owner == "java/util/stream/Stream"
             && ((r.name == "of" && r.descriptor.contains("Ljava/util/stream/Stream;"))
@@ -23333,7 +23361,9 @@ impl<H: Host> Runtime<'_, H> {
             } else {
                 args.to_vec()
             };
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            self.mark_sized(&stream);
+            return Ok(Some(stream));
         }
         // `Stream.concat(first, second)` is the two-source shape a constant
         // table builder uses; both sides are streams this runtime owns.
@@ -23342,6 +23372,9 @@ impl<H: Host> Runtime<'_, H> {
             && r.descriptor
                 == "(Ljava/util/stream/Stream;Ljava/util/stream/Stream;)Ljava/util/stream/Stream;"
         {
+            for stream in args {
+                self.force_stream(stream)?;
+            }
             let mut values = self
                 .stream(args.first().ok_or_else(|| {
                     NativeError::Metadata("Stream.concat needs a first stream".into())
@@ -23353,7 +23386,16 @@ impl<H: Host> Runtime<'_, H> {
                 })?)?
                 .clone(),
             );
-            return Ok(Some(self.new_stream(class, method, values)));
+            // SIZED when both halves are.
+            let sized = args.len() == 2
+                && args.iter().all(|stream| {
+                    expect_ref(stream).is_some_and(|marker| self.stream_is_sized(marker))
+                });
+            let stream = self.new_stream(class, method, values);
+            if sized {
+                self.mark_sized(&stream);
+            }
+            return Ok(Some(stream));
         }
         if !r.owner.starts_with("java/util/stream/") {
             return Ok(None);
@@ -23361,6 +23403,11 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver else {
             return Ok(None);
         };
+        // A SIZED-keeping stage is recorded, `count()` may not traverse
+        // (`jdk_stream::StreamPlan`); anything else runs recorded stages first.
+        if let Some(value) = self.plan_stream_call(r, receiver, args, class, method)? {
+            return Ok(Some(value));
+        }
         let values = self.stream(receiver)?.clone();
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
             ("map", "(Ljava/util/function/Function;)Ljava/util/stream/Stream;") => {
@@ -23424,6 +23471,7 @@ impl<H: Host> Runtime<'_, H> {
                                 std::slice::from_ref(value),
                             )?,
                         };
+                    self.force_stream(&mapped)?;
                     flattened.extend(self.stream(&mapped)?.clone());
                 }
                 self.new_stream(class, method, flattened)
@@ -29674,6 +29722,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -29735,6 +29785,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -36772,6 +36824,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -36928,6 +36982,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -37107,6 +37163,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -37418,6 +37476,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -37717,6 +37777,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -42848,6 +42910,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -42897,6 +42961,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };

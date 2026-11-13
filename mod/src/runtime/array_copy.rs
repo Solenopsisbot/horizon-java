@@ -108,10 +108,12 @@ impl<H: Host> Runtime<'_, H> {
                 )),
             ));
         }
-        if !src_primitive && dst_component != src_component && dst_component != "java/lang/Object" {
-            // JDK checks each element's class against the destination's.
-            return self.host.unknown_operand_call(r).map(Some);
-        }
+        // A destination component the source's is not a subtype of: HotSpot
+        // checks each element as it copies (after the bounds checks).
+        let checked = !src_primitive
+            && dst_component != src_component
+            && dst_component != "java/lang/Object"
+            && host_array::class_assignable(&src_component, &dst_component, self) != Some(true);
         let src_values = self.array(src)?.clone();
         let dst_len = self.array(dst)?.len();
         let src_len = src_values.len();
@@ -145,11 +147,41 @@ impl<H: Host> Runtime<'_, H> {
                 dst_pos + length
             )));
         }
-        let slice = src_values[src_pos..src_pos + length].to_vec();
+        let mut slice = src_values[src_pos..src_pos + length].to_vec();
+        let mut misfit = None;
+        if checked {
+            for (index, value) in slice.iter().enumerate() {
+                match self.store_fits(&dst_component, value) {
+                    Some(true) => {}
+                    Some(false) => {
+                        misfit = Some(index);
+                        break;
+                    }
+                    // An element the runtime cannot check: counted, as before.
+                    None => return self.host.unknown_operand_call(r).map(Some),
+                }
+            }
+        }
+        // The elements before a misfit are copied, then `ArrayStoreException`.
+        let error = match misfit {
+            Some(index) => {
+                let Some(error) = self.arraycopy_store_exception(&src_component, &dst_component)
+                else {
+                    return self.host.unknown_operand_call(r).map(Some);
+                };
+                slice.truncate(index);
+                Some(error)
+            }
+            None => None,
+        };
+        let length = slice.len();
         let Some(target) = self.arrays.get_mut(dst_key) else {
             return self.host.unknown_operand_call(r).map(Some);
         };
         target[dst_pos..dst_pos + length].clone_from_slice(&slice);
-        Ok(Some(Value::Void))
+        match error {
+            Some(error) => Err(error),
+            None => Ok(Some(Value::Void)),
+        }
     }
 }
