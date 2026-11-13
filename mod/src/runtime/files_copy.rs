@@ -66,7 +66,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         };
         let options = match args.get(2) {
-            Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+            Some(value @ Value::Host(_)) => self.array(value)?.clone(),
             _ => Vec::new(),
         };
         let mut replace_existing = false;

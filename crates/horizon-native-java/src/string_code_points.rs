@@ -73,10 +73,7 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(c) = u32::try_from(point).ok().and_then(char::from_u32) else {
                     // A surrogate code point is valid and a single unit.
                     if (0xD800..=0xDFFF).contains(&point) {
-                        let marker = self.new_array("java/lang/Character", "toChars");
-                        self.arrays.insert(marker.clone(), vec![Value::Int(point)]);
-                        self.record_array_component(&marker, "char");
-                        return Ok(Some(Value::Ref(Some(marker))));
+                        return Ok(Some(self.new_array_value("[C", vec![Value::Int(point)])));
                     }
                     return Err(NativeError::UncaughtException {
                         class: "java/lang/IllegalArgumentException".into(),
@@ -93,10 +90,7 @@ impl<H: Host> Runtime<'_, H> {
                     .iter()
                     .map(|unit| Value::Int(i32::from(*unit)))
                     .collect();
-                let marker = self.new_array("java/lang/Character", "toChars");
-                self.arrays.insert(marker.clone(), units);
-                self.record_array_component(&marker, "char");
-                Ok(Some(Value::Ref(Some(marker))))
+                Ok(Some(self.new_array_value("[C", units)))
             }
             // `toCharArray()`: a new `char[]` of the string's UTF-16 units,
             // which the writer path below hands to `Writer.write(char[], ..)`.
@@ -113,10 +107,7 @@ impl<H: Host> Runtime<'_, H> {
                     .encode_utf16()
                     .map(|unit| Value::Int(i32::from(unit)))
                     .collect();
-                let marker = self.new_array("java/lang/String", "toCharArray");
-                self.arrays.insert(marker.clone(), units);
-                self.record_array_component(&marker, "char");
-                Ok(Some(Value::Ref(Some(marker))))
+                Ok(Some(self.new_array_value("[C", units)))
             }
             (
                 "java/util/stream/IntStream",

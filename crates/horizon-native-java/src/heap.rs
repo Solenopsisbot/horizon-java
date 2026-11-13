@@ -1,7 +1,7 @@
 //! The objects a jar's Java code built, kept with the jar's host between calls.
 //!
 //! The interpreter names every object by a marker (`demo/Listener#3`, an
-//! `array/...` or `iterator/...` marker) and keeps its instance fields, array
+//! array handle's `[I#3` key, an `iterator/...` marker) and keeps its instance fields, array
 //! elements, `StringBuilder` text and enum identity in per-invocation tables
 //! on [`Runtime`]. Before this module those tables died with the invocation:
 //! a later callback (a game hook, an event listener, a payload handler) saw
@@ -253,8 +253,7 @@ fn collectable(marker: &str) -> bool {
         return false;
     }
     if let Some(rest) = marker
-        .strip_prefix("array/")
-        .or_else(|| marker.strip_prefix("iterator/"))
+        .strip_prefix("iterator/")
         .or_else(|| marker.strip_prefix("resource-enumeration/"))
     {
         return rest.ends_with(|c: char| c.is_ascii_digit());
@@ -529,16 +528,16 @@ mod tests {
             .insert(field("demo/Node#1", "next"), text("demo/Node#2"));
         heap.fields.insert(
             field("demo/Node#2", "next"),
-            text("array/Ldemo/Node;/run/0"),
+            crate::host_array::handle("[Ldemo/Node;#0"),
         );
         heap.fields
             .insert(field("demo/Node#3", "next"), text("demo/Node#4"));
         heap.fields
             .insert(field("demo/Node#4", "next"), Value::Int(4));
         heap.arrays
-            .insert("array/Ldemo/Node;/run/0".into(), vec![Value::Int(1)]);
+            .insert("[Ldemo/Node;#0".into(), vec![Value::Int(1)]);
         heap.arrays
-            .insert("array/Ldemo/Node;/run/1".into(), vec![Value::Int(2)]);
+            .insert("[Ldemo/Node;#1".into(), vec![Value::Int(2)]);
         (host, heap)
     }
 
@@ -555,7 +554,7 @@ mod tests {
         collect(&mut heap, &mut host, &[]);
         assert_eq!(
             objects(&heap),
-            ["demo/Node#1", "demo/Node#2", "array/Ldemo/Node;/run/0"]
+            ["demo/Node#1", "demo/Node#2", "[Ldemo/Node;#0"]
         );
     }
 
@@ -583,7 +582,7 @@ mod tests {
                 "demo/Node#2",
                 "demo/Node#3",
                 "demo/Node#4",
-                "array/Ldemo/Node;/run/0"
+                "[Ldemo/Node;#0"
             ]
         );
         // The unreachable list is dropped; the static's is kept.
@@ -610,7 +609,7 @@ mod tests {
                 "demo/Node#2",
                 "demo/Node#3",
                 "demo/Node#4",
-                "array/Ldemo/Node;/run/0"
+                "[Ldemo/Node;#0"
             ]
         );
     }

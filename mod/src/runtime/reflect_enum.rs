@@ -49,13 +49,12 @@ impl<H: Host> Runtime<'_, H> {
             }
             (Some(false), _) => Ok(Some(Value::Ref(None))),
             (None, Some(constants)) => {
-                let marker = self.new_array("java/lang/Class", "getEnumConstants");
                 let values = constants
                     .iter()
                     .map(|name| Value::Ref(Some(format!("enum/{class}/{name}"))))
                     .collect();
-                self.arrays.insert(marker.clone(), values);
-                Ok(Some(Value::Ref(Some(marker))))
+                // A clone of `values()`: an array of the enum class.
+                Ok(Some(self.new_array_value(&format!("[L{class};"), values)))
             }
             (None, None) => Ok(None),
         }

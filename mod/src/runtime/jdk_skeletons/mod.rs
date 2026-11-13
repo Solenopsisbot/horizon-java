@@ -664,23 +664,13 @@ impl<H: Host> Runtime<'_, H> {
 
     /// A new array of `component` holding `values`.
     fn new_reference_array(&mut self, component: &str, values: Vec<Value>) -> Value {
-        let marker = self.new_array("java/util/AbstractCollection", "toArray");
-        self.arrays.insert(marker.clone(), values);
-        self.record_array_component(&marker, component);
-        Value::Ref(Some(marker))
+        self.new_array_value(&value_class::array_class_marker(component), values)
     }
 
-    /// The component class an array was created with (`Object` when the
-    /// runtime did not record one).
+    /// The component class of an array (`Object` for a value that is no
+    /// array).
     fn skeleton_array_component(&self, array: &Value) -> String {
-        expect_ref(array)
-            .and_then(|marker| {
-                self.fields
-                    .get(&format!("{marker}{}", value_class::ARRAY_COMPONENT_FIELD))
-            })
-            .and_then(expect_ref)
-            .cloned()
-            .unwrap_or_else(|| "java/lang/Object".into())
+        value_class::array_component(array).unwrap_or_else(|| "java/lang/Object".into())
     }
 
     /// `array[index] = value` on an array this run owns.
@@ -690,7 +680,7 @@ impl<H: Host> Runtime<'_, H> {
         index: usize,
         value: Value,
     ) -> Result<(), NativeError> {
-        let marker = expect_array_marker(array)?;
+        let marker = expect_array_key(array)?;
         let values = self
             .arrays
             .get_mut(marker)
