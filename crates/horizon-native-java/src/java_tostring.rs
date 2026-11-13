@@ -29,10 +29,8 @@ pub(crate) fn owner(marker: &str) -> Option<String> {
     // Prefix families the host models before any class marker.
     let prefix = [
         ("uuid/", "java/util/UUID"),
-        ("path:", "java/nio/file/Path"),
         ("duration/", "java/time/Duration"),
         ("regex-pattern/", "java/util/regex/Pattern"),
-        ("watch-kind/", "java/nio/file/WatchEvent$Kind"),
         ("charset/", "java/nio/charset/Charset"),
         ("coding-error-action/", "java/nio/charset/CodingErrorAction"),
         ("locale/", "java/util/Locale"),

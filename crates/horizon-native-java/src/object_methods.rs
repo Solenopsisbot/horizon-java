@@ -309,6 +309,9 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
+        if let Some(path) = self.file_path(value) {
+            return Ok(Some(file_hash(path)));
+        }
         if marker.starts_with("map-entry/") {
             // `Objects.hashCode(key) ^ Objects.hashCode(value)`.
             let (key, entry) = map_entry_parts(value)?;
@@ -416,6 +419,10 @@ impl<H: Host> Runtime<'_, H> {
                     && self.host_collection_kind(b) == Some(CollectionKind::List)
                 {
                     return self.list_equals(a, b);
+                }
+                // `File.equals`: the same path text (`UnixFileSystem.compare`).
+                if let Some(path) = self.file_path(a) {
+                    return Ok(self.file_path(b) == Some(path));
                 }
                 Ok(a == b)
             }
@@ -599,7 +606,7 @@ impl<H: Host> Runtime<'_, H> {
             descriptor: HASH_CODE.into(),
         })
     }
-    /// `toString()`, `hashCode()` and `equals(Object)` on a host handle,
+    /// `toString()`, `hashCode()`, `equals(Object)` and `compareTo` on a host handle,
     /// whatever class the call names: the kind's row (`host_ref.rs`), with a
     /// held jar object's own methods run through the interpreter
     /// (`Optional.of(node).hashCode()` is `node.hashCode()`). An answer only
@@ -632,12 +639,25 @@ impl<H: Host> Runtime<'_, H> {
             ("equals", EQUALS, [other]) => handle
                 .equals(other, &mut nested)?
                 .map(|equal| Value::Int(i32::from(equal))),
+            // `Comparable.compareTo`, whatever the declared parameter type.
+            ("compareTo", descriptor, [other]) if is_compare_to(descriptor) => {
+                handle.compare_to(other, &mut nested)?.map(Value::Int)
+            }
             _ => return Ok(None),
         };
         match answer {
             Some(answer) => Ok(Some(answer)),
             None => self.host.unknown_operand_call(r).map(Some),
         }
+    }
+
+    /// `handle.compareTo(other)`: its kind's row (`None` when unknown).
+    pub(crate) fn host_ref_compare(
+        &mut self,
+        handle: &HostRef,
+        other: &Value,
+    ) -> Result<Option<i32>, NativeError> {
+        handle.compare_to(other, &mut RuntimeNested::new(self))
     }
 
     /// `String.valueOf(handle)`: its kind's `toString`, a held value's text
@@ -876,4 +896,14 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
             .value_of_text(value, "Ljava/lang/Object;", self.class, self.method)
             .map(Some)
     }
+}
+
+/// Whether `descriptor` is a `compareTo`'s: one reference parameter, `int`
+/// result (`(Ljava/lang/Object;)I` through `Comparable`, `(Ljava/nio/file/Path;)I`
+/// on the class).
+pub(crate) fn is_compare_to(descriptor: &str) -> bool {
+    descriptor
+        .strip_prefix("(L")
+        .and_then(|rest| rest.strip_suffix(";)I"))
+        .is_some_and(|class| !class.contains([';', '(', ')']))
 }

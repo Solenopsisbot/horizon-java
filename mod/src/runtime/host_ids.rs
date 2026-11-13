@@ -330,7 +330,15 @@ pub(crate) const IDENTIFIER_METHODS: Methods = Methods {
         )
     },
     crosses_jars: |_, _| true,
-    compare_to: Some(identifier_compare),
+    // `compareTo(null)` reads `null.path`: a `NullPointerException`.
+    compare_to: Some(|handle, other, _| match other {
+        Value::Ref(None) => Err(crate::runtime::NativeError::UncaughtException {
+            class: "java/lang/NullPointerException".into(),
+            message: None,
+            frame: None,
+        }),
+        other => Ok(identifier_compare(handle, other)),
+    }),
 };
 
 /// `Identifier.compareTo`: the paths by `String.compareTo`, then the
