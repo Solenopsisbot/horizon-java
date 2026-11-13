@@ -244,6 +244,16 @@ fn construct(
     .unwrap()
 }
 
+/// The registry `BuiltInRegistries.<field>` answers (a host handle).
+fn built_in_registry(field: &str) -> Value {
+    let field = MethodRef {
+        owner: "net/minecraft/core/registries/BuiltInRegistries".into(),
+        name: field.into(),
+        descriptor: "Lnet/minecraft/core/DefaultedRegistry;".into(),
+    };
+    StdHost::new().get_static(&field).unwrap()
+}
+
 /// The `Identifier` `Identifier.parse(text)` answers (a host handle).
 fn parsed_id(text: &str) -> Value {
     let parse = MethodRef {
@@ -383,7 +393,7 @@ fn explicit_declaration_replaces_an_inferred_one() {
     host.invoke(
         &register,
         &[
-            Value::Ref(Some("registry/minecraft:item".into())),
+            built_in_registry("ITEM"),
             parsed_id("ruby:wand"),
             Value::Ref(Some("net/minecraft/world/item/Item#0".into())),
         ],
@@ -412,7 +422,7 @@ fn explicit_declaration_replaces_an_inferred_one() {
     host.invoke(
         &register,
         &[
-            Value::Ref(Some("registry/minecraft:item".into())),
+            built_in_registry("ITEM"),
             parsed_id("ruby:plain"),
             Value::Ref(Some("@indy:plain-item".into())),
         ],
@@ -449,7 +459,7 @@ fn inference_records_a_plain_item_with_no_properties() {
             descriptor: REGISTER.into(),
         },
         &[
-            Value::Ref(Some("registry/minecraft:item".into())),
+            built_in_registry("ITEM"),
             parsed_id("ruby:plain"),
             Value::Ref(Some("net/minecraft/world/item/Item#0".into())),
         ],

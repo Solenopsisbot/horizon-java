@@ -205,8 +205,7 @@ impl StdHost {
             value(&registration.codec, out);
             value(&registration.handler, out);
         }
-        for (key, held) in &self.holders {
-            out.push(key);
+        for held in self.holders.values() {
             value(held, out);
         }
         for (key, held) in &self.capability_values {

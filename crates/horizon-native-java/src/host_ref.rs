@@ -203,6 +203,14 @@ pub enum HostKind {
     /// `net.minecraft.references.BlockItemId`: key the block and item ids'
     /// [`HostRef::of_values`].
     BlockItemId,
+    /// A `Registry` (`BuiltInRegistries.X`, a jar's built registry): key its
+    /// id (`host_registry.rs`).
+    Registry,
+    /// A NeoForge `DeferredHolder` or Forge `RegistryObject`: key the loader,
+    /// the registration's serial and the entry's key.
+    Holder,
+    /// The value a holder's registration registered: key the serial.
+    Registered,
 }
 
 /// How a kind's Java class follows from its key.
@@ -583,6 +591,38 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed(crate::host_ids::BLOCK_ITEM_ID),
         canonical: never_canonical,
         methods: &crate::host_ids::BLOCK_ITEM_ID_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Registry,
+        tag: "reg",
+        // An implementation of the interface: `MappedRegistry`,
+        // `DefaultedMappedRegistry`, a loader's own.
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::registry_types,
+        },
+        // One registry per registry key.
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTRY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Holder,
+        tag: "hold",
+        // `DeferredHolder` has subclasses (`DeferredItem`, `DeferredBlock`).
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::holder_types,
+        },
+        // One holder per `register` call: the serial names one allocation.
+        canonical: always_canonical,
+        methods: &crate::host_registry::HOLDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Registered,
+        tag: "rgd",
+        class: ClassRule::Unknown {
+            declared: crate::host_registry::no_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_registry::REGISTERED_METHODS,
     },
 ];
 

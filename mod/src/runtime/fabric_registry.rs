@@ -14,9 +14,11 @@ use super::*;
 const BUILDER: &str = "net/fabricmc/fabric/api/event/registry/FabricRegistryBuilder";
 const BUILDER_PREFIX: &str = "fabric-registry-builder/";
 
-/// The `<namespace>:<path>` an `Identifier` or registry value names.
+/// The `<namespace>:<path>` an `Identifier`, a registry key or a `Registry`
+/// names.
 fn registry_id(value: &Value) -> Option<String> {
     crate::runtime::host_ids::named_id(value)
+        .or_else(|| crate::runtime::host_registry::registry_id(value).map(str::to_owned))
 }
 
 pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value, NativeError>> {
@@ -26,7 +28,7 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
                 == "(Lnet/minecraft/resources/Identifier;)Lnet/minecraft/resources/ResourceKey;" =>
         {
             let id = registry_id(args.first()?)?;
-            Some(Ok(Value::Ref(Some(format!("registry/{id}")))))
+            Some(Ok(crate::runtime::host_ids::registry_key_of(&id)))
         }
         (BUILDER, "create" | "createSimple" | "createDefaulted" | "from")
             if r.descriptor.ends_with(&format!(")L{BUILDER};")) =>
@@ -48,7 +50,7 @@ pub(crate) fn instance_call(r: &MethodRef, receiver: &Value) -> Option<Result<Va
     match r.name.as_str() {
         // Fluent setters answer the builder itself.
         _ if r.descriptor.ends_with(&format!(")L{BUILDER};")) => Some(Ok(receiver.clone())),
-        "buildAndRegister" => Some(Ok(Value::Ref(Some(format!("registry/{id}"))))),
+        "buildAndRegister" => Some(Ok(crate::runtime::host_registry::registry(&id))),
         _ => None,
     }
 }

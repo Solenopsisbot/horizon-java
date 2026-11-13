@@ -81,6 +81,12 @@ const BUILDER: &str = "net/neoforged/neoforge/attachment/AttachmentType$Builder"
 const TYPE: &str = "net/neoforged/neoforge/attachment/AttachmentType";
 const DEFERRED_REGISTER: &str = "net/neoforged/neoforge/registries/DeferredRegister";
 const DEFERRED_HOLDER: &str = "net/neoforged/neoforge/registries/DeferredHolder";
+
+/// The registration a holder handle names (`host_registry.rs`), as the text
+/// this bridge keys its registers' entries and bound types by.
+fn holder_key(value: &Value) -> Option<String> {
+    crate::host_registry::holder_serial(value).map(|serial| serial.to_string())
+}
 /// The unknown every sync NeoForge would send is counted under (design §3.3).
 pub const SYNC_NOT_SENT: &str = "neoforge:sync_attachments (not sent)";
 /// The holder classes a player's attachment call names in bytecode.
@@ -749,20 +755,20 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let Some(marker) = receiver.and_then(expect_ref).cloned() else {
-            return Ok(None);
-        };
         // `DeferredHolder.get()`/`value()`, and `get()` through the `Supplier` a mod usually types
         // its holder field as.
         if ((r.owner == DEFERRED_HOLDER && matches!(r.name.as_str(), "get" | "value"))
             || (r.owner == "java/util/function/Supplier" && r.name == "get"))
             && r.descriptor == "()Ljava/lang/Object;"
         {
-            let Some(key) = marker.strip_prefix("holder/") else {
+            let Some(key) = receiver.and_then(holder_key) else {
                 return Ok(None);
             };
-            return self.attachment_holder_value(key);
+            return self.attachment_holder_value(&key);
         }
+        let Some(marker) = receiver.and_then(expect_ref).cloned() else {
+            return Ok(None);
+        };
         if r.owner != DEFERRED_REGISTER {
             return Ok(None);
         }
@@ -789,9 +795,7 @@ impl<H: Host> Runtime<'_, H> {
                         .invoke_instance(r, &Value::Ref(Some(marker.clone())), args)?;
                 let (Some(path), Some(key)) = (
                     args.first().and_then(expect_ref).cloned(),
-                    expect_ref(&holder)
-                        .and_then(|h| h.strip_prefix("holder/"))
-                        .map(str::to_owned),
+                    holder_key(&holder),
                 ) else {
                     return Ok(Some(holder));
                 };
@@ -841,15 +845,15 @@ impl<H: Host> Runtime<'_, H> {
         let mut value = arg.clone();
         if by_supplier {
             // `IAttachmentHolder`'s default overloads: `supplier.get()`, then the typed call.
-            let Some(marker) = expect_ref(arg).cloned() else {
+            if *arg == Value::Ref(None) {
                 return Err(crate::null_checks::invoke_on_null(&MethodRef {
                     owner: "java/util/function/Supplier".into(),
                     name: "get".into(),
                     descriptor: "()Ljava/lang/Object;".into(),
                 }));
-            };
-            value = if let Some(key) = marker.strip_prefix("holder/") {
-                match self.attachment_holder_value(key)? {
+            }
+            value = if let Some(key) = holder_key(arg) {
+                match self.attachment_holder_value(&key)? {
                     Some(value) => value,
                     None => return Ok(None),
                 }
@@ -862,8 +866,11 @@ impl<H: Host> Runtime<'_, H> {
         }
         // `validateAttachmentType` @0: `requireNonNull(type)`. In production (`FMLEnvironment`
         // answers `isProduction() == true` here) it checks nothing else (@5–11).
-        let Some(marker) = expect_ref(&value).cloned() else {
-            return Err(npe(None));
+        let marker = match &value {
+            Value::Ref(None) => return Err(npe(None)),
+            Value::Ref(Some(marker)) => marker.clone(),
+            // Some other object (a holder's unbound value): not a type this runtime built.
+            _ => return Ok(None),
         };
         let Some(state) = self.attachments() else {
             return Ok(None);
@@ -1370,7 +1377,9 @@ impl NativeJar {
             state.bound.insert(key.clone(), made.clone());
             state.ids.insert(made.clone(), id);
             // `DeferredHolder.get()` through the host's own path answers the type too.
-            host.holders.insert(key, Value::Ref(Some(made)));
+            if let Ok(serial) = key.parse() {
+                host.holders.insert(serial, Value::Ref(Some(made)));
+            }
         }
         problems
     }

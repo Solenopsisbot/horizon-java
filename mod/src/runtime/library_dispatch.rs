@@ -125,10 +125,12 @@ impl<H: Host> Runtime<'_, H> {
             ) => {
                 let marker = expect_ref(receiver?)?.clone();
                 // The default id comes first in `DefaultedMappedRegistry`.
+                // Its registry key (`ResourceKey[minecraft:root / <id>]`).
                 let key = args
                     .iter()
                     .find(|value| {
-                        expect_ref(value).is_some_and(|key| key.starts_with("registry/"))
+                        crate::runtime::host_ids::named_id(value).is_some()
+                            && crate::runtime::host_ids::is_resource_key(value)
                     })?
                     .clone();
                 self.fields.insert(format!("{marker}{KEY_FIELD}"), key);
@@ -136,12 +138,8 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("net/fabricmc/fabric/api/event/registry/FabricRegistryBuilder", "from") => {
                 let registry = expect_ref(args.first()?)?;
-                let Some(Value::Ref(Some(key))) =
-                    self.fields.get(&format!("{registry}{KEY_FIELD}"))
-                else {
-                    return None;
-                };
-                let id = key.strip_prefix("registry/")?;
+                let key = self.fields.get(&format!("{registry}{KEY_FIELD}"))?;
+                let id = crate::runtime::host_ids::named_id(key)?;
                 Some(Value::Ref(Some(format!("fabric-registry-builder/{id}"))))
             }
             _ => None,

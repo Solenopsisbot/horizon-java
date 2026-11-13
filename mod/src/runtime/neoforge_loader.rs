@@ -181,10 +181,9 @@ impl StdHost {
                 "net/neoforged/neoforge/registries/NeoForgeRegistries",
                 "ATTACHMENT_TYPES",
                 "Lnet/minecraft/core/Registry;",
-            ) => Some(Value::Ref(Some(format!(
-                "registry/{}",
-                crate::runtime::neoforge_attachments::ATTACHMENT_TYPES_REGISTRY
-            )))),
+            ) => Some(crate::runtime::host_registry::registry(
+                crate::runtime::neoforge_attachments::ATTACHMENT_TYPES_REGISTRY,
+            )),
             _ => None,
         }
     }
