@@ -68,6 +68,7 @@ mod jdk_locale_thread;
 mod jdk_model;
 mod jdk_reflect_proxy;
 mod jdk_skeletons;
+mod jdk_spliterators;
 mod jdk_stream;
 mod jdk_string_builder;
 mod jdk_supertypes;
@@ -19289,10 +19290,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(marker) else {
             return Ok(None);
         };
-        if marker.starts_with(jdk_model::COLLECTING_CONSUMER_PREFIX) {
-            return self.collecting_consumer_accept(marker, args);
-        }
-        if marker.starts_with(stream_pipeline::BUILDER_PREFIX) {
+        if marker.starts_with(stream_pipeline::CALLBACK_PREFIX) {
             return self.stream_callback(marker, args);
         }
         // A composition marker closes over the two callbacks it joined. Running
@@ -22489,9 +22487,6 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_lazy_stream(r, receiver, args, class, method)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.stream_support_stream(r, args, class, method)? {
-            return Ok(Some(value));
-        }
         if let Some(value) = self.primitive_stream_source(r, args, class, method)? {
             return Ok(Some(value));
         }
@@ -22565,7 +22560,7 @@ impl<H: Host> Runtime<'_, H> {
         if !stream_pipeline::takes_output(&r.name) {
             return Ok(None);
         }
-        let values = self.stream_values(receiver)?;
+        let values = self.stream_output(receiver, &r.name)?;
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
             ("toList", "()Ljava/util/List;") => collection_value("list", &values),
             ("toArray", "()[Ljava/lang/Object;") => {
@@ -23884,6 +23879,20 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         // A JDK skeleton's body or a JDK interface default the
                         // receiver inherits (`jdk_skeletons/`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_jdk_spliterator(
+                            &r,
+                            op,
+                            receiver.as_ref(),
+                            &args,
+                            class,
+                            method
+                        )
+                    ) {
+                        // The JDK's spliterators and `StreamSupport.stream`
+                        // (`jdk_spliterators.rs`).
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,

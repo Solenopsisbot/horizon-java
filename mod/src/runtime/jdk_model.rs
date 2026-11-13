@@ -509,10 +509,6 @@ fn resolve_sibling(r: &MethodRef, receiver: &Value, args: &[Value]) -> Option<Va
 /// bounded runtime refuses rather than spinning on.
 pub(crate) const MAX_SPLITERATOR_ELEMENTS: usize = 4096;
 
-/// Prefix of the consumer `StreamSupport.stream` hands a jar spliterator's
-/// `tryAdvance`: `accept(value)` appends to the stream marker that follows.
-pub(crate) const COLLECTING_CONSUMER_PREFIX: &str = "@fn:collect:";
-
 /// Prefix of a `Collectors.toMap` collector marker: the key and value
 /// functions (and the optional merge function) as escaped capture markers.
 const TO_MAP_COLLECTOR_PREFIX: &str = "collector/to-map/";
@@ -1321,92 +1317,6 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let stream = self.new_stream(class, method, values);
         self.mark_unsized_stream(&stream);
         Ok(stream)
-    }
-
-    /// `accept(value)` on the consumer [`Self::stream_support_stream`] passes
-    /// to a spliterator: append the value to the stream being built.
-    pub(crate) fn collecting_consumer_accept(
-        &mut self,
-        marker: &str,
-        args: &[Value],
-    ) -> Result<Option<Value>, NativeError> {
-        let Some(stream) = marker.strip_prefix(COLLECTING_CONSUMER_PREFIX) else {
-            return Ok(None);
-        };
-        let values = self.streams.get_mut(stream).ok_or_else(|| {
-            NativeError::Metadata("collecting consumer outlived its stream".into())
-        })?;
-        if values.len() >= MAX_SPLITERATOR_ELEMENTS {
-            return Err(NativeError::Metadata(format!(
-                "StreamSupport.stream source yielded more than {MAX_SPLITERATOR_ELEMENTS} elements"
-            )));
-        }
-        values.push(args.first().cloned().unwrap_or(Value::Ref(None)));
-        Ok(Some(Value::Void))
-    }
-
-    /// `StreamSupport.stream(spliterator, parallel)` over a spliterator the
-    /// jar implements (typically a `Spliterators.AbstractSpliterator`
-    /// subclass wrapping a `ServiceLoader` iterator).
-    ///
-    /// The JVM's stream pulls elements through `tryAdvance`; the bounded
-    /// stream is eager, so the jar's `tryAdvance` runs until it answers
-    /// `false`, each element landing in the new stream through a collecting
-    /// consumer. `parallel` changes nothing about which elements a sequential
-    /// pull sees. A spliterator the runtime did not build (a host collection's)
-    /// is left to the host.
-    pub(crate) fn stream_support_stream(
-        &mut self,
-        r: &MethodRef,
-        args: &[Value],
-        class: &str,
-        method: &str,
-    ) -> Result<Option<Value>, NativeError> {
-        if r.owner != "java/util/stream/StreamSupport"
-            || r.name != "stream"
-            || r.descriptor != "(Ljava/util/Spliterator;Z)Ljava/util/stream/Stream;"
-        {
-            return Ok(None);
-        }
-        let Some(spliterator) = args.first() else {
-            return Ok(None);
-        };
-        if matches!(spliterator, Value::Ref(None)) {
-            return Err(NativeError::UncaughtException {
-                class: "java/lang/NullPointerException".into(),
-                message: None,
-                frame: None,
-            });
-        }
-        let Some(receiver_class) = self.receiver_class(spliterator).map(str::to_owned) else {
-            return Ok(None);
-        };
-        const TRY_ADVANCE: &str = "(Ljava/util/function/Consumer;)Z";
-        let Some((owner, true)) = self.member_owner(&receiver_class, "tryAdvance", TRY_ADVANCE)
-        else {
-            return Ok(None);
-        };
-        let stream = self.new_stream(class, method, Vec::new());
-        let marker = expect_ref(&stream).cloned().unwrap_or_default();
-        let consumer = Value::Ref(Some(format!("{COLLECTING_CONSUMER_PREFIX}{marker}")));
-        // Each advance yields at most one element, so the element bound in
-        // `collecting_consumer_accept` also bounds this loop; the extra step
-        // covers an advance that answers `true` without yielding.
-        for _ in 0..=MAX_SPLITERATOR_ELEMENTS {
-            let advanced = self.invoke(
-                &owner,
-                "tryAdvance",
-                TRY_ADVANCE,
-                Some(spliterator.clone()),
-                std::slice::from_ref(&consumer),
-            )?;
-            if !matches!(advanced, Value::Int(value) if value != 0) {
-                return Ok(Some(stream));
-            }
-        }
-        Err(NativeError::Metadata(format!(
-            "StreamSupport.stream source advanced more than {MAX_SPLITERATOR_ELEMENTS} times"
-        )))
     }
 
     /// `stream.collect(Collectors.toMap(key, value[, merge]))`.

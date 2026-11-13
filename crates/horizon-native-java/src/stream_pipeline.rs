@@ -58,10 +58,18 @@ use crate::{MethodRef, NativeError, Value, expect_ref};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Prefix of the stream callback markers (`stream_callback`).
+pub(crate) const CALLBACK_PREFIX: &str = "@fn:stream-";
+
 /// Prefix of a `Stream.Builder` marker. A builder is a `Consumer`, so it is a
 /// callback marker: `list.forEach(builder)` reaches it through the callback
 /// path.
-pub(crate) const BUILDER_PREFIX: &str = "@fn:stream-builder:";
+const BUILDER_PREFIX: &str = "@fn:stream-builder:";
+
+/// Prefix of the `Consumer` a push hands a spliterator: `accept(value)` is
+/// the sink's `accept` at one stage of one running push
+/// (`@fn:stream-sink:<push>:<stage>`).
+const SINK_PREFIX: &str = "@fn:stream-sink:";
 
 /// Elements one push may collect, or one builder may hold, before the
 /// runtime refuses the stream as a runaway (a `flatMap` fan-out); far above
@@ -103,6 +111,8 @@ enum Source {
     Values(String),
     /// `Stream.concat(a, b)`.
     Concat(String, String),
+    /// `StreamSupport.stream(spliterator, parallel)`: the spliterator.
+    Spliterator(Value),
 }
 
 /// What a running stage keeps between elements.
@@ -147,8 +157,11 @@ enum Terminal {
         max: bool,
         best: Option<Value>,
     },
-    /// `collect(supplier, accumulator, combiner)`: the accumulator and the
-    /// container the supplier made.
+    /// `collect(supplier, accumulator, combiner)` before the push begins: the
+    /// accumulator and the supplier.
+    Supply(Value, Value),
+    /// The same once begun: the accumulator and the container the supplier
+    /// made.
     Container(Value, Value),
     /// The downstream of a `flatMap` or `concat`: the outer push and the
     /// stage its elements go to.
@@ -167,6 +180,10 @@ struct Drive {
     stages: Arc<Vec<Stage>>,
     states: Vec<State>,
     terminal: Terminal,
+    /// Whether the pipeline can stop early (`StreamOpFlag.SHORT_CIRCUIT`): a
+    /// spliterator source is then pulled with `tryAdvance`, else pushed with
+    /// `forEachRemaining`.
+    short: bool,
 }
 
 /// The runtime's lazy stream state.
@@ -174,6 +191,11 @@ struct Drive {
 pub(crate) struct Pipelines {
     links: BTreeMap<String, Link>,
     concats: BTreeMap<String, (String, String)>,
+    /// `StreamSupport.stream` sources: the spliterator and the
+    /// characteristics it reported when the stream was made.
+    spliterators: BTreeMap<String, (Value, i32)>,
+    /// The modelled JDK spliterators (`jdk_spliterators.rs`).
+    pub(crate) splits: crate::jdk_spliterators::Splits,
     /// Value-list sources whose JDK spliterator is not `SIZED`.
     not_sized: BTreeSet<String>,
     /// Sources whose pipeline was made parallel (`sourceStage.parallel`).
@@ -318,7 +340,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let marker = expect_ref(value)?;
         (self.streams.contains_key(marker)
             || self.pipelines.links.contains_key(marker)
-            || self.pipelines.concats.contains_key(marker))
+            || self.pipelines.concats.contains_key(marker)
+            || self.pipelines.spliterators.contains_key(marker))
         .then(|| marker.clone())
     }
 
@@ -353,6 +376,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             if let Some((a, b)) = self.pipelines.concats.get(&at) {
                 return Ok((Source::Concat(a.clone(), b.clone()), stages));
             }
+            if let Some((spliterator, _)) = self.pipelines.spliterators.get(&at) {
+                return Ok((Source::Spliterator(spliterator.clone()), stages));
+            }
             if self.streams.contains_key(&at) {
                 return Ok((Source::Values(at), stages));
             }
@@ -371,29 +397,104 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         at.to_owned()
     }
 
-    /// The pipeline's exact size when the JDK knows it without traversal
-    /// (`StreamOpFlag.SIZED` and the slices' size adjustment).
-    fn known_size(&self, stream: &str) -> Option<i64> {
-        let (source, stages) = self.chain(stream).ok()?;
-        let mut size = match source {
-            Source::Values(marker) => {
-                if self.pipelines.not_sized.contains(&marker) {
-                    return None;
-                }
-                self.streams.get(&marker)?.len() as i64
-            }
-            Source::Concat(a, b) => self.known_size(&a)?.checked_add(self.known_size(&b)?)?,
+    /// Whether the pipeline's size is known without traversal: a `SIZED`
+    /// source (`StreamOpFlag.SIZED`) through stages that keep or adjust it.
+    fn sized(&self, stream: &str) -> bool {
+        let Ok((source, stages)) = self.chain(stream) else {
+            return false;
         };
+        let source_sized = match &source {
+            Source::Values(marker) => !self.pipelines.not_sized.contains(marker),
+            Source::Concat(a, b) => self.sized(a) && self.sized(b),
+            Source::Spliterator(_) => self
+                .pipelines
+                .spliterators
+                .get(&self.root(stream))
+                .is_some_and(|(_, flags)| flags & crate::jdk_spliterators::SIZED != 0),
+        };
+        source_sized
+            && !stages.iter().any(|stage| {
+                matches!(
+                    stage,
+                    Stage::Filter(..) | Stage::FlatMap(..) | Stage::Distinct
+                )
+            })
+    }
+
+    /// The source's `getExactSizeIfKnown()`: a value list's length, a
+    /// spliterator's answer (a call into it), a concatenation's sum.
+    fn source_size(&mut self, source: &Source) -> Result<i64, NativeError> {
+        Ok(match source {
+            Source::Values(marker) => self.streams.get(marker).map_or(0, Vec::len) as i64,
+            Source::Concat(a, b) => {
+                let (a, b) = (a.clone(), b.clone());
+                let a = self.exact_size(&a)?.unwrap_or(-1);
+                let b = self.exact_size(&b)?.unwrap_or(-1);
+                if a < 0 || b < 0 {
+                    -1
+                } else {
+                    a.saturating_add(b)
+                }
+            }
+            Source::Spliterator(spliterator) => self.exact_size_if_known(spliterator)?,
+        })
+    }
+
+    /// The pipeline's exact output size when the JDK knows it without
+    /// traversal (`exactOutputSizeIfKnown`, with JDK 18's size-adjusting
+    /// slices): asks the source, runs no stage.
+    fn exact_size(&mut self, stream: &str) -> Result<Option<i64>, NativeError> {
+        if !self.sized(stream) {
+            return Ok(None);
+        }
+        let (source, stages) = self.chain(stream)?;
+        let mut size = self.source_size(&source)?;
+        if size < 0 {
+            return Ok(None);
+        }
         for stage in &stages {
             size = match stage {
-                Stage::Map(..) | Stage::Peek(..) | Stage::Sorted(_) | Stage::Pass => size,
-                Stage::Widen(_) => size,
                 Stage::Skip(n) => (size - n).max(0),
                 Stage::Limit(n) => size.min(*n),
-                Stage::Filter(..) | Stage::FlatMap(..) | Stage::Distinct => return None,
+                _ => size,
             };
         }
-        Some(size)
+        Ok(Some(size))
+    }
+
+    /// `StreamSupport.stream(spliterator, parallel)`: reads the
+    /// characteristics now (`StreamOpFlag.fromCharacteristics`, which also
+    /// asks a `SORTED` one for its comparator); elements are pulled by the
+    /// terminal.
+    pub(crate) fn stream_of_spliterator(
+        &mut self,
+        spliterator: &Value,
+        parallel: bool,
+        class: &str,
+        method: &str,
+    ) -> Result<Value, NativeError> {
+        if *spliterator == Value::Ref(None) {
+            return Err(npe());
+        }
+        let flags = self.characteristics_of(spliterator)?;
+        if flags & crate::jdk_spliterators::SORTED != 0 {
+            self.call_virtual(
+                crate::jdk_call::Site::Interface,
+                "java/util/Spliterator",
+                "getComparator",
+                "()Ljava/util/Comparator;",
+                spliterator,
+                &[],
+            )?;
+        }
+        let marker = self.lazy_marker(class, method);
+        self.pipelines
+            .spliterators
+            .insert(marker.clone(), (spliterator.clone(), flags));
+        if parallel {
+            self.pipelines.parallel.insert(marker.clone());
+        }
+        Ok(Value::Ref(Some(marker)))
     }
 
     /// Call `callback` as its functional `interface`'s method, dispatched the
@@ -567,7 +668,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 decided: None,
             },
             ("count", "()J") => {
-                if let Some(size) = self.known_size(stream) {
+                if let Some(size) = self.exact_size(stream)? {
                     self.count_parallel(stream)?;
                     return Ok(Some(Value::Long(size)));
                 }
@@ -588,7 +689,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 max: r.name == "max",
                 best: None,
             },
-            ("collect", _) if reference && args.len() == 3 => Terminal::Container(arg(1), arg(0)),
+            ("collect", _) if reference && args.len() == 3 => Terminal::Supply(arg(1), arg(0)),
             _ => return Ok(None),
         };
         let callbacks: &[Value] = match &terminal {
@@ -597,21 +698,12 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             }
             Terminal::Match { predicate, .. } => std::slice::from_ref(predicate),
             Terminal::Extreme { comparator, .. } => std::slice::from_ref(comparator),
-            Terminal::Container(..) => args,
+            Terminal::Supply(..) => args,
             _ => &[],
         };
         if callbacks.contains(&Value::Ref(None)) {
             return Err(npe());
         }
-        let terminal = match terminal {
-            // `ReduceOps.makeRef(supplier, ...)`: the supplier runs in the
-            // sink's `begin`, before the first element.
-            Terminal::Container(accumulator, supplier) => {
-                let container = self.call_sam("java/util/function/Supplier", &supplier, &[])?;
-                Terminal::Container(accumulator, container)
-            }
-            other => other,
-        };
         self.count_parallel(stream)?;
         let result = match self.drive(stream, terminal, None)? {
             Terminal::Each(..) => Value::Void,
@@ -630,7 +722,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 None => crate::empty_optional(),
             },
             Terminal::Fold(_, _, value) | Terminal::Container(_, value) => value,
-            Terminal::Collect(_) | Terminal::Forward(..) => Value::Void,
+            Terminal::Collect(_) | Terminal::Forward(..) | Terminal::Supply(..) => Value::Void,
         };
         Ok(Some(result))
     }
@@ -647,9 +739,13 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         Ok(())
     }
 
-    /// The elements a stream yields: a source's list, or a stage's output
-    /// from one full push. The value-list terminals run on this.
-    pub(crate) fn stream_values(&mut self, stream: &Value) -> Result<Vec<Value>, NativeError> {
+    /// The elements a stream yields for the value-list terminal `terminal`:
+    /// a source's list, or a stage's output from one full push.
+    pub(crate) fn stream_output(
+        &mut self,
+        stream: &Value,
+        terminal: &str,
+    ) -> Result<Vec<Value>, NativeError> {
         let marker = expect_ref(stream)
             .filter(|marker| marker.starts_with("stream/"))
             .ok_or_else(|| NativeError::Metadata("expected a native stream marker".into()))?
@@ -658,6 +754,12 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             return Ok(values.clone());
         }
         self.count_parallel(&marker)?;
+        // `toArray`/`toList` size their array first
+        // (`AbstractPipeline.exactOutputSizeIfKnown`), which asks a sized
+        // source once more before the push's own `begin` does.
+        if matches!(terminal, "toArray" | "toList") {
+            self.exact_size(&marker)?;
+        }
         match self.drive(&marker, Terminal::Collect(Vec::new()), None)? {
             Terminal::Collect(values) => Ok(values),
             _ => Ok(Vec::new()),
@@ -687,6 +789,16 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             Some((id, at)) => Terminal::Forward(id, at),
             None => terminal,
         };
+        let short = stages.iter().any(|stage| matches!(stage, Stage::Limit(_)))
+            || match &terminal {
+                Terminal::Find(_) | Terminal::Match { .. } => true,
+                Terminal::Forward(outer, _) => self
+                    .pipelines
+                    .drives
+                    .get(outer)
+                    .is_some_and(|drive| drive.short),
+                _ => false,
+            };
         let id = self.pipelines.next_drive;
         self.pipelines.next_drive += 1;
         self.pipelines.drives.insert(
@@ -695,14 +807,40 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 stages: Arc::new(stages),
                 states,
                 terminal,
+                short,
             },
         );
-        let result = self.feed(&source, id).and_then(|()| self.flush(id, 0));
+        let result = self
+            .begin(&source, id)
+            .and_then(|()| self.feed(&source, id))
+            .and_then(|()| self.flush(id, 0));
         let drive = self.pipelines.drives.remove(&id);
         result?;
         drive
             .map(|drive| drive.terminal)
             .ok_or_else(|| NativeError::Metadata("stream push lost its state".into()))
+    }
+
+    /// The sink chain's `begin(spliterator.getExactSizeIfKnown())`
+    /// (`AbstractPipeline.copyInto`), then the terminal's own `begin`: the
+    /// supplier of `collect(supplier, accumulator, combiner)`.
+    fn begin(&mut self, source: &Source, id: u64) -> Result<(), NativeError> {
+        if let Source::Spliterator(spliterator) = source {
+            self.exact_size_if_known(spliterator)?;
+        }
+        let supply = match self.pipelines.drives.get(&id).map(|drive| &drive.terminal) {
+            Some(Terminal::Supply(accumulator, supplier)) => {
+                Some((accumulator.clone(), supplier.clone()))
+            }
+            _ => None,
+        };
+        if let Some((accumulator, supplier)) = supply {
+            let container = self.call_sam("java/util/function/Supplier", &supplier, &[])?;
+            if let Some(drive) = self.pipelines.drives.get_mut(&id) {
+                drive.terminal = Terminal::Container(accumulator, container);
+            }
+        }
+        Ok(())
     }
 
     /// Feed a source's elements into push `id` at its first stage, asking
@@ -725,6 +863,40 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                         break;
                     }
                     self.drive(side, Terminal::Collect(Vec::new()), Some((id, 0)))?;
+                }
+                Ok(())
+            }
+            Source::Spliterator(spliterator) => {
+                let sink = Value::Ref(Some(format!("{SINK_PREFIX}{id}:0")));
+                let short = self
+                    .pipelines
+                    .drives
+                    .get(&id)
+                    .is_some_and(|drive| drive.short);
+                if short {
+                    // `copyIntoWithCancel`: one `tryAdvance` per element.
+                    while !self.cancelled(id, 0) {
+                        let advanced = self.call_virtual(
+                            crate::jdk_call::Site::Interface,
+                            "java/util/Spliterator",
+                            "tryAdvance",
+                            "(Ljava/util/function/Consumer;)Z",
+                            spliterator,
+                            std::slice::from_ref(&sink),
+                        )?;
+                        if !truth(&advanced) {
+                            break;
+                        }
+                    }
+                } else {
+                    self.call_virtual(
+                        crate::jdk_call::Site::Interface,
+                        "java/util/Spliterator",
+                        "forEachRemaining",
+                        "(Ljava/util/function/Consumer;)V",
+                        spliterator,
+                        &[sink],
+                    )?;
                 }
                 Ok(())
             }
@@ -974,6 +1146,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 };
                 *best = Some(next);
             }
+            Terminal::Supply(..) => {}
             Terminal::Container(accumulator, container) => {
                 let (accumulator, container) = (accumulator.clone(), container.clone());
                 self.call_sam(
@@ -1060,16 +1233,26 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     }
 
     /// A stream callback marker invoked as its functional interface: a
-    /// builder used as a `Consumer`.
+    /// builder used as a `Consumer`, or a push's sink handed to a
+    /// spliterator.
     pub(crate) fn stream_callback(
         &mut self,
         marker: &str,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        if !marker.starts_with(BUILDER_PREFIX) {
-            return Ok(None);
+        if marker.starts_with(BUILDER_PREFIX) {
+            self.builder_accept(marker, args)?;
+            return Ok(Some(Value::Void));
         }
-        self.builder_accept(marker, args)?;
+        let Some(rest) = marker.strip_prefix(SINK_PREFIX) else {
+            return Ok(None);
+        };
+        let (id, at) = rest
+            .split_once(':')
+            .and_then(|(id, at)| Some((id.parse().ok()?, at.parse().ok()?)))
+            .ok_or_else(|| NativeError::Metadata(format!("malformed stream sink {marker}")))?;
+        let value = args.first().cloned().unwrap_or(Value::Ref(None));
+        self.accept(id, at, value)?;
         Ok(Some(Value::Void))
     }
 }
