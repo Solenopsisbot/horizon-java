@@ -203,6 +203,17 @@ pub enum HostKind {
     /// `net.minecraft.references.BlockItemId`: key the block and item ids'
     /// [`HostRef::of_values`].
     BlockItemId,
+    /// A Java array: key `<array class>#<n>`, its elements in the runtime's
+    /// `arrays` table (`host_array.rs`).
+    Array,
+    /// Vanilla's `ColorCollection` record, its sixteen values in the
+    /// runtime's `arrays` table: key `color-collection#<n>`
+    /// (`color_collection.rs`).
+    ColorCollection,
+    /// The empty array the runtime answers for an unmodelled call whose
+    /// declared result is an array: key `<declared class>#empty`
+    /// (`host_array.rs`). Its runtime class is unknown.
+    UnknownArray,
     /// The event a NeoForge/Forge game-event listener receives: key its class
     /// (`host_game_event.rs`).
     GameEvent,
@@ -216,7 +227,7 @@ pub(crate) enum ClassRule {
     /// Every object of the kind is this class.
     Fixed(&'static str),
     /// A family whose objects are of many classes (jar objects, collections,
-    /// game objects), or a class other values than handles may also be
+    /// game objects, arrays), or a class other values than handles may also be
     /// (`CompletableFuture`): the class is read from the key.
     FromKey(fn(&str) -> &str),
     /// The object's runtime class is not known (a jar's lambda, a proxy, a
@@ -349,6 +360,11 @@ pub(crate) struct Methods {
 /// class names the reflective `Class` surface can reach has one ([`CLASS_SIDES`]); a `Fixed` kind
 /// is found by [`HostKind::of_class`], an `Unknown` one never (its declared types are not its
 /// class).
+///
+/// Two rules every row keeps: **a class file the run holds wins** (a jar's own copy of an owned
+/// class answers from that file: the runtime asks `Runtime::owned_class_side`, which defers to
+/// it), and **one owner per name** (no two rows, nor a row and a fixed class, own one name: checked
+/// over every row by a unit test, and by `owning_class` in debug builds).
 pub(crate) struct ClassSide {
     /// Whether this kind answers for the class name `class` (its handles' classes and their
     /// family's supertypes). No two kinds own one class.
@@ -360,6 +376,10 @@ pub(crate) struct ClassSide {
     pub(crate) superclass: fn(&str) -> Option<String>,
     /// Whether `class` is an interface, when known; `None` = counted.
     pub(crate) is_interface: fn(&str) -> Option<bool>,
+    /// Every class name `owns` accepts (its family's table), so that "one owner per name" can be
+    /// checked over every row (read by host_ref's unit test, not at run time).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) classes: fn() -> Vec<String>,
 }
 
 /// [`ClassSide::instance_of`].
@@ -623,6 +643,31 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::runtime::host_ids::BLOCK_ITEM_ID_METHODS,
     },
     KindInfo {
+        kind: HostKind::Array,
+        tag: "arr",
+        class: ClassRule::FromKey(crate::runtime::host_array::class_of_key),
+        canonical: crate::runtime::host_array::canonical,
+        methods: &crate::runtime::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::ColorCollection,
+        tag: "colors",
+        class: ClassRule::Fixed(crate::runtime::color_collection::OWNER),
+        // One key per collection the runtime built.
+        canonical: always_canonical,
+        methods: &crate::runtime::color_collection::COLOR_COLLECTION,
+    },
+    KindInfo {
+        kind: HostKind::UnknownArray,
+        tag: "arru",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_array::surely,
+        },
+        // One key stands for every array such a call returned.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_array::ARRAY,
+    },
+    KindInfo {
         kind: HostKind::GameEvent,
         tag: "gev",
         class: ClassRule::FromKey(crate::runtime::host_game_event::game_event_class),
@@ -679,6 +724,14 @@ impl HostKind {
     /// counted; it never falls to "a class the runtime does not hold".
     pub(crate) fn owning_class(class: &str) -> Option<Self> {
         Self::of_class(class).or_else(|| {
+            debug_assert!(
+                CLASS_SIDES
+                    .iter()
+                    .filter(|(_, side)| (side.owns)(class))
+                    .count()
+                    <= 1,
+                "two kinds own {class}"
+            );
             CLASS_SIDES
                 .iter()
                 .find(|(_, side)| (side.owns)(class))
@@ -924,6 +977,28 @@ mod tests {
             ),
             Some(Some(true))
         );
+    }
+
+    /// One owner per class name, over every class-side row (not a list of
+    /// kinds): each name a row enumerates is owned by that row alone, and by
+    /// no fixed-class kind.
+    #[test]
+    fn every_class_name_has_one_owner() {
+        for (kind, side) in CLASS_SIDES {
+            assert!(kind.class_side().is_some(), "{kind:?}");
+            let classes = (side.classes)();
+            assert!(!classes.is_empty(), "{kind:?} enumerates no class");
+            for class in classes {
+                assert!((side.owns)(&class), "{kind:?} does not own its own {class}");
+                let owners: Vec<HostKind> = CLASS_SIDES
+                    .iter()
+                    .filter(|(_, other)| (other.owns)(&class))
+                    .map(|(kind, _)| *kind)
+                    .collect();
+                assert_eq!(owners, [*kind], "{class}");
+                assert_eq!(HostKind::of_class(&class), None, "{class}");
+            }
+        }
     }
 
     /// A kind's `instance_of` asks the hierarchy it is handed, so a family
