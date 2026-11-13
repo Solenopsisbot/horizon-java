@@ -66,6 +66,7 @@ mod hash_table;
 mod heap;
 mod hook_shapes;
 mod host_array;
+mod host_attachment;
 mod host_entry;
 mod host_events;
 mod host_game_event;

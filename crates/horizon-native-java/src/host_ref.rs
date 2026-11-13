@@ -242,6 +242,11 @@ pub enum HostKind {
     GameEvent,
     /// The event a NeoForge loading stage posts: key its class and container.
     LifecycleEvent,
+    /// A NeoForge `AttachmentType`: key a serial minted per allocation
+    /// (`host_attachment.rs`).
+    AttachmentType,
+    /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
+    AttachmentBuilder,
 }
 
 /// How a kind's Java class follows from its key.
@@ -417,6 +422,14 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::LifecycleEvent,
         &crate::host_game_event::LIFECYCLE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentType,
+        &crate::host_attachment::TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::AttachmentBuilder,
+        &crate::host_attachment::BUILDER_CLASS_SIDE,
     ),
 ];
 
@@ -782,6 +795,21 @@ const KINDS: &[KindInfo] = &[
         // A stage posts one event per container.
         canonical: always_canonical,
         methods: &crate::host_game_event::LIFECYCLE_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentType,
+        tag: "natt",
+        class: ClassRule::FromKey(crate::host_attachment::type_class),
+        // One serial per allocation.
+        canonical: always_canonical,
+        methods: &crate::host_attachment::TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AttachmentBuilder,
+        tag: "nattb",
+        class: ClassRule::FromKey(crate::host_attachment::builder_class),
+        canonical: always_canonical,
+        methods: &crate::host_attachment::BUILDER_METHODS,
     },
 ];
 
