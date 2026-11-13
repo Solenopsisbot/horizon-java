@@ -25,8 +25,6 @@ use super::*;
 
 const TYPE_TOKEN: &str = "com/google/common/reflect/TypeToken";
 const TOKEN_PREFIX: &str = "typetoken/";
-const CACHE_BUILDER: &str = "guava-cache-builder";
-const LOADER_PREFIX: &str = "guava-cache-loader/";
 /// The captured type a `TypeToken` subclass object keeps, under its marker.
 const RUNTIME_TYPE: &str = "#runtimeTypeLjava/lang/reflect/Type;";
 
@@ -161,10 +159,13 @@ impl<H: Host> Runtime<'_, H> {
                     "(Lcom/google/common/base/Function;)Lcom/google/common/cache/CacheLoader;"
                     | "(Lcom/google/common/base/Supplier;)Lcom/google/common/cache/CacheLoader;",
                 ) => {
-                    let Some(function) = args.first().and_then(expect_ref) else {
+                    let Some(function) = args
+                        .first()
+                        .filter(|function| **function != Value::Ref(None))
+                    else {
                         return Err(thrown("java/lang/NullPointerException", None));
                     };
-                    Ok(Some(Value::Ref(Some(format!("{LOADER_PREFIX}{function}")))))
+                    Ok(Some(crate::host_guava::cache_loader(function)))
                 }
                 // A jar `CacheLoader` subclass runs its own constructor body.
                 ("<init>", "()V") => Ok(Some(Value::Void)),
@@ -564,12 +565,15 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        // A fresh builder per `newBuilder()`/`from(spec)` (`host_guava.rs`).
         if r.name == "newBuilder" || r.name == "from" {
-            return Ok(Some(Value::Ref(Some(CACHE_BUILDER.into()))));
+            let marker = self.new_object("guava-cache-builder");
+            return Ok(Some(crate::host_guava::cache_builder(marker)));
         }
-        if receiver.and_then(expect_ref).map(String::as_str) != Some(CACHE_BUILDER) {
+        let Some(builder) = receiver.filter(|builder| crate::host_guava::is_cache_builder(builder))
+        else {
             return Ok(None);
-        }
+        };
         if r.name == "build" {
             let Some(cache) = self.host.empty_mutable_collection("map") else {
                 return Ok(None);
@@ -584,19 +588,16 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Ok(Some(cache));
         }
-        // Size, expiry, reference strength, listeners and stats settings keep
-        // the builder.
+        // Size, expiry, reference strength, listeners and stats settings
+        // answer the builder itself.
         Ok(r.descriptor
             .ends_with(")Lcom/google/common/cache/CacheBuilder;")
-            .then(|| Value::Ref(Some(CACHE_BUILDER.into()))))
+            .then(|| builder.clone()))
     }
 
     /// Run a cache's loader for `key`.
     fn cache_load(&mut self, loader: &Value, key: &Value) -> Result<Value, NativeError> {
-        if let Some(function) =
-            expect_ref(loader).and_then(|marker| marker.strip_prefix(LOADER_PREFIX))
-        {
-            let function = Value::Ref(Some(function.to_owned()));
+        if let Some(function) = crate::host_guava::cache_loader_function(loader) {
             return Ok(self
                 .invoke_callback(&function, std::slice::from_ref(key))?
                 .unwrap_or(Value::Ref(None)));

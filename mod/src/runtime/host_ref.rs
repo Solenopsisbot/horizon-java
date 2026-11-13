@@ -242,6 +242,28 @@ pub enum HostKind {
     GameEvent,
     /// The event a NeoForge loading stage posts: key its class and container.
     LifecycleEvent,
+    /// An `ExecutorService`: key its allocation marker (`host_executors.rs`).
+    Executor,
+    /// A `Future` an executor answered: key its allocation marker.
+    ExecutorFuture,
+    /// `Executors.callable(task[, result])`: key the values it holds.
+    ExecutorCallable,
+    /// `Executors.defaultThreadFactory()`: key its allocation marker.
+    ThreadFactory,
+    /// A `ServiceLoader`: key its service and load serial (`host_services.rs`).
+    ServiceLoader,
+    /// A `ServiceLoader` iterator: key its serial.
+    ServiceIterator,
+    /// A `ServiceLoader.Provider`: key its service, class and loader serial.
+    ServiceProvider,
+    /// Guava `Splitter.on`: key its separator (`host_guava.rs`).
+    GuavaSplitter,
+    /// Guava `Joiner.on`: key its separator.
+    GuavaJoiner,
+    /// Guava `CacheBuilder`: key its allocation marker.
+    GuavaCacheBuilder,
+    /// Guava `CacheLoader.from(function)`: key the function.
+    GuavaCacheLoader,
     /// The thread callbacks run on (`host_jdk.rs`): key `main`.
     Thread,
     /// A logger: key `of_values([api, name])`.
@@ -809,6 +831,116 @@ const KINDS: &[KindInfo] = &[
         // A stage posts one event per container.
         canonical: always_canonical,
         methods: &crate::runtime::host_game_event::LIFECYCLE_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::Executor,
+        tag: "exe",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::executor_types,
+        },
+        // One per `Executors.newX()` call.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ExecutorFuture,
+        tag: "fut",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::future_types,
+        },
+        // One per `submit`/`schedule`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ExecutorCallable,
+        tag: "xcall",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::callable_types,
+        },
+        // A fresh `RunnableAdapter` per call: equal keys may be two objects.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ThreadFactory,
+        tag: "tfac",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_executors::thread_factory_types,
+        },
+        // One per `defaultThreadFactory()` call.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceLoader,
+        tag: "svl",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_services::loader_types,
+        },
+        // One per `ServiceLoader.load`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_services::LOADER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceIterator,
+        tag: "svi",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_services::iterator_types,
+        },
+        // One per `iterator()`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ServiceProvider,
+        tag: "svp",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_services::provider_types,
+        },
+        // Equal keys are equal providers; `reload()` makes new objects.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_services::PROVIDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaSplitter,
+        tag: "gsplit",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::splitter_types,
+        },
+        // A fresh `Splitter` per `on`.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaJoiner,
+        tag: "gjoin",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::joiner_types,
+        },
+        // A fresh `Joiner` per `on`.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaCacheBuilder,
+        tag: "gcb",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::cache_builder_types,
+        },
+        // One per `newBuilder()`; setters answer it.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaCacheLoader,
+        tag: "gcl",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::cache_loader_types,
+        },
+        // A fresh loader per `from`.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
     },
     KindInfo {
         kind: HostKind::Thread,
