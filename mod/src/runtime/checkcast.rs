@@ -187,7 +187,12 @@ impl<H: Host> Runtime<'_, H> {
         if let Value::Host(handle) = value {
             return Some(match handle.instance_of(target, self) {
                 Some(true) => HostCast::Fits,
-                Some(false) => HostCast::Throws(handle.class().to_owned()),
+                // The message names the exact class: counted when it is
+                // not known.
+                Some(false) => match handle.exact_class() {
+                    Some(class) => HostCast::Throws(class.to_owned()),
+                    None => HostCast::Unknown,
+                },
                 None => HostCast::Unknown,
             });
         }
@@ -324,7 +329,7 @@ impl<H: Host> Runtime<'_, H> {
                     Some(false) => Verdict::No,
                     None => Verdict::Unknown,
                 };
-                return (verdict, Some(handle.class().to_owned()));
+                return (verdict, handle.exact_class().map(str::to_owned));
             }
             // A boxed number is a JDK object, never a jar type.
             Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {

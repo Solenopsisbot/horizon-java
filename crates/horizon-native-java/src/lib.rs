@@ -9634,7 +9634,8 @@ fn class_of_value(value: &Value) -> Option<String> {
         // A `Float` is a `Boxed::Float`; the bare value is a `Double`.
         Value::Float(_) => Some("java/lang/Double".into()),
         Value::Boxed(boxed) => Some(boxed.class().into()),
-        Value::Host(host) => Some(host.class().into()),
+        // `None` (counted by `getClass`) when the runtime class is not known.
+        Value::Host(host) => host.exact_class().map(Into::into),
         Value::Void => None,
         Value::Ref(None) => None,
         Value::Ref(Some(marker)) => {

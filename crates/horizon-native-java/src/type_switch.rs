@@ -88,6 +88,13 @@ impl<H: Host> Runtime<'_, H> {
         if class == "java/lang/Object" {
             return true;
         }
+        // A handle by its kind's row, which also knows a kind whose exact
+        // class is not (`host_ref.rs`).
+        if let Value::Host(handle) = value
+            && let Some(fits) = handle.instance_of(class, self)
+        {
+            return fits;
+        }
         if let Some(own) = class_of_value(value)
             && (own == class || self.class_is_instance(&own, class))
         {

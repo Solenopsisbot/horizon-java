@@ -40,19 +40,26 @@ use crate::host_ref::{HostKind, HostRef, Methods};
 use crate::jdk_call::{Site, throw};
 
 /// A modelled spliterator is a `HostKind::Spliterator` handle keyed
-/// `iter:<n>` (`Spliterators.IteratorSpliterator`) or `ra:<n>`
+/// `iter:<n>` (`Spliterators.IteratorSpliterator`), `sorted:<n>`
+/// (`SortedSet.spliterator()`'s anonymous `SortedSet$1`, an
+/// `IteratorSpliterator` subclass) or `ra:<n>`
 /// (`AbstractList.RandomAccessSpliterator`); the key carries the class.
 pub(crate) fn spliterator_class(key: &str) -> &str {
     if key.starts_with("ra:") {
         "java/util/AbstractList$RandomAccessSpliterator"
+    } else if key.starts_with("sorted:") {
+        "java/util/SortedSet$1"
     } else {
-        "java/util/Spliterators$IteratorSpliterator"
+        ITERATOR_SPLITERATOR
     }
 }
 
+const ITERATOR_SPLITERATOR: &str = "java/util/Spliterators$IteratorSpliterator";
+
 /// The modelled spliterators' `Object` members: identity `equals`, the
-/// identity hash in `toString`/`hashCode` (counted). Both classes implement
-/// `Spliterator` and nothing else (JDK 25.0.5's `javap`).
+/// identity hash in `toString`/`hashCode` (counted). The classes implement
+/// `Spliterator` and nothing else; `SortedSet$1` extends
+/// `IteratorSpliterator` (JDK 25.0.5's `javap`).
 pub(crate) const JDK_SPLITERATOR: Methods = Methods {
     to_string: |_, _| Ok(None),
     hash_code: |_, _| Ok(None),
@@ -65,7 +72,8 @@ pub(crate) const JDK_SPLITERATOR: Methods = Methods {
     instance_of: |handle, wanted, _| {
         Some(
             matches!(wanted, "java/lang/Object" | "java/util/Spliterator")
-                || wanted == handle.class(),
+                || wanted == handle.class()
+                || (wanted == ITERATOR_SPLITERATOR && handle.key().starts_with("sorted:")),
         )
     },
     crosses_jars: |_, _| false,
@@ -165,6 +173,10 @@ impl<H: Host> Runtime<'_, H> {
     pub(crate) fn new_split(&mut self, split: Split) -> Value {
         let splits = &mut self.pipelines.splits;
         let tag = match split {
+            Split::Iter {
+                sorted_set: Some(_),
+                ..
+            } => "sorted",
             Split::Iter { .. } => "iter",
             Split::RandomAccess { .. } => "ra",
         };

@@ -310,8 +310,9 @@ const KINDS: &[KindInfo] = &[
     KindInfo {
         kind: HostKind::StreamSink,
         tag: "ssnk",
-        // Named departure: the JDK's sink is a stage's own (anonymous) class;
-        // `getClass()` answers the `Sink` interface here.
+        // The declared type only: the JDK's sink is a stage's own class,
+        // which is not modelled, so `exact_class` is `None` and `getClass()`
+        // and a cast's message are counted (`class_unknown`).
         class: ClassRule::Fixed("java/util/stream/Sink"),
         canonical: never_canonical,
         methods: &crate::stream_pipeline::STREAM_SINK,
@@ -331,6 +332,13 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::jdk_spliterators::JDK_SPLITERATOR,
     },
 ];
+
+/// The kinds whose objects' exact runtime class is not known, only a
+/// declared type: a stream push's sink (the JDK's is a stage's own class).
+/// TODO(#163): `ClassRule::Unknown { declared }` replaces this list.
+fn class_unknown(kind: HostKind) -> bool {
+    matches!(kind, HostKind::StreamSink)
+}
 
 impl HostKind {
     /// The kind's row: `KINDS` is in declaration order, so the discriminant
@@ -415,6 +423,14 @@ impl HostRef {
             ClassRule::Fixed(class) => class,
             ClassRule::FromKey(class_of) => class_of(&self.key),
         }
+    }
+
+    /// The exact runtime class (`getClass()`, a `ClassCastException`'s
+    /// message), `None` for a kind whose objects' runtime class is not known:
+    /// the caller counts what needs it. `instanceof` and casts against the
+    /// declared type and its supertypes stay exact through the row.
+    pub fn exact_class(&self) -> Option<&str> {
+        (!class_unknown(self.kind)).then(|| self.class())
     }
 
     /// Whether two handles equal to this one are the same object.

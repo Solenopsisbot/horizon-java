@@ -33,6 +33,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.RandomAccess;
+import java.util.SortedSet;
 import java.util.Spliterator;
 import java.util.Spliterators;
 import java.util.function.Consumer;
@@ -384,6 +385,48 @@ public final class Probe {
         return take(splits + "|" + coll + "|" + any + "," + sinks);
     }
 
+    static Object sink() {
+        Grab g = new Grab();
+        StreamSupport.stream(g, false).anyMatch(x -> false);
+        return g.seen[0];
+    }
+
+    public static String sinkSwitch() {
+        Object s = sink();
+        String kind = switch (s) {
+            case Runnable r -> "runnable";
+            case Consumer<?> c -> "consumer";
+            default -> "other";
+        };
+        return take(kind + "," + (s instanceof Runnable));
+    }
+
+    public static String sinkClass() {
+        Object s = sink();
+        String cast;
+        try { cast = String.valueOf((Runnable) s); } catch (ClassCastException e) { cast = "cce " + e.getMessage(); }
+        return take(cast + "," + s.getClass().getName());
+    }
+
+    /// A jar `SortedSet`: its `spliterator()` is `SortedSet`'s default.
+    static final class Sorted extends AbstractSet<Integer> implements SortedSet<Integer> {
+        @Override public Iterator<Integer> iterator() { log("iterator"); return Arrays.asList(1, 2).iterator(); }
+        @Override public int size() { log("size"); return 2; }
+        @Override public Comparator<? super Integer> comparator() { log("comparator"); return null; }
+        @Override public SortedSet<Integer> subSet(Integer a, Integer b) { throw new UnsupportedOperationException(); }
+        @Override public SortedSet<Integer> headSet(Integer a) { throw new UnsupportedOperationException(); }
+        @Override public SortedSet<Integer> tailSet(Integer a) { throw new UnsupportedOperationException(); }
+        @Override public Integer first() { return 1; }
+        @Override public Integer last() { return 2; }
+    }
+
+    public static String sortedSetSpliterator() {
+        Spliterator<Integer> sp = new Sorted().spliterator();
+        Object o = sp;
+        return take(sp.getClass().getName() + "," + (o instanceof Spliterator) + ","
+            + sp.characteristics() + "," + sp.getComparator());
+    }
+
     public static String randomAccessMembers() {
         Spliterator<Object> sp = new Row("a", "b").spliterator();
         log("split");
@@ -502,6 +545,11 @@ fn jdk_spliterators_run_as_jdk_25_does() {
         // The modelled spliterators, `Collector.of`'s collector and the push's
         // sink are host handles (`HostKind::Spliterator`/`Collector`/
         // `StreamSink`): their classes, identity and `instanceof`.
+        ("sinkSwitch", " => consumer,false"),
+        (
+            "sortedSetSpliterator",
+            "comparator => java.util.SortedSet$1,true,16469,null",
+        ),
         (
             "handleObjects",
             "iterator => java.util.AbstractList$RandomAccessSpliterator,java.util.Spliterators$IteratorSpliterator,false,false,true,true,false|java.util.stream.Collectors$CollectorImpl,true,true,true|false,3,true,true,true,true",
@@ -532,6 +580,35 @@ fn concat_over_a_jar_spliterator_is_counted() {
         "{:?}",
         host.unknown_host_calls()
     );
+}
+
+/// Counted, not answered: the sink a push hands a spliterator is a stage's
+/// own class in the JDK (JDK 25.0.5: ` => cce class
+/// java.util.stream.MatchOps$1MatchSink cannot be cast to class
+/// java.lang.Runnable (...),java.util.stream.MatchOps$1MatchSink`), which is
+/// not modelled: the failing cast (its message names the class) and
+/// `getClass()` are counted. Its declared type is exact (`sinkSwitch`).
+#[test]
+fn a_sinks_runtime_class_is_counted() {
+    let fixture =
+        javac_fixture::Fixture::build("stream-spliterators-sink", &[("demo/Probe.java", PROBE)]);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let answer = fixture.jar.invoke_method_with_args(
+        "demo/Probe",
+        "sinkClass",
+        "()Ljava/lang/String;",
+        None,
+        &[],
+        &mut host,
+    );
+    let _ = answer;
+    let unknown = host.unknown_host_calls();
+    for counted in ["#getClass()Ljava/lang/Class;", "java/lang/Runnable"] {
+        assert!(
+            unknown.iter().any(|(call, _)| call.contains(counted)),
+            "{counted} not counted: {unknown:?}"
+        );
+    }
 }
 
 /// A jar collection or iterable whose iterator is a host collection's: the
