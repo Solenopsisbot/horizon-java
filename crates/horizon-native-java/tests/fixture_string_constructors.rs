@@ -10,7 +10,13 @@
 //! `javac --release 17`) returns for it, the answer a future model must give.
 
 use horizon_native_java::{NativeJar, StdHost};
-use std::{fs, io::Write, path::PathBuf, process::Command};
+use std::{
+    fs,
+    io::Write,
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use zip::write::SimpleFileOptions;
 
 const SOURCE: &str = r#"
@@ -72,9 +78,13 @@ fn javac() -> PathBuf {
 }
 
 fn jar() -> NativeJar {
+    // Each test builds its own copy: the two tests run in parallel in one
+    // process, and a shared directory let one delete the other's classes.
+    static BUILDS: AtomicUsize = AtomicUsize::new(0);
     let root = std::env::temp_dir().join(format!(
-        "horizon-native-java-string-ctors-{}",
-        std::process::id()
+        "horizon-native-java-string-ctors-{}-{}",
+        std::process::id(),
+        BUILDS.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = fs::remove_dir_all(&root);
     let source = root.join("src/demo/Ctors.java");
