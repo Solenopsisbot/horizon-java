@@ -178,6 +178,18 @@ public final class Probe {
         return take(Stream.builder().build().count() + "," + Stream.builder().add(7).build().toList());
     }
 
+    public static String builderObject() {
+        Stream.Builder<String> a = Stream.builder();
+        Stream.Builder<String> b = Stream.builder();
+        Stream.Builder<String> c = a.add("x");
+        Object o = a;
+        String cast;
+        try { cast = String.valueOf((Runnable) o); } catch (ClassCastException e) { cast = e.getMessage(); }
+        return take((a == c) + "," + (a == b) + "," + a.equals(c) + "," + a.equals(b) + ","
+            + (o instanceof java.util.function.Consumer) + "," + (o instanceof java.util.Spliterator) + ","
+            + (o instanceof Stream.Builder) + "," + (o instanceof Runnable) + "," + a.getClass().getName() + "," + cast);
+    }
+
     public static String builderAsConsumer() {
         Stream.Builder<Object> b = Stream.builder();
         List.of("x", "y").forEach(b);
@@ -291,6 +303,13 @@ fn stream_builders_run_as_jdk_25_does() {
         ),
         ("builderEmptyAndOne", " => 0,[7]"),
         ("builderAsConsumer", " => 2"),
+        // The builder is a `HostKind::StreamBuilder` handle: `add` answers
+        // the same object, two builders are two, and its class and casts are
+        // `Streams$StreamBuilderImpl`'s.
+        (
+            "builderObject",
+            " => true,false,true,false,true,true,true,false,java.util.stream.Streams$StreamBuilderImpl,class java.util.stream.Streams$StreamBuilderImpl cannot be cast to class java.lang.Runnable (java.util.stream.Streams$StreamBuilderImpl and java.lang.Runnable are in module java.base of loader 'bootstrap')",
+        ),
     ]);
 }
 

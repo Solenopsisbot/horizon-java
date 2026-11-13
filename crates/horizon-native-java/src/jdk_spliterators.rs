@@ -36,10 +36,48 @@
 //! splits, and the JDK's batch sizes are not modelled.
 
 use super::*;
+use crate::host_ref::{HostKind, HostRef, Methods};
 use crate::jdk_call::{Site, throw};
 
-/// Prefix of a modelled JDK spliterator.
-pub(crate) const MODEL_PREFIX: &str = "jdk-spliterator/";
+/// A modelled spliterator is a `HostKind::Spliterator` handle keyed
+/// `iter:<n>` (`Spliterators.IteratorSpliterator`) or `ra:<n>`
+/// (`AbstractList.RandomAccessSpliterator`); the key carries the class.
+pub(crate) fn spliterator_class(key: &str) -> &str {
+    if key.starts_with("ra:") {
+        "java/util/AbstractList$RandomAccessSpliterator"
+    } else {
+        "java/util/Spliterators$IteratorSpliterator"
+    }
+}
+
+/// The modelled spliterators' `Object` members: identity `equals`, the
+/// identity hash in `toString`/`hashCode` (counted). Both classes implement
+/// `Spliterator` and nothing else (JDK 25.0.5's `javap`).
+pub(crate) const JDK_SPLITERATOR: Methods = Methods {
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    equals: |handle, other, _| {
+        Ok(match other {
+            Value::Host(other) => handle.same_object(other),
+            _ => Some(false),
+        })
+    },
+    instance_of: |handle, wanted, _| {
+        Some(
+            matches!(wanted, "java/lang/Object" | "java/util/Spliterator")
+                || wanted == handle.class(),
+        )
+    },
+    crosses_jars: |_, _| false,
+};
+
+/// The key of a modelled spliterator handle.
+fn split_key(value: &Value) -> Option<&str> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::Spliterator => Some(handle.key()),
+        _ => None,
+    }
+}
 
 /// `Spliterator`'s characteristic bits.
 pub(crate) const DISTINCT: i32 = 0x1;
@@ -126,10 +164,14 @@ impl<H: Host> Runtime<'_, H> {
     /// A new modelled spliterator.
     pub(crate) fn new_split(&mut self, split: Split) -> Value {
         let splits = &mut self.pipelines.splits;
-        let marker = format!("{MODEL_PREFIX}{}", splits.next);
+        let tag = match split {
+            Split::Iter { .. } => "iter",
+            Split::RandomAccess { .. } => "ra",
+        };
+        let key = format!("{tag}:{}", splits.next);
         splits.next += 1;
-        splits.models.insert(marker.clone(), split);
-        Value::Ref(Some(marker))
+        splits.models.insert(key.clone(), split);
+        Value::Host(HostRef::new(HostKind::Spliterator, key))
     }
 
     fn split(&self, marker: &str) -> Result<Split, NativeError> {
@@ -224,9 +266,9 @@ impl<H: Host> Runtime<'_, H> {
         let Some(this) = receiver else {
             return Ok(None);
         };
-        if let Some(marker) = expect_ref(this).filter(|marker| marker.starts_with(MODEL_PREFIX)) {
-            let marker = marker.clone();
-            return self.model_member(&marker, r, args);
+        if let Some(key) = split_key(this) {
+            let key = key.to_owned();
+            return self.model_member(&key, r, args);
         }
         let Some(object_class) = expect_ref(this)
             .and_then(|marker| jvm_dispatch::constructed_object_class(marker))
@@ -321,7 +363,7 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `spliterator.getExactSizeIfKnown()`.
     pub(crate) fn exact_size_if_known(&mut self, spliterator: &Value) -> Result<i64, NativeError> {
-        if expect_ref(spliterator).is_some_and(|marker| marker.starts_with(MODEL_PREFIX)) {
+        if split_key(spliterator).is_some() {
             let size = self.call_virtual(
                 Site::Interface,
                 SPLITERATOR,
@@ -543,7 +585,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// `checkAbstractListModCount`.
-    fn check_mod_count(&mut self, marker: &str) -> Result<(), NativeError> {
+    fn check_abstract_list_mod_count(&mut self, marker: &str) -> Result<(), NativeError> {
         if let Split::RandomAccess {
             list,
             mod_count: Some(expected),
@@ -606,7 +648,7 @@ impl<H: Host> Runtime<'_, H> {
                     action,
                     &[value],
                 )?;
-                self.check_mod_count(marker)?;
+                self.check_abstract_list_mod_count(marker)?;
                 Ok(true)
             }
         }
@@ -643,7 +685,7 @@ impl<H: Host> Runtime<'_, H> {
                         &[value],
                     )?;
                 }
-                self.check_mod_count(marker)
+                self.check_abstract_list_mod_count(marker)
             }
         }
     }

@@ -36,6 +36,7 @@ import java.util.RandomAccess;
 import java.util.Spliterator;
 import java.util.Spliterators;
 import java.util.function.Consumer;
+import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
@@ -350,6 +351,39 @@ public final class Probe {
         return take(first + "," + n + "," + all);
     }
 
+    /// A jar spliterator that keeps every action it is handed.
+    static final class Grab implements Spliterator<Object> {
+        final Object[] seen = new Object[3];
+        int n;
+        int left = 2;
+        @Override public boolean tryAdvance(Consumer<? super Object> action) {
+            seen[n++] = action;
+            if (left == 0) return false;
+            left--;
+            action.accept("x");
+            return true;
+        }
+        @Override public Spliterator<Object> trySplit() { return null; }
+        @Override public long estimateSize() { return Long.MAX_VALUE; }
+        @Override public int characteristics() { return 0; }
+    }
+
+    public static String handleObjects() {
+        Spliterator<Object> a = new Row("a").spliterator();
+        Spliterator<Object> b = Spliterators.spliteratorUnknownSize(new Walk("b").iterator(), 0);
+        Object ao = a;
+        String splits = a.getClass().getName() + "," + b.getClass().getName() + "," + (a == b) + ","
+            + a.equals(b) + "," + b.equals(b) + "," + (ao instanceof Spliterator) + "," + (ao instanceof RandomAccess);
+        Collector<Object, ?, List<Object>> col = Collector.of(ArrayList::new, List::add, (x, y) -> x);
+        Object co = col;
+        String coll = col.getClass().getName() + "," + (co instanceof Record) + "," + (co instanceof Collector) + "," + col.equals(col);
+        Grab g = new Grab();
+        boolean any = StreamSupport.stream(g, false).anyMatch(x -> false);
+        String sinks = g.n + "," + (g.seen[0] == g.seen[1]) + "," + (g.seen[1] == g.seen[2]) + ","
+            + (g.seen[0] instanceof Consumer) + "," + g.seen[0].equals(g.seen[2]);
+        return take(splits + "|" + coll + "|" + any + "," + sinks);
+    }
+
     public static String randomAccessMembers() {
         Spliterator<Object> sp = new Row("a", "b").spliterator();
         log("split");
@@ -464,6 +498,13 @@ fn jdk_spliterators_run_as_jdk_25_does() {
         (
             "randomAccessMembers",
             "split size get0 ta get1 fb => 16464,2,1",
+        ),
+        // The modelled spliterators, `Collector.of`'s collector and the push's
+        // sink are host handles (`HostKind::Spliterator`/`Collector`/
+        // `StreamSink`): their classes, identity and `instanceof`.
+        (
+            "handleObjects",
+            "iterator => java.util.AbstractList$RandomAccessSpliterator,java.util.Spliterators$IteratorSpliterator,false,false,true,true,false|java.util.stream.Collectors$CollectorImpl,true,true,true|false,3,true,true,true,true",
         ),
     ]);
 }
