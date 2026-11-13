@@ -56,13 +56,6 @@ pub(crate) const CONFIG_PLUGIN_CALL_BUDGET: std::time::Duration =
 /// Companion Mixins one `getMixins()` may add.
 const MAX_COMPANION_MIXINS: usize = 512;
 
-/// The `ClassNode` stand-in `preApply`/`postApply` receive. It names no jar
-/// class, so its first member access is an unmodelled host call that names
-/// the member.
-const CLASS_NODE_PREFIX: &str = "mixin-plugin/class-node/";
-/// The `IMixinInfo` stand-in `preApply`/`postApply` receive.
-const MIXIN_INFO_PREFIX: &str = "mixin-plugin/mixin-info/";
-
 /// What one config's plugin session did, for reports and logs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConfigPluginReport {
@@ -464,9 +457,9 @@ impl NativeJar {
         for (mixin, target) in kept {
             let args = [
                 java_text(Some(&binary_name(&target))),
-                Value::Ref(Some(format!("{CLASS_NODE_PREFIX}{target}"))),
+                crate::runtime::host_mixin::class_node(&target),
                 java_text(Some(&binary_name(&mixin))),
-                Value::Ref(Some(format!("{MIXIN_INFO_PREFIX}{mixin}"))),
+                crate::runtime::host_mixin::mixin_info(&mixin),
             ];
             let outcome = call(host, "preApply", apply, &args)
                 .and_then(|pre| {
@@ -501,14 +494,10 @@ impl NativeJar {
     }
 }
 
-/// Mixin's environment object, as `getCurrentEnvironment()` answers it.
-const MIXIN_ENVIRONMENT: &str = "mixin-environment";
-/// `MixinEnvironment.Side` constants, `mixin-side/<NAME>`.
-const MIXIN_SIDE_PREFIX: &str = "mixin-side/";
 const MIXIN_ENVIRONMENT_CLASS: &str = "org/spongepowered/asm/mixin/MixinEnvironment";
 const MIXIN_SIDE_CLASS: &str = "org/spongepowered/asm/mixin/MixinEnvironment$Side";
 /// `MixinEnvironment.Side`'s constants in declaration order (their ordinals).
-const MIXIN_SIDES: [&str; 3] = ["UNKNOWN", "CLIENT", "SERVER"];
+const MIXIN_SIDES: [&str; 3] = crate::runtime::host_mixin::SIDES;
 
 /// The Mixin platform a config plugin (or any jar code) reaches before the
 /// game: the questions it asks the loader's own Mixin, answered from the
@@ -519,7 +508,7 @@ impl StdHost {
     /// `MixinEnvironment.Side.UNKNOWN`/`CLIENT`/`SERVER`.
     pub(crate) fn mixin_platform_static(&self, r: &MethodRef) -> Option<Value> {
         (r.owner == MIXIN_SIDE_CLASS && MIXIN_SIDES.contains(&r.name.as_str()))
-            .then(|| Value::Ref(Some(format!("{MIXIN_SIDE_PREFIX}{}", r.name))))
+            .then(|| crate::runtime::host_mixin::side(&r.name))
     }
 
     /// Static calls: `MixinEnvironment.getCurrentEnvironment()` and
@@ -533,7 +522,7 @@ impl StdHost {
                 MIXIN_ENVIRONMENT_CLASS,
                 "getCurrentEnvironment" | "getDefaultEnvironment",
                 "()Lorg/spongepowered/asm/mixin/MixinEnvironment;",
-            ) => Some(Value::Ref(Some(MIXIN_ENVIRONMENT.into()))),
+            ) => Some(crate::runtime::host_mixin::environment()),
             ("com/llamalad7/mixinextras/MixinExtrasBootstrap", "init", "()V") => Some(Value::Void),
             _ => None,
         }
@@ -550,11 +539,10 @@ impl StdHost {
         r: &MethodRef,
         receiver: &Value,
     ) -> Option<Result<Value, NativeError>> {
-        let marker = expect_ref(receiver)?;
-        if marker.starts_with(CLASS_NODE_PREFIX) || marker.starts_with(MIXIN_INFO_PREFIX) {
+        if crate::runtime::host_mixin::is_apply_stand_in(receiver) {
             return Some(Err(NativeError::UnknownHostCall(r.clone())));
         }
-        if marker == MIXIN_ENVIRONMENT
+        if crate::runtime::host_mixin::is_environment(receiver)
             && r.name == "getSide"
             && r.descriptor == "()Lorg/spongepowered/asm/mixin/MixinEnvironment$Side;"
         {
@@ -563,14 +551,12 @@ impl StdHost {
             } else {
                 "CLIENT"
             };
-            return Some(Ok(Value::Ref(Some(format!("{MIXIN_SIDE_PREFIX}{side}")))));
+            return Some(Ok(crate::runtime::host_mixin::side(side)));
         }
-        let side = marker.strip_prefix(MIXIN_SIDE_PREFIX)?;
+        let side = crate::runtime::host_mixin::side_name(receiver)?;
         let ordinal = MIXIN_SIDES.iter().position(|name| *name == side)?;
         match (r.name.as_str(), r.descriptor.as_str()) {
-            ("name" | "toString", "()Ljava/lang/String;") => {
-                Some(Ok(Value::Ref(Some(side.into()))))
-            }
+            ("name" | "toString", "()Ljava/lang/String;") => Some(Ok(Value::Ref(Some(side)))),
             ("ordinal", "()I") => Some(Ok(Value::Int(ordinal as i32))),
             _ => None,
         }

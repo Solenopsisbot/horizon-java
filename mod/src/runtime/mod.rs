@@ -69,10 +69,12 @@ mod hash_table;
 mod heap;
 mod hook_shapes;
 mod host_array;
+mod host_config;
 mod host_entry;
 mod host_events;
 mod host_ids;
 mod host_list_iterator;
+mod host_mixin;
 mod host_optional;
 mod host_path;
 mod host_ref;
@@ -16774,7 +16776,9 @@ impl NativeJar {
                 .is_some_and(|arg| is_callback_info_descriptor(arg))
             && callback_args[..target_args.len()] == target_args[..]
         {
-            callback_values.push(Value::Ref(Some(callback_info_marker(&plan.target))));
+            callback_values.push(host_mixin::callback_info(&callback_info_marker(
+                &plan.target,
+            )));
         } else {
             return Err(NativeError::Metadata(format!(
                 "native Mixin callback {}#{}{} must mirror target arguments and may add one trailing CallbackInfo",
@@ -16982,10 +16986,14 @@ impl NativeJar {
             && callback_args.last().is_some_and(|arg| arg == info)
             && callback_args[..target_args.len()] == target_args[..]
         {
-            values.push(Value::Ref(Some(callback_info_marker(&entry.target))));
+            values.push(host_mixin::callback_info(&callback_info_marker(
+                &entry.target,
+            )));
         } else if callback_args.len() == 1 && callback_args[0] == info && !target_args.is_empty() {
             // Mixin's simple callback: the info alone, none of the arguments.
-            values = vec![Value::Ref(Some(callback_info_marker(&entry.target)))];
+            values = vec![host_mixin::callback_info(&callback_info_marker(
+                &entry.target,
+            ))];
         } else if callback_args != target_args {
             return Err(NativeError::Metadata(format!(
                 "native game hook callback {}#{}{} must mirror {}'s arguments and may add one trailing CallbackInfo or CallbackInfoReturnable",
@@ -17212,7 +17220,9 @@ impl NativeJar {
                     .is_some_and(|arg| is_callback_info_descriptor(arg))
                 && callback_args[..target_args.len()] == target_args[..]
             {
-                callback_values.push(Value::Ref(Some(callback_info_marker(&plan.target))));
+                callback_values.push(host_mixin::callback_info(&callback_info_marker(
+                    &plan.target,
+                )));
             } else {
                 return Err(NativeError::Metadata(format!(
                     "native Mixin callback {}#{}{} must mirror target arguments and may add one trailing CallbackInfo",
@@ -17370,7 +17380,9 @@ impl NativeJar {
                     .is_some_and(|arg| is_callback_info_descriptor(arg))
                 && callback_args[..target_args.len()] == target_args[..]
             {
-                callback_values.push(Value::Ref(Some(callback_info_marker(&plan.target))));
+                callback_values.push(host_mixin::callback_info(&callback_info_marker(
+                    &plan.target,
+                )));
             } else {
                 return Err(NativeError::Metadata(format!(
                     "native Mixin callback {}#{}{} must mirror target arguments and may add one trailing CallbackInfo",
@@ -19224,14 +19236,13 @@ impl<H: Host> Runtime<'_, H> {
         if !is_callback_info_class(&r.owner) {
             return Ok(None);
         }
-        let owned = callback_info_receiver(receiver)?;
-        if !is_interpreter_callback_info(owned) {
+        let Some(owned) = receiver.and_then(host_mixin::callback_info_key_of) else {
             // A woven class constructs the synthetic `CallbackInfo` itself, so
             // its own `cancelled` field is authoritative and the call runs
             // against the class.  Nothing here is table state, which is also
             // why a hot woven target does not spend the injection-point bound.
             return Ok(None);
-        }
+        };
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("cancel", "()V") => {
                 self.callback_infos.cancel(owned)?;
@@ -19634,7 +19645,7 @@ impl<H: Host> Runtime<'_, H> {
                     .is_some_and(|arg| is_callback_info_descriptor(arg))
                 && callback_args[..base_descriptors.len()] == base_descriptors[..]
             {
-                values.push(Value::Ref(Some(marker.to_owned())));
+                values.push(host_mixin::callback_info(marker));
             } else {
                 return Err(NativeError::Metadata(format!(
                     "native Mixin anchor callback {}#{}{} must mirror the anchored operation's arguments and may add one trailing CallbackInfo",
@@ -26236,33 +26247,15 @@ fn is_callback_info_class(owner: &str) -> bool {
 /// Mixin creates one of these per injection point, so every callback on a
 /// target shares this identity: a `cancel()` in an earlier callback is visible
 /// to a later one and stops the target body.
-fn callback_info_marker(target: &MethodRef) -> String {
-    format!("mixin/callback-info/{}#{}", target.owner, target.name)
-}
-
-/// The marker prefix of the `CallbackInfo` objects the interpreter opens per
-/// injection point.
 ///
-/// A marker with this prefix is table state the interpreter owns; any other
-/// `CallbackInfo` receiver was constructed by woven bytecode, whose synthetic
-/// class keeps the `cancelled` field itself.
-const INTERPRETER_CALLBACK_INFO_PREFIX: &str = "mixin/callback-info/";
-
-fn is_interpreter_callback_info(marker: &str) -> bool {
-    marker.starts_with(INTERPRETER_CALLBACK_INFO_PREFIX)
-}
-
-/// The marker a `CallbackInfo` call acts on: the receiver value the plan passed
-/// as its trailing argument.
-fn callback_info_receiver(receiver: Option<&Value>) -> Result<&str, NativeError> {
-    receiver
-        .and_then(expect_ref)
-        .map(String::as_str)
-        .ok_or_else(|| {
-            NativeError::Metadata(
-                "native Mixin CallbackInfo call has no runtime-owned marker receiver".into(),
-            )
-        })
+/// The key is the handle key of that object (`host_mixin.rs`): Mixin makes a
+/// `CallbackInfoReturnable` for a target with a result.
+fn callback_info_marker(target: &MethodRef) -> String {
+    let returns = target
+        .descriptor
+        .rsplit_once(')')
+        .is_some_and(|(_, result)| result != "V");
+    host_mixin::callback_info_key(&target.owner, &target.name, returns)
 }
 
 fn neutral_args(desc: &str) -> Vec<Value> {
