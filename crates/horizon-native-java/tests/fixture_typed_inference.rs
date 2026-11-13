@@ -244,6 +244,18 @@ fn construct(
     .unwrap()
 }
 
+/// The `Identifier` `Identifier.parse(text)` answers (a host handle).
+fn parsed_id(text: &str) -> Value {
+    let parse = MethodRef {
+        owner: "net/minecraft/resources/Identifier".into(),
+        name: "parse".into(),
+        descriptor: "(Ljava/lang/String;)Lnet/minecraft/resources/Identifier;".into(),
+    };
+    StdHost::new()
+        .invoke(&parse, &[Value::Ref(Some(text.into()))])
+        .unwrap()
+}
+
 #[test]
 fn fabric_fixture_infers_typed_item_and_block_declarations() {
     let (root, jar_path) = build_jar(
@@ -372,7 +384,7 @@ fn explicit_declaration_replaces_an_inferred_one() {
         &register,
         &[
             Value::Ref(Some("registry/minecraft:item".into())),
-            Value::Ref(Some("identifier/ruby:wand".into())),
+            parsed_id("ruby:wand"),
             Value::Ref(Some("net/minecraft/world/item/Item#0".into())),
         ],
     )
@@ -401,7 +413,7 @@ fn explicit_declaration_replaces_an_inferred_one() {
         &register,
         &[
             Value::Ref(Some("registry/minecraft:item".into())),
-            Value::Ref(Some("identifier/ruby:plain".into())),
+            parsed_id("ruby:plain"),
             Value::Ref(Some("@indy:plain-item".into())),
         ],
     )
@@ -438,7 +450,7 @@ fn inference_records_a_plain_item_with_no_properties() {
         },
         &[
             Value::Ref(Some("registry/minecraft:item".into())),
-            Value::Ref(Some("identifier/ruby:plain".into())),
+            parsed_id("ruby:plain"),
             Value::Ref(Some("net/minecraft/world/item/Item#0".into())),
         ],
     )

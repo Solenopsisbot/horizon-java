@@ -285,8 +285,6 @@ const APPEND_SAFE: &[&str] = &[
 pub(crate) struct Pipelines {
     links: BTreeMap<String, Link>,
     concats: BTreeMap<String, (String, String)>,
-    /// Value-list sources whose JDK spliterator is not `SIZED`.
-    not_sized: BTreeSet<String>,
     /// Sources whose pipeline was made parallel (`sourceStage.parallel`).
     parallel: BTreeSet<String>,
     /// `Stream.Builder`s: their elements, `None` once built.
@@ -644,12 +642,27 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         }
     }
 
-    /// Mark a value-list source whose JDK spliterator is not `SIZED`, so
-    /// `count()` traverses it (`Files.list`, `ServiceLoader.stream`).
-    pub(crate) fn mark_unsized_stream(&mut self, stream: &Value) {
-        if let Some(marker) = expect_ref(stream) {
-            self.pipelines.not_sized.insert(marker.clone());
-        }
+    /// Whether `collection.stream()`'s spliterator reports SIZED: a JDK
+    /// collection's does, a concurrent one's does not, except the
+    /// copy-on-write ones (`Spliterators.spliterator(array, ...)`). A map
+    /// view copy is its map's (`ConcurrentHashMap.keySet()` is not SIZED).
+    pub(crate) fn collection_stream_sized(&self, collection: &Value) -> bool {
+        let Some(marker) = expect_ref(collection) else {
+            return false;
+        };
+        let source = self
+            .host
+            .view_copy_source(marker)
+            .unwrap_or_else(|| marker.clone());
+        let class = source
+            .split_once('#')
+            .map_or(source.as_str(), |(class, _)| class);
+        !class.starts_with("java/util/concurrent/")
+            || matches!(
+                class,
+                "java/util/concurrent/CopyOnWriteArrayList"
+                    | "java/util/concurrent/CopyOnWriteArraySet"
+            )
     }
 
     /// The source a stream's links lead back to, and the stages from the
@@ -690,8 +703,11 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     fn known_size(&self, stream: &str) -> Option<i64> {
         let (source, stages) = self.chain(stream).ok()?;
         let mut size = match source {
+            // A source is SIZED only where its JDK spliterator reports it
+            // (`Runtime::mark_sized`): a collection that is not concurrent,
+            // an array, `Stream.of`, a range, a builder.
             Source::Values(marker) => {
-                if self.pipelines.not_sized.contains(&marker) {
+                if !self.stream_is_sized(&marker) {
                     return None;
                 }
                 self.streams.get(&marker)?.len() as i64
@@ -1682,11 +1698,10 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                     .get_mut(&marker)
                     .and_then(Option::take)
                     .ok_or_else(|| illegal_state(None))?;
-                Ok(Some(self.new_stream(
-                    "java/util/stream/Stream",
-                    "build",
-                    values,
-                )))
+                // `StreamBuilderImpl`'s spliterator is SIZED.
+                let stream = self.new_stream("java/util/stream/Stream", "build", values);
+                self.mark_sized(&stream);
+                Ok(Some(stream))
             }
             _ => Ok(None),
         }

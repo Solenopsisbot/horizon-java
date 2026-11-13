@@ -40,8 +40,9 @@ impl<H: Host> Runtime<'_, H> {
             .iter()
             .map(|descriptor| self.reflected_constructor(&class, Some(descriptor)))
             .collect();
-        let marker = self.new_array("java/lang/reflect/Constructor", &r.name);
-        self.arrays.insert(marker.clone(), constructors);
-        Ok(Some(Value::Ref(Some(marker))))
+        Ok(Some(self.new_array_value(
+            "[Ljava/lang/reflect/Constructor;",
+            constructors,
+        )))
     }
 }

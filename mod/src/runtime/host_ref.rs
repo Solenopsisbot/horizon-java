@@ -193,6 +193,27 @@ pub enum HostKind {
     /// An event a host caller dispatches or posts: key its cancelled flag and
     /// name.
     PostedEvent,
+    /// `net.minecraft.resources.Identifier`: key `namespace:path` (`host_ids.rs`).
+    Identifier,
+    /// `net.minecraft.resources.ResourceKey`: key `registry|location`, or
+    /// `?…` when the host cannot name them (`host_ids.rs`).
+    ResourceKey,
+    /// `net.minecraft.tags.TagKey`: key `registry|location`, or `?…`.
+    TagKey,
+    /// `net.minecraft.references.BlockItemId`: key the block and item ids'
+    /// [`HostRef::of_values`].
+    BlockItemId,
+    /// A Java array: key `<array class>#<n>`, its elements in the runtime's
+    /// `arrays` table (`host_array.rs`).
+    Array,
+    /// Vanilla's `ColorCollection` record, its sixteen values in the
+    /// runtime's `arrays` table: key `color-collection#<n>`
+    /// (`color_collection.rs`).
+    ColorCollection,
+    /// The empty array the runtime answers for an unmodelled call whose
+    /// declared result is an array: key `<declared class>#empty`
+    /// (`host_array.rs`). Its runtime class is unknown.
+    UnknownArray,
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
@@ -204,7 +225,7 @@ pub(crate) enum ClassRule {
     /// Every object of the kind is this class.
     Fixed(&'static str),
     /// A family whose objects are of many classes (jar objects, collections,
-    /// game objects), or a class other values than handles may also be
+    /// game objects, arrays), or a class other values than handles may also be
     /// (`CompletableFuture`): the class is read from the key.
     FromKey(fn(&str) -> &str),
     /// The object's runtime class is not known (a jar's lambda, a proxy, a
@@ -545,6 +566,62 @@ const KINDS: &[KindInfo] = &[
         },
         canonical: never_canonical,
         methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Identifier,
+        tag: "id",
+        class: ClassRule::Fixed(crate::runtime::host_ids::IDENTIFIER),
+        // Not interned: two `Identifier.parse("a:x")` are two objects.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_ids::IDENTIFIER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ResourceKey,
+        tag: "rk",
+        class: ClassRule::Fixed(crate::runtime::host_ids::RESOURCE_KEY),
+        // Interned by `ResourceKey.create` (`host_ids.rs`).
+        canonical: always_canonical,
+        methods: &crate::runtime::host_ids::RESOURCE_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::TagKey,
+        tag: "tk",
+        class: ClassRule::Fixed(crate::runtime::host_ids::TAG_KEY),
+        // Interned by `TagKey.create`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_ids::TAG_KEY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::BlockItemId,
+        tag: "bii",
+        class: ClassRule::Fixed(crate::runtime::host_ids::BLOCK_ITEM_ID),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_ids::BLOCK_ITEM_ID_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Array,
+        tag: "arr",
+        class: ClassRule::FromKey(crate::runtime::host_array::class_of_key),
+        canonical: crate::runtime::host_array::canonical,
+        methods: &crate::runtime::host_array::ARRAY,
+    },
+    KindInfo {
+        kind: HostKind::ColorCollection,
+        tag: "colors",
+        class: ClassRule::Fixed(crate::runtime::color_collection::OWNER),
+        // One key per collection the runtime built.
+        canonical: always_canonical,
+        methods: &crate::runtime::color_collection::COLOR_COLLECTION,
+    },
+    KindInfo {
+        kind: HostKind::UnknownArray,
+        tag: "arru",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_array::surely,
+        },
+        // One key stands for every array such a call returned.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_array::ARRAY,
     },
     KindInfo {
         kind: HostKind::StreamBuilder,

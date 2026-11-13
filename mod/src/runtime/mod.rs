@@ -19,6 +19,7 @@ use std::{
 mod annotation_values;
 mod array_copy;
 mod array_deque;
+mod array_store;
 mod attachment_codec;
 mod block_item_id;
 mod boxed;
@@ -67,8 +68,10 @@ mod hash_map_order;
 mod hash_table;
 mod heap;
 mod hook_shapes;
+mod host_array;
 mod host_entry;
 mod host_events;
+mod host_ids;
 mod host_list_iterator;
 mod host_optional;
 mod host_path;
@@ -2619,6 +2622,9 @@ pub struct NullHost;
 impl Host for NullHost {}
 
 /// The `Item.Properties` builder mods chain before `new Item(properties)`.
+/// `java.lang.reflect.Type[]`, the class of the generic reflection arrays.
+const TYPE_ARRAY: &str = "[Ljava/lang/reflect/Type;";
+
 const ITEM_PROPERTIES_CLASS: &str = "net/minecraft/world/item/Item$Properties";
 /// The `BlockBehaviour.Properties` builder mods chain before `new Block`.
 const BLOCK_PROPERTIES_CLASS: &str =
@@ -2789,6 +2795,13 @@ pub struct StdHost {
     /// constructors were public before 1.21), by the object's `class#n`
     /// marker. A constructor answers `void`, so this is where the id lives.
     identifier_objects: BTreeMap<String, String>,
+    /// What each `DeferredRegister.create` was made from (registry key,
+    /// namespace), by the register's marker; `None` when two registers share
+    /// the marker or the namespace was not text (`host_ids.rs`).
+    deferred_registers: BTreeMap<String, Option<(Value, String)>>,
+    /// The registry key and validated id each `DeferredRegister.register`
+    /// holder names, by the holder's text; `None` when two share the text.
+    holder_ids: BTreeMap<String, Option<(Value, String)>>,
     /// The id each `new LevelResource(id)` a jar built carries
     /// (`facade_server.rs`), by the object's marker.
     level_resources: BTreeMap<String, String>,
@@ -2966,6 +2979,8 @@ impl StdHost {
             fabric_entrypoint_containers: Vec::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
+            deferred_registers: BTreeMap::new(),
+            holder_ids: BTreeMap::new(),
             level_resources: BTreeMap::new(),
             saved_data: facade_saved_data::SavedDataState::default(),
             neoforge_attachments: neoforge_attachments::AttachmentState::default(),
@@ -3076,7 +3091,7 @@ impl StdHost {
             return self.empty_collection(kind);
         }
         if result_descriptor(descriptor).starts_with('[') {
-            return Value::Ref(Some("array/empty".into()));
+            return host_array::shared_empty(result_descriptor(descriptor));
         }
         // Codecs are immutable values the game builds from other codecs
         // (`StreamCodec.composite(ByteBufCodecs.INT, ...)`,
@@ -3853,7 +3868,7 @@ impl StdHost {
     ///
     /// The registry arrives as a `registry/<id>` marker (either the receiver
     /// of the instance form or an argument of the interface's static form) and
-    /// the entry as an `identifier/<ns>:<path>` marker. Without both markers
+    /// the entry as an `Identifier` (or a `ResourceKey`). Without both
     /// the call stays invocation-only: the host never invents ids.
     /// A Fabric receiver registration: record the channel and its handler so
     /// a received frame can be dispatched to the same method.
@@ -3988,20 +4003,16 @@ impl StdHost {
                 Value::Ref(Some(marker)) => marker.strip_prefix("registry/"),
                 _ => None,
             })?;
-        let id = args.iter().find_map(|value| match value {
-            Value::Ref(Some(marker)) if marker.starts_with("identifier/") => {
-                let (namespace, path) = identifier_parts(value);
-                Some(format!("{namespace}:{path}"))
+        let id = args.iter().find_map(|value| {
+            if let Some(id) = host_ids::identifier_key(value) {
+                let (namespace, path) = id.split_once(':')?;
+                return Some(format!("{namespace}:{path}"));
             }
             // `Registry.register(registry, ResourceKey, value)` names the entry
             // through the key rather than a bare identifier. Without reading
             // the id out of the key the host answers null and the caller's
-            // static field ends up null.
-            Value::Ref(Some(marker)) if marker.starts_with("resource-key/") => {
-                resource_key_identifier(value)
-                    .map(|(namespace, path)| format!("{namespace}:{path}"))
-            }
-            _ => None,
+            // static field ends up null. An unnamed key names no id.
+            resource_key_identifier(value).map(|(namespace, path)| format!("{namespace}:{path}"))
         })?;
         let value = args.last().cloned().unwrap_or(Value::Void);
         let key = format!("{registry}/{id}");
@@ -4009,7 +4020,7 @@ impl StdHost {
         // metadata is the explicit adapter for that row, so inference must not
         // compete with it.
         //
-        // An id the host could not name (an `identifier/` marker with an empty
+        // An id the host could not name (an `Identifier` with an empty
         // namespace or path, e.g. an opaque key read back as `minecraft:`) also
         // stays opaque. The registration is still recorded and answered, but a
         // typed row under that id is one the content root must refuse, and it
@@ -4971,17 +4982,42 @@ impl Host for StdHost {
                 "create",
                 descriptor,
             ) if descriptor.ends_with(&format!("L{owner};")) => {
-                let registry = args
-                    .first()
-                    .and_then(expect_ref)
-                    .map_or("registry", String::as_str);
+                // The registry's key (`Registries.X`, `registry/<id>` text), or
+                // its id as an `Identifier`/`ResourceKey` handle.
+                let named = args.first().and_then(|registry| {
+                    host_ids::identifier_key(registry)
+                        .map(str::to_owned)
+                        .or_else(|| host_ids::resource_key_parts(registry).map(|(_, id)| id))
+                });
+                let named = named.map(|id| format!("registry/{id}"));
+                let registry = named.as_deref().unwrap_or_else(|| {
+                    args.first()
+                        .and_then(expect_ref)
+                        .map_or("registry", String::as_str)
+                });
                 let namespace = args
                     .get(1)
                     .and_then(expect_ref)
                     .map_or("default", String::as_str);
-                Ok(Value::Ref(Some(format!(
-                    "deferred-register/{registry}/{namespace}"
-                ))))
+                let marker = format!("deferred-register/{registry}/{namespace}");
+                // `create(Identifier, ns)` is `createRegistryKey(id)`, the
+                // key `Registries.X` is.
+                let registry_key = match args.first() {
+                    Some(id) if host_ids::identifier_key(id).is_some() => {
+                        Value::Ref(Some(format!(
+                            "registry/{}",
+                            host_ids::identifier_key(id).unwrap_or_default()
+                        )))
+                    }
+                    Some(key) => key.clone(),
+                    None => Value::Ref(None),
+                };
+                self.record_deferred_register(
+                    &marker,
+                    &registry_key,
+                    args.get(1).and_then(expect_ref),
+                );
+                Ok(Value::Ref(Some(marker)))
             }
             ("net/fabricmc/fabric/api/event/EventFactory", "createArrayBacked", descriptor)
                 if descriptor.ends_with("Lnet/fabricmc/fabric/api/event/Event;") =>
@@ -5728,26 +5764,25 @@ impl Host for StdHost {
                 "isDirectory" | "isRegularFile" | "isSymbolicLink" | "isExecutable",
                 descriptor,
             ) if descriptor.starts_with("(Ljava/nio/file/Path;") => Ok(Value::Int(0)),
+            // `ResourceKey.create(registryKey, id)` interns the key of
+            // `registryKey.identifier()` and `id` (`host_ids.rs`).
             ("net/minecraft/resources/ResourceKey", "create", descriptor)
                 if descriptor.ends_with("Lnet/minecraft/resources/ResourceKey;") =>
             {
-                Ok(Value::Ref(Some(format!(
-                    "resource-key/{}/{}",
-                    args.first()
-                        .map(value_marker)
-                        .unwrap_or_else(|| "null".into()),
-                    args.get(1)
-                        .map(value_marker)
-                        .unwrap_or_else(|| "null".into())
-                ))))
+                let null = Value::Ref(None);
+                let (registry, location) =
+                    (args.first().unwrap_or(&null), args.get(1).unwrap_or(&null));
+                let id = java_identifier::id_text(self, location);
+                Ok(host_ids::resource_key(registry, location, id))
             }
             ("net/minecraft/tags/TagKey", "create", descriptor)
                 if descriptor.ends_with("Lnet/minecraft/tags/TagKey;") =>
             {
-                Ok(tag_key_value(
-                    args.first().map(expect_string).unwrap_or_default(),
-                    args.get(1).map(expect_string).unwrap_or_default(),
-                ))
+                let null = Value::Ref(None);
+                let (registry, location) =
+                    (args.first().unwrap_or(&null), args.get(1).unwrap_or(&null));
+                let id = java_identifier::id_text(self, location);
+                Ok(host_ids::tag_key(registry, location, id))
             }
             // `URI.create`/`URI.parse` keep the text in the marker: a mod's
             // null-check on the result must not see null just because the
@@ -6210,7 +6245,7 @@ impl Host for StdHost {
                 // thread's frames. The bounded runtime has no Java stack to
                 // hand out, so the truthful answer is an empty owned array.
                 ("getStackTrace", "()[Ljava/lang/StackTraceElement;") => {
-                    Ok(Value::Ref(Some("array/empty".into())))
+                    Ok(host_array::shared_empty("[Ljava/lang/StackTraceElement;"))
                 }
                 ("getContextClassLoader", "()Ljava/lang/ClassLoader;") => {
                     Ok(Value::Ref(Some("classloader/bootstrap".into())))
@@ -8800,64 +8835,78 @@ impl Host for StdHost {
                 self.iterators.insert(marker.clone(), (values, 0));
                 Ok(Value::Ref(Some(marker)))
             }
-            (
-                "net/minecraft/resources/ResourceKey",
-                "identifier" | "location",
-                "()Lnet/minecraft/resources/Identifier;"
-                | "()Lnet/minecraft/resources/ResourceLocation;",
-            ) if expect_string(receiver).starts_with("registry/") => {
+            // A `registry/<id>` value is also its registry key (`Registries.X`,
+            // `ResourceKey[minecraft:root / <id>]`) until the registry family
+            // moves to handles (#156 P4's second half).
+            ("net/minecraft/resources/ResourceKey", name, descriptor)
+                if expect_string(receiver).starts_with("registry/") =>
+            {
                 let id = expect_string(receiver).trim_start_matches("registry/");
-                let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-                Ok(identifier_value(namespace, path))
-            }
-            ("net/minecraft/resources/ResourceKey", name, descriptor) => {
-                let marker = expect_string(receiver);
-                // A key `ResourceKey.create(registry, id)` built names `id`;
-                // any other marker keeps the opaque answer it had.
-                let identifier = resource_key_identifier(receiver).map_or_else(
-                    || identifier_value("minecraft", marker),
-                    |(namespace, path)| identifier_value(namespace, path),
-                );
                 match (name, descriptor) {
                     (
                         "identifier" | "location",
                         "()Lnet/minecraft/resources/Identifier;"
                         | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(identifier),
+                    ) => Ok(host_ids::identifier_of_text(id)),
                     (
                         "registry",
                         "()Lnet/minecraft/resources/Identifier;"
                         | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(identifier_value("minecraft", marker)),
-                    ("hashCode", "()I") => Ok(Value::Int(stable_hash(marker))),
-                    _ => Ok(Value::default_for(&r.descriptor)),
+                    ) => Ok(identifier_value("minecraft", "root")),
+                    ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(format!(
+                        "ResourceKey[minecraft:root / {id}]"
+                    )))),
+                    _ => self.unknown_host_call(r),
                 }
             }
-            ("net/minecraft/tags/TagKey", name, descriptor) => {
-                let (registry, location) = tag_key_parts(receiver);
-                match (name, descriptor) {
-                    ("registry", "()Lnet/minecraft/resources/ResourceKey;") => {
-                        Ok(Value::Ref(Some(registry.to_owned())))
-                    }
+            // A `ResourceKey` or `TagKey` handle (`host_ids.rs`); `toString`/
+            // `equals`/`hashCode` are its kind's row. An unnamed key answers
+            // what the arguments it was made from tell, and counts the rest.
+            (
+                owner @ ("net/minecraft/resources/ResourceKey" | "net/minecraft/tags/TagKey"),
+                name,
+                descriptor,
+            ) if host_ids::is_resource_key(receiver) || host_ids::is_tag_key(receiver) => {
+                let tag = owner == "net/minecraft/tags/TagKey";
+                let answer = match (name, descriptor) {
                     (
-                        "location",
+                        "identifier" | "location",
                         "()Lnet/minecraft/resources/Identifier;"
                         | "()Lnet/minecraft/resources/ResourceLocation;",
-                    ) => Ok(Value::Ref(Some(location.to_owned()))),
-                    ("isFor", "(Lnet/minecraft/resources/ResourceKey;)Z") => Ok(Value::Int(
-                        (registry == expect_string(Self::argument(r, args, 0)?)) as i32,
-                    )),
-                    ("hashCode", "()I") => {
-                        Ok(Value::Int(stable_hash(&format!("{registry}|{location}"))))
+                    ) => host_ids::key_location(receiver),
+                    // `ResourceKey.registry()`: the registry's id.
+                    (
+                        "registry",
+                        "()Lnet/minecraft/resources/Identifier;"
+                        | "()Lnet/minecraft/resources/ResourceLocation;",
+                    ) if !tag => host_ids::resource_key_parts(receiver)
+                        .map(|(registry, _)| host_ids::identifier_of_text(&registry)),
+                    // `TagKey.registry()`/`ResourceKey.registryKey()`: the
+                    // registry key (`Registries.X`).
+                    ("registry", "()Lnet/minecraft/resources/ResourceKey;") if tag => {
+                        host_ids::key_registry(receiver)
                     }
-                    ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(
-                        (expect_string(Self::argument(r, args, 0)?) == expect_string(receiver))
-                            as i32,
-                    )),
-                    ("toString", "()Ljava/lang/String;") => {
-                        Ok(Value::Ref(Some(format!("TagKey[{registry} / {location}]"))))
+                    ("registryKey", "()Lnet/minecraft/resources/ResourceKey;") if !tag => {
+                        host_ids::key_registry(receiver)
                     }
-                    _ => Ok(Value::default_for(&r.descriptor)),
+                    ("isFor", "(Lnet/minecraft/resources/ResourceKey;)Z") => {
+                        host_ids::key_is_for(receiver, Self::argument(r, args, 0)?)
+                            .map(|is_for| Value::Int(i32::from(is_for)))
+                    }
+                    ("cast", descriptor) if descriptor.ends_with(")Ljava/util/Optional;") => {
+                        host_ids::key_is_for(receiver, Self::argument(r, args, 0)?).map(|is_for| {
+                            if is_for {
+                                optional_wrap(receiver.clone())
+                            } else {
+                                empty_optional()
+                            }
+                        })
+                    }
+                    _ => None,
+                };
+                match answer {
+                    Some(answer) => Ok(answer),
+                    None => self.unknown_host_call(r),
                 }
             }
             ("net/fabricmc/loader/api/FabricLoader", "isModLoaded", "(Ljava/lang/String;)Z") => {
@@ -9182,12 +9231,16 @@ impl Host for StdHost {
                     .first()
                     .and_then(expect_ref)
                     .map_or("entry", String::as_str);
-                let key = format!(
-                    "{}/{}",
-                    expect_ref(receiver)
-                        .map_or("deferred-register/registry/default", String::as_str,),
-                    id
-                );
+                let register = expect_ref(receiver)
+                    .map_or("deferred-register/registry/default", String::as_str);
+                // `Identifier.fromNamespaceAndPath(namespace, name)` (Forge:
+                // `new ResourceLocation(modid, name)`): bad text throws here.
+                let forge = r.owner.starts_with("net/minecraftforge/");
+                let made = self.deferred_register_id(forge, register, id)?;
+                let key = format!("{register}/{id}");
+                if let Some((registry_key, entry_id)) = made {
+                    self.record_holder_id(&key, registry_key, &entry_id);
+                }
                 let value = Value::Ref(Some(format!("registered/{key}")));
                 self.registrations.push(RegistryEntry {
                     registry: expect_ref(receiver)
@@ -9246,19 +9299,13 @@ impl Host for StdHost {
                 "net/neoforged/neoforge/registries/DeferredHolder",
                 "getKey",
                 "()Lnet/minecraft/resources/ResourceKey;",
-            ) => Ok(Value::Ref(Some(format!(
-                "resource-key/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_key(r, receiver, "holder/"),
             (
                 "net/neoforged/neoforge/registries/DeferredHolder",
                 "getId",
                 "()Lnet/minecraft/resources/Identifier;"
                 | "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => Ok(Value::Ref(Some(format!(
-                "identifier/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_id(r, receiver, "holder/"),
             ("net/neoforged/neoforge/registries/DeferredHolder", "isPresent", "()Z") => {
                 Ok(Value::Int(1))
             }
@@ -9294,18 +9341,12 @@ impl Host for StdHost {
                 "net/minecraftforge/registries/RegistryObject",
                 "getRegistryName",
                 "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => Ok(Value::Ref(Some(format!(
-                "identifier/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_id(r, receiver, "holder/"),
             (
                 "net/minecraftforge/registries/RegistryObject",
                 "getKey",
                 "()Lnet/minecraft/resources/ResourceKey;",
-            ) => Ok(Value::Ref(Some(format!(
-                "resource-key/{}",
-                expect_ref(receiver).map_or("holder/", String::as_str)
-            )))),
+            ) => self.holder_key(r, receiver, "holder/"),
             (
                 "net/minecraftforge/registries/RegistryObject",
                 "getOptional",
@@ -9320,10 +9361,7 @@ impl Host for StdHost {
                 "net/minecraftforge/registries/IForgeRegistryEntry",
                 "getRegistryName",
                 "()Lnet/minecraft/resources/ResourceLocation;",
-            ) => Ok(Value::Ref(Some(format!(
-                "identifier/{}",
-                expect_ref(receiver).map_or("registered/", String::as_str)
-            )))),
+            ) => self.holder_id(r, receiver, "registered/"),
             (
                 "net/minecraftforge/registries/IForgeRegistryEntry",
                 "setRegistryName",
@@ -9348,12 +9386,7 @@ impl Host for StdHost {
             )),
             ("net/minecraft/core/Holder", "unwrapKey", "()Ljava/util/Optional;")
             | ("net/minecraft/core/Holder$Reference", "unwrapKey", "()Ljava/util/Optional;") => {
-                let key = expect_ref(receiver)
-                    .and_then(|value| value.strip_prefix("holder/"))
-                    .unwrap_or("deferred-register/registry/default/entry");
-                Ok(optional_wrap(Value::Ref(Some(format!(
-                    "resource-key/{key}"
-                )))))
+                self.holder_key(r, receiver, "holder/").map(optional_wrap)
             }
             (
                 "net/neoforged/neoforge/registries/DeferredRegister"
@@ -9366,10 +9399,15 @@ impl Host for StdHost {
                 "register",
                 "(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/Identifier;Ljava/util/function/Supplier;)V",
             ) if args.len() >= 3 => {
-                let registry = expect_ref(Self::argument(r, args, 0)?)
-                    .map(|value| value.strip_prefix("resource-key/").unwrap_or(value))
-                    .unwrap_or("minecraft:unknown")
-                    .to_owned();
+                // `Registries.X` (`registry/<id>` text), or a registry key
+                // handle naming the registry.
+                let registry_key = Self::argument(r, args, 0)?;
+                let registry = match host_ids::resource_key_parts(registry_key) {
+                    Some((_, location)) => location,
+                    None => expect_ref(registry_key)
+                        .map_or("minecraft:unknown", String::as_str)
+                        .to_owned(),
+                };
                 let (namespace, path) = identifier_parts(Self::argument(r, args, 1)?);
                 self.registrations.push(RegistryEntry {
                     registry,
@@ -9618,27 +9656,35 @@ fn class_of_value(value: &Value) -> Option<String> {
         Value::Host(host) => host.class().map(Into::into),
         Value::Void => None,
         Value::Ref(None) => None,
-        Value::Ref(Some(marker)) => {
-            if let Some((class, _)) = marker.split_once('#') {
-                return Some(class.to_owned());
-            }
-            let class = if marker.starts_with("string-builder/") {
-                "java/lang/StringBuilder"
-            } else if marker.starts_with("stream/") {
-                "java/util/stream/Stream"
-            } else if marker == "list" || marker.starts_with("list/") {
-                "java/util/ArrayList"
-            } else if marker == "set" || marker.starts_with("set/") {
-                "java/util/LinkedHashSet"
-            } else if marker == "map" || marker.starts_with("map/") {
-                "java/util/LinkedHashMap"
-            } else {
-                let rest = marker.strip_prefix("enum/")?;
-                return rest.rsplit_once('/').map(|(class, _)| class.to_owned());
-            };
-            Some(class.to_owned())
-        }
+        Value::Ref(Some(marker)) => class_of_text(marker),
     }
+}
+
+/// [`class_of_value`] of a reference's text, without building a `Value` (it
+/// runs inside `is_plain_string`, on every array store of a string).
+fn class_of_text(marker: &str) -> Option<String> {
+    if let Some((class, _)) = marker.split_once('#') {
+        // A text `#` in a string (`#ff0000`, `[I#0`) names no class.
+        if value_class::is_plain_string(marker) {
+            return Some("java/lang/String".into());
+        }
+        return Some(class.to_owned());
+    }
+    let class = if marker.starts_with("string-builder/") {
+        "java/lang/StringBuilder"
+    } else if marker.starts_with("stream/") {
+        "java/util/stream/Stream"
+    } else if marker == "list" || marker.starts_with("list/") {
+        "java/util/ArrayList"
+    } else if marker == "set" || marker.starts_with("set/") {
+        "java/util/LinkedHashSet"
+    } else if marker == "map" || marker.starts_with("map/") {
+        "java/util/LinkedHashMap"
+    } else {
+        let rest = marker.strip_prefix("enum/")?;
+        return rest.rsplit_once('/').map(|(class, _)| class.to_owned());
+    };
+    Some(class.to_owned())
 }
 
 fn class_binary_name(value: &Value) -> String {
@@ -9761,7 +9807,7 @@ fn builder_append_text<H: Host>(
 }
 
 fn identifier_value(namespace: &str, path: &str) -> Value {
-    Value::Ref(Some(format!("identifier/{namespace}:{path}")))
+    host_ids::identifier(namespace, path)
 }
 
 fn component_value(kind: &str, text: &str) -> Value {
@@ -9790,26 +9836,25 @@ fn identifier_parse(value: &str) -> Value {
     }
 }
 
+/// The `(namespace, path)` an id argument names: an `Identifier` handle, or
+/// `namespace:path` text where an API takes the id as a string (a bare path
+/// is `minecraft`'s). A `String` spelled like the old `identifier/` marker is
+/// just that text.
 fn identifier_parts(value: &Value) -> (&str, &str) {
-    let raw = expect_string(value);
-    let value = raw.strip_prefix("identifier/").unwrap_or(raw);
-    value.split_once(':').unwrap_or(("minecraft", value))
+    let raw = host_ids::identifier_key(value).unwrap_or_else(|| expect_string(value));
+    raw.split_once(':').unwrap_or(("minecraft", raw))
 }
 
-/// The identifier a `resource-key/<registry>/<identifier>` marker names.
-///
-/// `ResourceKey.create` keeps both arguments as value markers, so the id is the
-/// last `identifier/` segment of the text. A key built from anything else has
-/// no id and answers `None` rather than inventing one.
-fn resource_key_identifier(value: &Value) -> Option<(&str, &str)> {
-    let marker = expect_ref(value)?.strip_prefix("resource-key/")?;
-    let at = marker
-        .rfind("identifier/")
-        .or_else(|| marker.rfind("ridentifier/"))?;
-    let id = marker[at..].strip_prefix('r').unwrap_or(&marker[at..]);
-    let (namespace, path) = id.split_once(':')?;
-    let namespace = namespace.strip_prefix("identifier/")?;
-    (!namespace.is_empty() && !path.is_empty()).then_some((namespace, path))
+/// The identifier a `ResourceKey` handle names (its location, also when its
+/// registry is one the host could not name). A key whose location is no
+/// known id answers `None` rather than inventing one.
+fn resource_key_identifier(value: &Value) -> Option<(String, String)> {
+    if !host_ids::is_resource_key(value) {
+        return None;
+    }
+    let location = host_ids::key_location(value)?;
+    let (namespace, path) = host_ids::identifier_key(&location)?.split_once(':')?;
+    (!namespace.is_empty() && !path.is_empty()).then(|| (namespace.to_owned(), path.to_owned()))
 }
 
 /// Registry handles commonly read during Fabric/NeoForge bootstrap.
@@ -9853,17 +9898,6 @@ fn registry_static_id(owner: &str, field: &str) -> Option<&'static str> {
         // Every other vanilla registry field answers its own id too, so a
         // wrapper over `BuiltInRegistries.FLUID` is not a null registry.
         .or_else(|| vanilla_registries::registry_id(owner, field))
-}
-
-fn tag_key_value(registry: &str, location: &str) -> Value {
-    Value::Ref(Some(format!("tag-key/{registry}|{location}")))
-}
-
-fn tag_key_parts(value: &Value) -> (&str, &str) {
-    expect_string(value)
-        .strip_prefix("tag-key/")
-        .and_then(|value| value.split_once('|'))
-        .unwrap_or(("", ""))
 }
 
 fn stable_hash(value: &str) -> i32 {
@@ -10346,7 +10380,6 @@ fn block_declaration_properties(builder: &BTreeMap<String, String>) -> BTreeMap<
 /// so a crafting remainder that points at one is recorded but not exported:
 /// the loader requires a real id and would reject the marker text.
 fn marker_id(value: &str) -> Option<String> {
-    let value = value.strip_prefix("identifier/").unwrap_or(value);
     let (namespace, path) = value.split_once(':')?;
     let lowercase = |part: &str, extra: &[u8]| {
         !part.is_empty()
@@ -10425,6 +10458,12 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         | "java/util/NoSuchElementException"
         | "java/util/ConcurrentModificationException"
         | "java/io/UncheckedIOException" => "java/lang/RuntimeException",
+        // The game's own: what `Identifier`'s factories throw (26.3
+        // `IdentifierException`, and `ResourceLocationException` before the
+        // 1.21 rename) extends `RuntimeException`.
+        "net/minecraft/IdentifierException" | "net/minecraft/ResourceLocationException" => {
+            "java/lang/RuntimeException"
+        }
         "java/lang/NumberFormatException"
         | "java/nio/charset/UnsupportedCharsetException"
         | "java/nio/charset/IllegalCharsetNameException" => "java/lang/IllegalArgumentException",
@@ -12303,14 +12342,14 @@ fn generic_type_bounds(bounds: &[GenericType]) -> Vec<GenericType> {
     }
 }
 
-fn expect_array_marker(value: &Value) -> Result<&str, NativeError> {
-    match value {
-        Value::Ref(Some(marker)) if marker.starts_with("array/") => Ok(marker),
-        other => Err(NativeError::Metadata(format!(
-            "expected a native array marker, got {}",
-            describe_value(other)
-        ))),
-    }
+/// The `arrays`-table key of an array handle (`host_array.rs`).
+fn expect_array_key(value: &Value) -> Result<&str, NativeError> {
+    host_array::array_key(value).ok_or_else(|| {
+        NativeError::Metadata(format!(
+            "expected a native array, got {}",
+            describe_value(value)
+        ))
+    })
 }
 
 /// Bounded rendering of one [`Value`] for a diagnostic message.
@@ -16277,6 +16316,7 @@ impl NativeJar {
             host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -16304,6 +16344,8 @@ impl NativeJar {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget,
         };
@@ -16441,6 +16483,7 @@ impl NativeJar {
         let mut callback_infos = CallbackInfos::new();
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -16468,6 +16511,8 @@ impl NativeJar {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget,
         };
@@ -16589,6 +16634,7 @@ impl NativeJar {
         let class_name = class.replace('.', "/");
         let mut runtime = Runtime {
             classes: &self.classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -16616,6 +16662,8 @@ impl NativeJar {
             anchor_hooks,
             modify_hooks,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -19041,6 +19089,14 @@ fn gson_json_kind(json: &serde_json::Value) -> &'static str {
 
 struct Runtime<'a, H> {
     classes: &'a BTreeMap<String, ClassFile>,
+    /// Each class a jar `@Mixin` targets, with the mixin classes naming it,
+    /// built once on first use from `classes` (which this runtime only
+    /// borrows, so it cannot change underneath the index). Type checks on jar
+    /// objects ask "does a mixin add this interface to that class?" at every
+    /// step of a superclass walk; without the index each question scanned
+    /// every class of the jar (#166's re-check measured a 10M-store loop at
+    /// 1.3 s → 114 s) (`checkcast.rs`).
+    mixin_index: std::cell::OnceCell<BTreeMap<String, Vec<String>>>,
     /// Sibling-jar tables this execution may link, snapshotted from the host
     /// so a frame that keeps a class reference does not borrow the host.
     linked: Arc<LinkedClassTable>,
@@ -19110,6 +19166,12 @@ struct Runtime<'a, H> {
     /// call.  LIFO, because a constructor argument may itself construct an
     /// object before the outer `<init>` runs.
     pending_skipped_new: Vec<String>,
+    /// Stream stages recorded, not yet run (`jdk_stream::StreamPlan`).
+    stream_plan: jdk_stream::StreamPlan,
+    /// The last array-store verdict for a jar object's class against a
+    /// component (`array_store.rs`): a store loop asks the same question
+    /// every iteration, and the class hierarchy cannot change during a run.
+    store_verdict: std::cell::RefCell<Option<array_store::StoreVerdict>>,
     /// Jar frames currently on this runtime's call chain. Bounded by the
     /// thread's stack (`frame_bound.rs`) in [`Runtime::invoke`] before a frame
     /// starts.
@@ -20178,6 +20240,9 @@ impl<H: Host> Runtime<'_, H> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let stream = self.new_stream("callback", "stream", values);
                 self.mark_stream_origin(&stream, &receiver);
+                if self.collection_stream_sized(&receiver) {
+                    self.mark_sized(&stream);
+                }
                 return Ok(Some(stream));
             }
             // Reflection is the interpreter's own surface (it knows the jar's
@@ -20353,10 +20418,20 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    fn new_array(&mut self, class: &str, method: &str) -> String {
-        let marker = format!("array/{class}/{method}/{}", self.next_array);
+    /// The key of a new array of `class` (`[I`, `[Ljava/lang/String;`); its
+    /// elements go in `arrays` under it, and its handle is
+    /// [`host_array::handle`] of it, made once (`host_array.rs`).
+    fn new_array(&mut self, class: &str) -> String {
+        let key = host_array::key(class, self.next_array as u64);
         self.next_array += 1;
-        marker
+        key
+    }
+
+    /// A new array of `class` holding `values`: its handle.
+    fn new_array_value(&mut self, class: &str, values: Vec<Value>) -> Value {
+        let key = self.new_array(class);
+        self.arrays.insert(key.clone(), values);
+        host_array::handle(key)
     }
 
     /// Build the nested arrays a `multianewarray` instruction creates.
@@ -20365,38 +20440,27 @@ impl<H: Host> Runtime<'_, H> {
     /// (`int 0`, `long 0`, a `float` zero, or `null` for a reference), so a
     /// later `iaload` on an untouched slot reads a value instead of a
     /// reference that would fail a `TypeMismatch`.
-    fn new_multidim_array(
-        &mut self,
-        descriptor: &str,
-        class: &str,
-        method: &str,
-        counts: &[usize],
-    ) -> String {
-        let marker = self.new_array(class, method);
+    /// `descriptor` is the array class of this level (`[[I`); each nested
+    /// level is an array of its component (`[I`).
+    fn new_multidim_array(&mut self, descriptor: &str, counts: &[usize]) -> Value {
         let length = counts.first().copied().unwrap_or(0);
+        let component = &descriptor[1..];
         let values = if counts.len() <= 1 {
-            let leaf = descriptor.trim_start_matches('[').to_owned();
-            vec![Value::default_for(&leaf); length]
+            vec![Value::default_for(component); length]
         } else {
             (0..length)
-                .map(|_| {
-                    let child = self.new_multidim_array(descriptor, class, method, &counts[1..]);
-                    Value::Ref(Some(child))
-                })
+                .map(|_| self.new_multidim_array(component, &counts[1..]))
                 .collect()
         };
-        self.arrays.insert(marker.clone(), values);
-        marker
+        self.new_array_value(descriptor, values)
     }
 
     /// Materialize a `java.lang.reflect.Type[]` for the generic reflection
     /// surface. The array is owned by this invocation, like every other array
     /// the interpreter builds.
-    fn generic_type_array(&mut self, method: &str, values: &[GenericType]) -> Value {
-        let marker = self.new_array("java/lang/reflect/Type", method);
+    fn generic_type_array(&mut self, class: &str, values: &[GenericType]) -> Value {
         let values = values.iter().map(generic_type_value).collect();
-        self.arrays.insert(marker.clone(), values);
-        Value::Ref(Some(marker))
+        self.new_array_value(class, values)
     }
 
     fn new_object(&mut self, class: &str) -> Value {
@@ -20475,6 +20539,11 @@ impl<H: Host> Runtime<'_, H> {
         if wanted == "java/lang/Object" {
             return true;
         }
+        // Every array is a handle (`host_array.rs`): a reference read as text
+        // is never one, however it is spelled (`"[I#0"`).
+        if wanted.starts_with('[') {
+            return false;
+        }
         if generic_type_instance_of(marker, wanted) {
             return true;
         }
@@ -20500,12 +20569,6 @@ impl<H: Host> Runtime<'_, H> {
         };
         if collection_kinds.contains(&wanted) {
             return true;
-        }
-        if marker.starts_with("array/") {
-            return matches!(
-                wanted,
-                "java/lang/Cloneable" | "java/io/Serializable" | "java/lang/constant/Constable"
-            );
         }
         // An enum constant names its enum class after the prefix.
         if let Some(rest) = marker.strip_prefix("enum/")
@@ -20596,13 +20659,11 @@ impl<H: Host> Runtime<'_, H> {
             .class(&name)
             .map(ClassFile::interface_names)
             .unwrap_or_default();
-        let marker = self.new_array("java/lang/Class", &r.name);
         let values = interfaces
             .into_iter()
             .map(|interface| Value::Ref(Some(interface)))
             .collect();
-        self.arrays.insert(marker.clone(), values);
-        Some(Value::Ref(Some(marker)))
+        Some(self.new_array_value("[Ljava/lang/Class;", values))
     }
 
     /// Execute the small reflective-array surface used by Fabric API helpers.
@@ -20617,8 +20678,6 @@ impl<H: Host> Runtime<'_, H> {
         &mut self,
         r: &MethodRef,
         args: &[Value],
-        class: &str,
-        method: &str,
     ) -> Result<Option<Value>, NativeError> {
         if r.owner != "java/util/Arrays" {
             return Ok(None);
@@ -20655,25 +20714,42 @@ impl<H: Host> Runtime<'_, H> {
                             .unwrap_or_else(|| Value::default_for(&element)),
                     );
                 }
-                let marker = self.new_array(class, method);
-                self.arrays.insert(marker.clone(), values);
-                // The copy is an array of the original's class (the overloads
-                // without a `Class` argument), so `System.arraycopy` and
-                // `getClass()` see its component (`array_copy.rs`).
-                if !r.descriptor.contains("Ljava/lang/Class;")
-                    && let Some(component) = expect_ref(StdHost::argument(r, args, 0)?)
-                        .and_then(|original| self.array_component(original))
+                // The copy is an array of the original's class, or of the
+                // `Class<? extends T[]> newType` the last argument names.
+                let class = if r.descriptor.contains("Ljava/lang/Class;") {
+                    match args.last() {
+                        Some(Value::Ref(Some(class))) if class.starts_with('[') => {
+                            class.replace('.', "/")
+                        }
+                        _ => return Ok(None),
+                    }
+                } else {
+                    match host_array::exact_class(StdHost::argument(r, args, 0)?) {
+                        Some(class) => class.to_owned(),
+                        None => return Ok(None),
+                    }
+                };
+                // A `newType` the original's component is not a subtype of:
+                // `System.arraycopy` checks each element (`array_store.rs`).
+                if let (Some(source), Some(component)) = (
+                    value_class::array_component(StdHost::argument(r, args, 0)?),
+                    value_class::component_of_array_class(&class),
+                ) && host_array::class_assignable(&source, &component, self) != Some(true)
+                    && self.first_misfit(&class, &component, &values)?.is_some()
                 {
-                    self.record_array_component(&marker, &component);
+                    return match self.arraycopy_store_exception(&source, &component) {
+                        Some(error) => Err(error),
+                        None => self.host.unknown_operand_call(r).map(Some),
+                    };
                 }
-                Ok(Some(Value::Ref(Some(marker))))
+                Ok(Some(self.new_array_value(&class, values)))
             }
             ("fill", descriptor) if descriptor.starts_with('[') => {
-                let Some(marker) = args.first().and_then(expect_ref).cloned() else {
+                let Some(key) = args.first().and_then(host_array::array_key) else {
                     return Ok(None);
                 };
                 let value = args.get(1).cloned().unwrap_or(Value::Ref(None));
-                if let Some(values) = self.arrays.get_mut(&marker) {
+                if let Some(values) = self.arrays.get_mut(key) {
                     values.fill(value);
                 }
                 Ok(Some(Value::Void))
@@ -20686,8 +20762,6 @@ impl<H: Host> Runtime<'_, H> {
         &mut self,
         r: &MethodRef,
         args: &[Value],
-        class: &str,
-        method: &str,
     ) -> Result<Option<Value>, NativeError> {
         if r.owner != "java/lang/reflect/Array" {
             return Ok(None);
@@ -20696,14 +20770,12 @@ impl<H: Host> Runtime<'_, H> {
             ("newInstance", "(Ljava/lang/Class;I)Ljava/lang/Object;") => {
                 let length = expect_int(r, StdHost::argument(r, args, 1)?)?;
                 let length = array_length(length)?;
-                let marker = self.new_array(class, method);
-                self.arrays
-                    .insert(marker.clone(), vec![Value::Ref(None); length]);
-                if let Value::Ref(Some(component)) = StdHost::argument(r, args, 0)? {
-                    let component = component.replace('.', "/");
-                    self.record_array_component(&marker, &component);
-                }
-                Value::Ref(Some(marker))
+                let Value::Ref(Some(component)) = StdHost::argument(r, args, 0)? else {
+                    return Ok(None);
+                };
+                let class = value_class::array_class_marker(&component.replace('.', "/"));
+                // Each slot holds the component's zero (`0` for `int.class`).
+                self.new_array_value(&class, vec![Value::default_for(&class[1..]); length])
             }
             ("getLength", "(Ljava/lang/Object;)I") => {
                 Value::Int(self.array(StdHost::argument(r, args, 0)?)?.len() as i32)
@@ -20717,8 +20789,7 @@ impl<H: Host> Runtime<'_, H> {
                 })?;
                 // `Array.get` boxes a primitive element by the array's own
                 // component type (`float[]` → `Float`, `char[]` → `Character`).
-                let primitive = expect_ref(array)
-                    .and_then(|marker| self.array_component(marker))
+                let primitive = value_class::array_component(array)
                     .and_then(|component| primitive_descriptor(&component));
                 match primitive {
                     Some(descriptor) if r.name == "get" => box_by_descriptor(descriptor, element),
@@ -20747,7 +20818,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("set", "(Ljava/lang/Object;ILjava/lang/Object;)V") => {
                 let index = array_index(expect_int(r, StdHost::argument(r, args, 1)?)?)?;
-                let marker = expect_array_marker(StdHost::argument(r, args, 0)?)?;
+                let marker = expect_array_key(StdHost::argument(r, args, 0)?)?;
                 let slot = self
                     .arrays
                     .get_mut(marker)
@@ -20763,7 +20834,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("setInt", "(Ljava/lang/Object;II)V") => {
                 let index = array_index(expect_int(r, StdHost::argument(r, args, 1)?)?)?;
-                let marker = expect_array_marker(StdHost::argument(r, args, 0)?)?;
+                let marker = expect_array_key(StdHost::argument(r, args, 0)?)?;
                 let slot = self
                     .arrays
                     .get_mut(marker)
@@ -20779,7 +20850,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("setBoolean", "(Ljava/lang/Object;IZ)V") => {
                 let index = array_index(expect_int(r, StdHost::argument(r, args, 1)?)?)?;
-                let marker = expect_array_marker(StdHost::argument(r, args, 0)?)?;
+                let marker = expect_array_key(StdHost::argument(r, args, 0)?)?;
                 let slot = self
                     .arrays
                     .get_mut(marker)
@@ -20795,7 +20866,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             ("setLong", "(Ljava/lang/Object;IJ)V") => {
                 let index = array_index(expect_int(r, StdHost::argument(r, args, 1)?)?)?;
-                let marker = expect_array_marker(StdHost::argument(r, args, 0)?)?;
+                let marker = expect_array_key(StdHost::argument(r, args, 0)?)?;
                 let slot = self
                     .arrays
                     .get_mut(marker)
@@ -20915,9 +20986,9 @@ impl<H: Host> Runtime<'_, H> {
                     ))),
                 },
                 ("getActualTypeArguments", "()[Ljava/lang/reflect/Type;") => match decoded {
-                    GenericType::Parameterized { args, .. } => Ok(Some(
-                        self.generic_type_array("getActualTypeArguments", &args),
-                    )),
+                    GenericType::Parameterized { args, .. } => {
+                        Ok(Some(self.generic_type_array(TYPE_ARRAY, &args)))
+                    }
                     other => Err(NativeError::Metadata(format!(
                         "getActualTypeArguments needs a parameterized type, got {}",
                         generic_type_display(&other)
@@ -20943,7 +21014,7 @@ impl<H: Host> Runtime<'_, H> {
                 },
                 ("getBounds", "()[Ljava/lang/reflect/Type;") => match decoded {
                     GenericType::Variable { bounds, .. } => Ok(Some(
-                        self.generic_type_array("getBounds", &generic_type_bounds(&bounds)),
+                        self.generic_type_array(TYPE_ARRAY, &generic_type_bounds(&bounds)),
                     )),
                     other => Err(NativeError::Metadata(format!(
                         "getBounds needs a type variable, got {}",
@@ -20952,7 +21023,7 @@ impl<H: Host> Runtime<'_, H> {
                 },
                 ("getUpperBounds", "()[Ljava/lang/reflect/Type;") => match decoded {
                     GenericType::Wildcard { upper, .. } => Ok(Some(
-                        self.generic_type_array("getUpperBounds", &generic_type_bounds(&upper)),
+                        self.generic_type_array(TYPE_ARRAY, &generic_type_bounds(&upper)),
                     )),
                     other => Err(NativeError::Metadata(format!(
                         "getUpperBounds needs a wildcard type, got {}",
@@ -20961,7 +21032,7 @@ impl<H: Host> Runtime<'_, H> {
                 },
                 ("getLowerBounds", "()[Ljava/lang/reflect/Type;") => match decoded {
                     GenericType::Wildcard { lower, .. } => {
-                        Ok(Some(self.generic_type_array("getLowerBounds", &lower)))
+                        Ok(Some(self.generic_type_array(TYPE_ARRAY, &lower)))
                     }
                     other => Err(NativeError::Metadata(format!(
                         "getLowerBounds needs a wildcard type, got {}",
@@ -21041,27 +21112,41 @@ impl<H: Host> Runtime<'_, H> {
             && r.descriptor == "()[Ljava/lang/reflect/Field;"
         {
             let class = reflection_class_name(receiver, r)?.to_owned();
-            let declared = r.name == "getDeclaredFields";
-            let fields = self
-                .class(&class)
-                .map(|file| {
+            // `getDeclaredFields` is the class file's table; `getFields` the
+            // public fields of the class, its superinterfaces and
+            // superclasses (`host_reflect.rs`). A class whose fields the
+            // runtime cannot list (a JDK or game class) is counted, never an
+            // empty array.
+            let fields = if r.name == "getDeclaredFields" {
+                self.class(&class).map(|file| {
                     file.fields
                         .iter()
-                        .filter(|field| declared || field.access & 1 != 0)
-                        .map(|field| (field.name.clone(), field.descriptor.clone(), field.access))
+                        .map(|field| {
+                            (
+                                class.clone(),
+                                field.name.clone(),
+                                field.descriptor.clone(),
+                                field.access,
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
-                .unwrap_or_default();
+            } else {
+                self.public_field_list(&class)
+            };
+            let Some(fields) = fields else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
             // One fresh `Field` per element, as `copyField` makes them.
             let fields = fields
                 .into_iter()
-                .map(|(name, descriptor, access)| {
-                    self.field_copy(&class, &name, Some((&descriptor, access)))
+                .map(|(declaring, name, descriptor, access)| {
+                    self.field_copy(&declaring, &name, Some((&descriptor, access)))
                 })
                 .collect::<Vec<_>>();
-            let marker = self.new_array("java/lang/reflect/Field", "getDeclaredFields");
-            self.arrays.insert(marker.clone(), fields);
-            return Ok(Some(Value::Ref(Some(marker))));
+            return Ok(Some(
+                self.new_array_value("[Ljava/lang/reflect/Field;", fields),
+            ));
         }
         if r.owner == "java/lang/Class"
             && matches!(r.name.as_str(), "getField" | "getDeclaredField")
@@ -21090,10 +21175,44 @@ impl<H: Host> Runtime<'_, H> {
             && r.descriptor == "()[Ljava/lang/reflect/Method;"
         {
             let class = reflection_class_name(receiver, r)?.to_owned();
-            let methods = self.reflected_methods(&class, r.name == "getDeclaredMethods");
-            let marker = self.new_array("java/lang/reflect/Method", "getMethods");
-            self.arrays.insert(marker.clone(), methods);
-            return Ok(Some(Value::Ref(Some(marker))));
+            // `getDeclaredMethods`: the class file's methods but its
+            // constructors and initializer; `getMethods`: the public member
+            // methods (`host_reflect.rs`). A class the runtime cannot list
+            // (a JDK or game class) is counted, never an empty array.
+            let methods = if r.name == "getDeclaredMethods" {
+                self.class(&class).map(|file| {
+                    file.methods
+                        .iter()
+                        .filter(|method| method.name != "<init>" && method.name != "<clinit>")
+                        .map(|method| {
+                            (
+                                class.clone(),
+                                method.name.clone(),
+                                method.descriptor.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            } else {
+                self.public_method_list(&class).map(|methods| {
+                    methods
+                        .into_iter()
+                        .map(|method| (method.class, method.name, method.descriptor))
+                        .collect()
+                })
+            };
+            let Some(methods) = methods else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
+            let methods = methods
+                .iter()
+                .map(|(declaring, name, descriptor)| {
+                    self.reflected_method(declaring, name, Some(descriptor))
+                })
+                .collect::<Vec<_>>();
+            return Ok(Some(
+                self.new_array_value("[Ljava/lang/reflect/Method;", methods),
+            ));
         }
         if r.owner == "java/lang/Class"
             && matches!(r.name.as_str(), "getMethod" | "getDeclaredMethod")
@@ -21103,22 +21222,42 @@ impl<H: Host> Runtime<'_, H> {
             let name = expect_string(StdHost::argument(r, args, 0)?);
             let parameter_types = self.parameter_types(args);
             let descriptor = self.reflected_descriptor(class, name, &parameter_types);
-            // `getDeclaredMethod` on a class the runtime holds: its methods
-            // are the class file's, so a miss throws Java's exception
-            // (`getMethod` also searches supertypes and is not decided here).
-            if r.name == "getDeclaredMethod"
-                && let Some(file) = self.class(class)
-                && match descriptor.as_deref() {
-                    Some(descriptor) => file.method(name, descriptor).is_none(),
-                    // A parameter that names no type leaves it undecided.
-                    None => parameter_types.is_empty(),
-                }
-                && let Some(parameters) = parameter_types
-                    .iter()
-                    .map(|parameter| expect_ref(parameter).cloned())
-                    .collect::<Option<Vec<_>>>()
+            // `getMethod` searches the public methods of the class, its
+            // superclasses (to `Object`) and superinterfaces as the JDK does,
+            // so it finds the declaring class's method and never a private
+            // one; `getDeclaredMethod` the class's own methods of any access.
+            // Both take the most specific return type and never a
+            // constructor. A miss among held classes throws Java's
+            // exception; a search that leaves them keeps the lookup unread
+            // (its facts are counted).
+            if let Some(signature) = parameter_types
+                .iter()
+                .map(class_descriptor)
+                .collect::<Option<String>>()
             {
-                return Err(host_reflect::no_such_method(class, name, &parameters));
+                let parameters = format!("({signature})");
+                let found = if r.name == "getMethod" {
+                    self.method_lookup(class, name, &parameters)
+                } else {
+                    self.declared_method_lookup(class, name, &parameters)
+                };
+                match found {
+                    host_reflect::MethodLookup::Found(declaring, descriptor) => {
+                        return Ok(Some(self.reflected_method(
+                            &declaring,
+                            name,
+                            Some(&descriptor),
+                        )));
+                    }
+                    host_reflect::MethodLookup::Absent => {
+                        let parameters = parameter_types
+                            .iter()
+                            .filter_map(|parameter| expect_ref(parameter).cloned())
+                            .collect::<Vec<_>>();
+                        return Err(host_reflect::no_such_method(class, name, &parameters));
+                    }
+                    host_reflect::MethodLookup::Unknown => {}
+                }
             }
             return Ok(Some(self.reflected_method(
                 class,
@@ -21329,9 +21468,10 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 ("newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
                     if !self.has_class(class) {
-                        return Err(NativeError::MissingMethod(format!(
-                            "{class}#<init>{descriptor}"
-                        )));
+                        // A JDK or game constructor: the runtime has no body
+                        // to run (counted, answered neutral as any unmodelled
+                        // call).
+                        return self.host.unknown_operand_call(r).map(Some);
                     }
                     let arguments = StdHost::argument(r, args, 0)?;
                     let arguments = if matches!(arguments, Value::Ref(None)) {
@@ -21386,9 +21526,12 @@ impl<H: Host> Runtime<'_, H> {
                     let answer = self.host.invoke(&target, &invocation_args)?;
                     return reflected_return(self, descriptor, answer).map(Some);
                 }
-                return Err(NativeError::MissingMethod(format!("{owner}#{name}")));
+                // A JDK or game method the runtime has no body for: counted
+                // (answered neutral, as any unmodelled call), never a
+                // made-up answer.
+                return self.host.unknown_operand_call(r).map(Some);
             };
-            let target = class_file
+            let Some(target) = class_file
                 .methods
                 .iter()
                 .find(|candidate| {
@@ -21397,17 +21540,39 @@ impl<H: Host> Runtime<'_, H> {
                         && arg_count(&candidate.descriptor) == invocation_args.len()
                 })
                 .cloned()
-                .ok_or_else(|| NativeError::MissingMethod(format!("{owner}#{name}")))?;
+            else {
+                // A lookup the runtime could not settle (its method is in a
+                // class it does not hold): counted.
+                return self.host.unknown_operand_call(r).map(Some);
+            };
             let target_receiver = if target.is_static() {
                 None
             } else {
                 Some(StdHost::argument(r, args, 0)?.clone())
             };
+            // `Method.invoke` dispatches as `invokevirtual`/`invokeinterface`
+            // would: a static or private target runs its own body, any other
+            // the receiver class's override (its superclass chain, then the
+            // maximally specific default, `member_owner`). A selection that
+            // leaves the held classes is counted.
+            let receiver_class = target_receiver
+                .as_ref()
+                .and_then(|receiver| self.receiver_class(receiver))
+                .map(str::to_owned);
+            let owner = match receiver_class {
+                Some(class) if !target.is_static() && target.access & 0x0002 == 0 => {
+                    match self.member_owner(&class, &target.name, &target.descriptor) {
+                        Some((owner, true)) => owner,
+                        _ => return self.host.unknown_operand_call(r).map(Some),
+                    }
+                }
+                _ => owner.to_owned(),
+            };
             // `Object[]` hands boxed values to a primitive parameter, so unbox
             // against the target's own descriptor before the body reads it.
             let invocation_args = coerce_arguments(&target.descriptor, &invocation_args);
             let answer = self.invoke(
-                owner,
+                &owner,
                 &target.name,
                 &target.descriptor,
                 target_receiver,
@@ -21553,12 +21718,7 @@ impl<H: Host> Runtime<'_, H> {
     /// fail on the very next `arraylength`. The array is runtime-owned and
     /// holds one `enum/<class>/<name>` marker per constant, so `length`,
     /// `clone`, element reads and ordinal lookups all work.
-    fn invoke_game_enum_values(
-        &mut self,
-        r: &MethodRef,
-        class: &str,
-        method: &str,
-    ) -> Option<Value> {
+    fn invoke_game_enum_values(&mut self, r: &MethodRef) -> Option<Value> {
         if r.name != "values" {
             return None;
         }
@@ -21566,13 +21726,11 @@ impl<H: Host> Runtime<'_, H> {
         if r.descriptor != format!("()[L{};", r.owner) {
             return None;
         }
-        let marker = self.new_array(class, method);
         let values = constants
             .iter()
             .map(|name| Value::Ref(Some(format!("enum/{}/{name}", r.owner))))
             .collect::<Vec<_>>();
-        self.arrays.insert(marker.clone(), values);
-        Some(Value::Ref(Some(marker)))
+        Some(self.new_array_value(&format!("[L{};", r.owner), values))
     }
 
     /// Answer the vanilla static helpers mod bootstraps call.
@@ -21958,8 +22116,7 @@ impl<H: Host> Runtime<'_, H> {
                     ("write", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
                         let text = args
                             .get(1)
-                            .and_then(|value| expect_ref(value))
-                            .and_then(|marker| self.arrays.get(marker))
+                            .and_then(|value| self.owned_array(value))
                             .map(|bytes| {
                                 let bytes = bytes
                                     .iter()
@@ -21974,8 +22131,7 @@ impl<H: Host> Runtime<'_, H> {
                         // Lines (`write(Path, Iterable)`) never reach the model's text.
                         let bytes = args
                             .get(1)
-                            .and_then(|value| expect_ref(value))
-                            .is_some_and(|marker| self.arrays.contains_key(marker));
+                            .is_some_and(|value| self.owned_array(value).is_some());
                         if bytes {
                             self.watch_whole_write(&path, text.is_empty());
                         } else {
@@ -22364,7 +22520,7 @@ impl<H: Host> Runtime<'_, H> {
                     ("readAllBytes", "()[B") | ("readNBytes", "()[B") => {
                         let text = self.string_readers.remove(&marker).unwrap_or_default();
                         self.string_readers.insert(marker.clone(), String::new());
-                        self.io_bytes_array(text.into_bytes(), class, method)
+                        self.io_bytes_array(text.into_bytes())
                     }
                     ("read", "()I") => {
                         let text = self.string_readers.remove(&marker).unwrap_or_default();
@@ -22383,7 +22539,11 @@ impl<H: Host> Runtime<'_, H> {
                         }
                     }
                     ("read", "([B)I") | ("read", "([BII)I") => {
-                        let Some(array) = args.first().and_then(expect_ref).cloned() else {
+                        let Some(array) = args
+                            .first()
+                            .and_then(host_array::array_key)
+                            .map(str::to_owned)
+                        else {
                             return Ok(None);
                         };
                         let text = self.string_readers.remove(&marker).unwrap_or_default();
@@ -22530,14 +22690,12 @@ impl<H: Host> Runtime<'_, H> {
 
     /// A `byte[]` marker holding `bytes`, as `InputStream#readAllBytes`
     /// answers.
-    fn io_bytes_array(&mut self, bytes: Vec<u8>, class: &str, method: &str) -> Value {
-        let marker = self.new_array(class, method);
+    fn io_bytes_array(&mut self, bytes: Vec<u8>) -> Value {
         let values = bytes
             .into_iter()
             .map(|byte| Value::Int(i32::from(byte as i8)))
             .collect();
-        self.arrays.insert(marker.clone(), values);
-        Value::Ref(Some(marker))
+        self.new_array_value("[B", values)
     }
 
     /// The text a modelled in-memory writer currently holds.
@@ -23075,7 +23233,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(values) = self.static_fields.get(&key).cloned() else {
             return Ok(None);
         };
-        let Some(array) = expect_ref(&values).and_then(|marker| self.arrays.get(marker)) else {
+        let Some(array) = self.owned_array(&values) else {
             return Ok(None);
         };
         Ok(array
@@ -23097,16 +23255,16 @@ impl<H: Host> Runtime<'_, H> {
         if r.name != "clone" || !r.descriptor.ends_with(")Ljava/lang/Object;") {
             return None;
         }
-        let marker = expect_array_marker(receiver?).ok()?;
-        // The shared empty array has no table row; its clone is an empty
-        // array too (the host would otherwise answer a null clone).
-        if marker == "array/empty" {
-            return Some(Value::Ref(Some(marker.to_owned())));
+        let receiver = receiver?;
+        // A new array of the original's class; a shared empty array's clone
+        // is another empty array of the class it stands for.
+        let key = host_array::array_key(receiver)?;
+        if host_array::is_shared_empty(key) {
+            return Some(host_array::shared_empty(host_array::class_of_key(key)));
         }
-        let values = self.arrays.get(marker)?.clone();
-        let clone = self.new_array("java/lang/Object", "clone");
-        self.arrays.insert(clone.clone(), values);
-        Some(Value::Ref(Some(clone)))
+        let values = self.array(receiver).ok()?.clone();
+        let class = host_array::class_of_key(key).to_owned();
+        Some(self.new_array_value(&class, values))
     }
 
     /// Where one member call dispatches: the nearest class in the jar's
@@ -23294,13 +23452,20 @@ impl<H: Host> Runtime<'_, H> {
         value
     }
 
+    /// The elements of an array this runtime owns (`None` for a shared empty
+    /// array, which stands for an array an unmodelled call returned: a model
+    /// that reads elements must not answer from it).
+    fn owned_array(&self, value: &Value) -> Option<&Vec<Value>> {
+        self.arrays.get(host_array::array_key(value)?)
+    }
+
     fn array(&self, value: &Value) -> Result<&Vec<Value>, NativeError> {
-        let marker = expect_array_marker(value)?;
-        if marker == "array/empty" {
+        let key = expect_array_key(value)?;
+        if host_array::is_shared_empty(key) {
             return Ok(&EMPTY_ARRAY_VALUES);
         }
         self.arrays
-            .get(marker)
+            .get(key)
             .ok_or_else(|| NativeError::Metadata("array is not owned by this invocation".into()))
     }
 
@@ -23338,7 +23503,9 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(None);
             };
             let values = optional_payload(receiver).into_iter().collect();
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            self.mark_sized(&stream);
+            return Ok(Some(stream));
         }
         if (r.name == "stream" || r.name == "parallelStream")
             && r.descriptor == "()Ljava/util/stream/Stream;"
@@ -23357,6 +23524,9 @@ impl<H: Host> Runtime<'_, H> {
             if r.name == "parallelStream" {
                 self.mark_parallel_stream(&stream);
             }
+            if self.collection_stream_sized(receiver) {
+                self.mark_sized(&stream);
+            }
             return Ok(Some(stream));
         }
         // `Arrays.stream` is the array counterpart of `Collection.stream`,
@@ -23372,7 +23542,9 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(None);
             }
             let values = self.array(array)?.clone();
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            self.mark_sized(&stream);
+            return Ok(Some(stream));
         }
         if r.owner == "java/util/stream/Stream"
             && ((r.name == "of" && r.descriptor.contains("Ljava/util/stream/Stream;"))
@@ -23386,7 +23558,9 @@ impl<H: Host> Runtime<'_, H> {
             } else {
                 args.to_vec()
             };
-            return Ok(Some(self.new_stream(class, method, values)));
+            let stream = self.new_stream(class, method, values);
+            self.mark_sized(&stream);
+            return Ok(Some(stream));
         }
         if !r.owner.starts_with("java/util/stream/") {
             return Ok(None);
@@ -23405,9 +23579,7 @@ impl<H: Host> Runtime<'_, H> {
             // `Stream.toList()`: an unmodifiable `ListN` that allows `null`.
             ("toList", "()Ljava/util/List;") => self.unmodifiable_list(values),
             ("toArray", "()[Ljava/lang/Object;") => {
-                let marker = self.new_array(class, method);
-                self.arrays.insert(marker.clone(), values);
-                Value::Ref(Some(marker))
+                self.new_array_value("[Ljava/lang/Object;", values)
             }
             ("collect", "(Ljava/util/stream/Collector;)Ljava/lang/Object;") => {
                 let collector = expect_ref(StdHost::argument(r, args, 0)?).ok_or_else(|| {
@@ -24375,7 +24547,6 @@ impl<H: Host> Runtime<'_, H> {
                     if !(4..=11).contains(&atype) {
                         return Err(NativeError::InvalidClass("invalid newarray type"));
                     }
-                    let marker = self.new_array(class, method);
                     // The element type's zero: an exact long zero for `long[]`,
                     // an `f32`/`f64` zero for `float[]`/`double[]`, and the
                     // neutral int otherwise.
@@ -24384,23 +24555,18 @@ impl<H: Host> Runtime<'_, H> {
                         6 | 7 => Value::Float(0.0),
                         _ => Value::Int(0),
                     };
-                    self.arrays.insert(marker.clone(), vec![empty; length]);
-                    if let Some(component) = value_class::primitive_array_component(atype) {
-                        self.record_array_component(&marker, component);
-                    }
-                    stack.push(Value::Ref(Some(marker)));
+                    let component = value_class::primitive_array_component(atype)
+                        .ok_or(NativeError::InvalidClass("invalid newarray type"))?;
+                    let class = value_class::array_class_marker(component);
+                    stack.push(self.new_array_value(&class, vec![empty; length]));
                 }
                 0xbd => {
                     let i = read_u16(code, &mut pc)?;
                     let length =
                         invoke_or_catch!(at, array_length(pop_int(&mut stack, class, method, at)?));
-                    let component = class_name(&file.pool, i)?.to_owned();
-                    let marker = self.new_array(class, method);
-                    self.arrays
-                        .insert(marker.clone(), vec![Value::Ref(None); length]);
-                    // `getClass()` of the array names this component.
-                    self.record_array_component(&marker, &component);
-                    stack.push(Value::Ref(Some(marker)));
+                    let component = class_name(&file.pool, i)?;
+                    let class = value_class::array_class_marker(&component);
+                    stack.push(self.new_array_value(&class, vec![Value::Ref(None); length]));
                 }
                 0xbe => {
                     let array = pop(&mut stack, class, method, at)?;
@@ -24431,7 +24597,7 @@ impl<H: Host> Runtime<'_, H> {
                     let value = pop(&mut stack, class, method, at)?;
                     let index = pop_int(&mut stack, class, method, at)?;
                     let array = pop(&mut stack, class, method, at)?;
-                    let marker = expect_array_marker(&array).map_err(|error| {
+                    let marker = expect_array_key(&array).map_err(|error| {
                         array_operand_error(error, "xastore", class, method, at)
                     })?;
                     let length = self.arrays.get(marker).map_or(0, Vec::len);
@@ -24444,6 +24610,11 @@ impl<H: Host> Runtime<'_, H> {
                             Err(array_index_out_of_bounds(index, length))
                         }
                     );
+                    // `aastore` checks the value against the component
+                    // (`array_store.rs`).
+                    if op == 0x53 {
+                        invoke_or_catch!(at, self.check_array_store(&array, &value));
+                    }
                     let values = self.arrays.get_mut(marker).ok_or_else(|| {
                         NativeError::Metadata("array is not owned by this invocation".into())
                     })?;
@@ -24487,11 +24658,7 @@ impl<H: Host> Runtime<'_, H> {
                             .map(|count| array_length(*count))
                             .collect::<Result<Vec<_>, _>>()
                     );
-                    let marker = self.new_multidim_array(&descriptor, class, method, &counts);
-                    if let Some(component) = value_class::component_of_array_class(&descriptor) {
-                        self.record_array_component(&marker, &component);
-                    }
-                    stack.push(Value::Ref(Some(marker)));
+                    stack.push(self.new_multidim_array(&descriptor, &counts));
                 }
                 0xc0 => {
                     // The reference stays on the stack; a cast to a class the
@@ -24515,16 +24682,18 @@ impl<H: Host> Runtime<'_, H> {
                     // A box the runtime keeps unboxed (`Double.valueOf`
                     // answers a `Float` value) is still a reference here.
                     let unboxed = self.library_instance_of(&value, &wanted);
+                    // Only a handle is an array (`host_array.rs`).
                     let matches = unboxed
-                        || expect_ref(&value).is_some_and(|marker| {
-                            self.forged_stream_instance_of(marker, &wanted)
-                                || self.object_is_instance_of(marker, &wanted)
-                                || self.host.host_instance_of(marker, &wanted)
-                                || jdk_model::platform_instance_of(marker, &wanted)
-                                || generic_type_instance_of(marker, &wanted)
-                                || (wanted == "java/lang/Class"
-                                    && class_marker_like(marker, self.classes, &self.linked))
-                        });
+                        || !wanted.starts_with('[')
+                            && expect_ref(&value).is_some_and(|marker| {
+                                self.forged_stream_instance_of(marker, &wanted)
+                                    || self.object_is_instance_of(marker, &wanted)
+                                    || self.host.host_instance_of(marker, &wanted)
+                                    || jdk_model::platform_instance_of(marker, &wanted)
+                                    || generic_type_instance_of(marker, &wanted)
+                                    || (wanted == "java/lang/Class"
+                                        && class_marker_like(marker, self.classes, &self.linked))
+                            });
                     // A `false` no model can stand behind is counted
                     // (`checkcast.rs`), and the host's answer is the result.
                     let matches = if !matches && self.instance_of_is_guess(&value, &wanted) {
@@ -24935,14 +25104,13 @@ impl<H: Host> Runtime<'_, H> {
                         invoke_or_catch!(at, self.invoke_string_join(&r, &args))
                     {
                         value
-                    } else if let Some(value) = invoke_or_catch!(
-                        at,
-                        self.invoke_regex(&r, receiver.as_ref(), &args, class, method)
-                    ) {
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_regex(&r, receiver.as_ref(), &args))
+                    {
                         // `String`'s regex methods (`regex_calls.rs`).
                         value
                     } else if let Some(value) =
-                        invoke_or_catch!(at, self.invoke_reflect_array(&r, &args, class, method))
+                        invoke_or_catch!(at, self.invoke_reflect_array(&r, &args))
                     {
                         value
                     } else if let Some(value) =
@@ -24950,8 +25118,7 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         // `System.arraycopy` (`array_copy.rs`).
                         value
-                    } else if let Some(value) =
-                        invoke_or_catch!(at, self.invoke_arrays(&r, &args, class, method))
+                    } else if let Some(value) = invoke_or_catch!(at, self.invoke_arrays(&r, &args))
                     {
                         value
                     } else if let Some(value) =
@@ -25101,7 +25268,7 @@ impl<H: Host> Runtime<'_, H> {
                         self.invoke_modelled_comparator(&r, receiver.as_ref(), &args)
                     ) {
                         value
-                    } else if let Some(value) = self.invoke_game_enum_values(&r, class, method) {
+                    } else if let Some(value) = self.invoke_game_enum_values(&r) {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
@@ -29515,6 +29682,7 @@ mod tests {
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &BTreeMap::new(),
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -29522,7 +29690,7 @@ mod tests {
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::from([(
-                "array/test/args/0".into(),
+                "[Ljava/lang/Object;#0".into(),
                 vec![Value::Int(7), Value::Ref(Some("ok".into()))],
             )]),
             next_array: 0,
@@ -29545,6 +29713,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -29558,7 +29728,7 @@ mod tests {
             &method,
             &[
                 Value::Ref(Some("%d/%s%%".into())),
-                Value::Ref(Some("array/test/args/0".into())),
+                host_array::handle("[Ljava/lang/Object;#0"),
             ],
         )
         .unwrap();
@@ -29570,6 +29740,7 @@ mod tests {
         let mut host = StdHost::new();
         let mut runtime = Runtime {
             classes: &BTreeMap::new(),
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -29577,9 +29748,9 @@ mod tests {
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::from([
-                ("array/test/args/0".into(), vec![Value::Int(7)]),
+                ("[Ljava/lang/Object;#0".into(), vec![Value::Int(7)]),
                 (
-                    "array/test/args/1".into(),
+                    "[Ljava/lang/Object;#1".into(),
                     vec![
                         Value::Boxed(Boxed::Boolean(false)),
                         Value::Float(5e-7),
@@ -29607,6 +29778,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -29619,22 +29792,19 @@ mod tests {
             format_java_string_call(
                 &mut runtime,
                 &method,
-                &[
-                    Value::Ref(Some(pattern.into())),
-                    Value::Ref(Some(args.into())),
-                ],
+                &[Value::Ref(Some(pattern.into())), host_array::handle(args)],
             )
             .unwrap()
         };
         // `String.format(pattern, 7)` and `String.format(pattern,
         // Boolean.FALSE, 5e-7, (short) -2)` on OpenJDK 27 and 17.
         for (pattern, args, expected) in [
-            ("%03d", "array/test/args/0", "007"),
-            ("[%-3d]", "array/test/args/0", "[7  ]"),
-            ("%04x", "array/test/args/0", "0007"),
-            ("%1$d", "array/test/args/0", "7"),
-            ("%+d", "array/test/args/0", "+7"),
-            ("%b|%f|%x", "array/test/args/1", "false|0.000001|fffe"),
+            ("%03d", "[Ljava/lang/Object;#0", "007"),
+            ("[%-3d]", "[Ljava/lang/Object;#0", "[7  ]"),
+            ("%04x", "[Ljava/lang/Object;#0", "0007"),
+            ("%1$d", "[Ljava/lang/Object;#0", "7"),
+            ("%+d", "[Ljava/lang/Object;#0", "+7"),
+            ("%b|%f|%x", "[Ljava/lang/Object;#1", "false|0.000001|fffe"),
         ] {
             assert_eq!(
                 format(pattern, args),
@@ -29644,7 +29814,7 @@ mod tests {
         }
         // `%a` of an `Integer` throws on the JDK: the call is the host's,
         // counted, not an approximation.
-        assert_eq!(format("%a", "array/test/args/0"), Value::Ref(None));
+        assert_eq!(format("%a", "[Ljava/lang/Object;#0"), Value::Ref(None));
         assert_eq!(
             host.unknown_host_calls(),
             vec![(
@@ -29729,8 +29899,12 @@ mod tests {
         assert_eq!(describe_value(&Value::Ref(None)), "null");
         assert_eq!(describe_value(&Value::Int(3)), "int 3");
         assert_eq!(
-            describe_value(&Value::Ref(Some("array/demo/run/0".into()))),
-            "marker \"array/demo/run/0\""
+            describe_value(&Value::Ref(Some("demo/Probe#0".into()))),
+            "marker \"demo/Probe#0\""
+        );
+        assert_eq!(
+            describe_value(&host_array::handle("[I#0")),
+            "Array \"[I#0\""
         );
         let long = "x".repeat(200);
         let described = describe_value(&Value::Ref(Some(long)));
@@ -31530,7 +31704,7 @@ mandatory = true
         };
         assert_eq!(
             host.unknown_host_call(&array_call).unwrap(),
-            Value::Ref(Some("array/empty".into()))
+            host_array::shared_empty("[Lsome/library/T;")
         );
         let reference_call = MethodRef {
             owner: "some/library/Api".into(),
@@ -33235,10 +33409,10 @@ mandatory = true
             name: "asList".into(),
             descriptor: "([Ljava/lang/Object;)Ljava/util/List;".into(),
         };
-        let array = Value::Ref(Some("array/java/lang/String/args/0".into()));
+        let array = host_array::handle("[Ljava/lang/String;#0");
         assert_eq!(
             host.invoke(&as_list, std::slice::from_ref(&array)).unwrap(),
-            Value::Ref(Some("list/rarray/java/lang/String/args/0".into()))
+            Value::Ref(Some("list/harr:[Ljava/lang/String;#0".into()))
         );
     }
 
@@ -35889,7 +36063,7 @@ mandatory = true
         let id = host
             .invoke(&parse, &[Value::Ref(Some("ruby:lamp".into()))])
             .unwrap();
-        assert_eq!(id, Value::Ref(Some("identifier/ruby:lamp".into())));
+        assert_eq!(id, identifier_value("ruby", "lamp"));
         let modern_parse = MethodRef {
             owner: "net/minecraft/resources/ResourceLocation".into(),
             name: "parse".into(),
@@ -35937,7 +36111,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&prefixed, &id, &[Value::Ref(Some("block/".into()))],)
                 .unwrap(),
-            Value::Ref(Some("identifier/ruby:block/lamp".into()))
+            identifier_value("ruby", "block/lamp")
         );
         let language_key = MethodRef {
             owner: "net/minecraft/resources/Identifier".into(),
@@ -35983,10 +36157,9 @@ mandatory = true
             name: "identifier".into(),
             descriptor: "()Lnet/minecraft/resources/Identifier;".into(),
         };
-        assert!(matches!(
-            host.invoke_instance(&key_id, &key, &[]).unwrap(),
-            Value::Ref(Some(_))
-        ));
+        // The registry argument names no registry: the key is unnamed, but
+        // its location is the id it was made from.
+        assert_eq!(host.invoke_instance(&key_id, &key, &[]).unwrap(), id);
         let key_id_modern = MethodRef {
             owner: "net/minecraft/resources/ResourceKey".into(),
             name: "identifier".into(),
@@ -36204,11 +36377,12 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(
-            holder_key,
-            optional_wrap(Value::Ref(Some(
-                "resource-key/deferred-register/registry/demo/entry".into()
-            )))
+        // The register named no registry (`"registry"`): a key, but an
+        // unnamed one.
+        assert!(
+            optional_payload(&holder_key).is_some_and(|key| host_ids::is_resource_key(&key)
+                && host_ids::resource_key_parts(&key).is_none()),
+            "{holder_key:?}"
         );
         let modern_id = host
             .invoke_instance(
@@ -36221,12 +36395,8 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(
-            modern_id,
-            Value::Ref(Some(
-                "identifier/holder/deferred-register/registry/demo/entry".into()
-            ))
-        );
+        // `namespace:name`, the register's namespace and the entry's name.
+        assert_eq!(modern_id, identifier_value("demo", "entry"));
         let optional = host
             .invoke_instance(
                 &MethodRef {
@@ -36376,7 +36546,7 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert!(matches!(name, Value::Ref(Some(marker)) if marker.starts_with("identifier/")));
+        assert_eq!(name, identifier_value("legacy", "entry"));
         // The post-registration holder surface a legacy mod reads next: the
         // same `DeferredRegister.register` row answers presence and its id.
         assert_eq!(
@@ -36403,9 +36573,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Ref(Some(
-                "identifier/holder/deferred-register/registry/legacy/entry".into()
-            ))
+            identifier_value("legacy", "entry")
         );
         assert_eq!(host.registrations().len(), 1);
     }
@@ -36423,8 +36591,8 @@ mandatory = true
             &register,
             &event,
             &[
-                Value::Ref(Some("resource-key/minecraft:item".into())),
-                Value::Ref(Some("identifier/ruby:wand".into())),
+                host_ids::resource_key_named("minecraft:root", "minecraft:item"),
+                identifier_value("ruby", "wand"),
                 Value::Ref(Some("@indy:ruby-wand-supplier".into())),
             ],
         )
@@ -36617,6 +36785,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -36644,6 +36813,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -36774,6 +36945,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -36801,6 +36973,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -36813,8 +36987,6 @@ mandatory = true
             .invoke_reflect_array(
                 &new_instance,
                 &[Value::Ref(Some("java/lang/String".into())), Value::Int(2)],
-                "demo/Reflective",
-                "probe",
             )
             .unwrap()
             .unwrap();
@@ -36832,8 +37004,6 @@ mandatory = true
                         Value::Int(1),
                         Value::Ref(Some("beta".into()))
                     ],
-                    "demo/Reflective",
-                    "probe",
                 )
                 .unwrap(),
             Some(Value::Void)
@@ -36845,12 +37015,7 @@ mandatory = true
         };
         assert_eq!(
             runtime
-                .invoke_reflect_array(
-                    &length,
-                    std::slice::from_ref(&array),
-                    "demo/Reflective",
-                    "probe",
-                )
+                .invoke_reflect_array(&length, std::slice::from_ref(&array),)
                 .unwrap(),
             Some(Value::Int(2))
         );
@@ -36861,12 +37026,7 @@ mandatory = true
         };
         assert_eq!(
             runtime
-                .invoke_reflect_array(
-                    &get,
-                    &[array.clone(), Value::Int(1)],
-                    "demo/Reflective",
-                    "probe",
-                )
+                .invoke_reflect_array(&get, &[array.clone(), Value::Int(1)],)
                 .unwrap(),
             Some(Value::Ref(Some("beta".into())))
         );
@@ -36880,8 +37040,6 @@ mandatory = true
                 .invoke_reflect_array(
                     &set_boolean,
                     &[array.clone(), Value::Int(0), Value::Int(1),],
-                    "demo/Reflective",
-                    "probe",
                 )
                 .unwrap(),
             Some(Value::Void)
@@ -36893,12 +37051,7 @@ mandatory = true
         };
         assert_eq!(
             runtime
-                .invoke_reflect_array(
-                    &get_boolean,
-                    &[array, Value::Int(0)],
-                    "demo/Reflective",
-                    "probe",
-                )
+                .invoke_reflect_array(&get_boolean, &[array, Value::Int(0)],)
                 .unwrap(),
             Some(Value::Int(1))
         );
@@ -36906,8 +37059,6 @@ mandatory = true
             .invoke_reflect_array(
                 &new_instance,
                 &[Value::Ref(Some("long".into())), Value::Int(1)],
-                "demo/Reflective",
-                "probe",
             )
             .unwrap()
             .unwrap();
@@ -36920,8 +37071,6 @@ mandatory = true
             .invoke_reflect_array(
                 &set_long,
                 &[long_array.clone(), Value::Int(0), Value::Int(42)],
-                "demo/Reflective",
-                "probe",
             )
             .unwrap();
         let get_long = MethodRef {
@@ -36931,12 +37080,7 @@ mandatory = true
         };
         assert_eq!(
             runtime
-                .invoke_reflect_array(
-                    &get_long,
-                    &[long_array, Value::Int(0)],
-                    "demo/Reflective",
-                    "probe",
-                )
+                .invoke_reflect_array(&get_long, &[long_array, Value::Int(0)],)
                 .unwrap(),
             Some(Value::Int(42))
         );
@@ -36984,6 +37128,7 @@ mandatory = true
             .unwrap();
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -37011,6 +37156,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -37288,8 +37435,6 @@ mandatory = true
                         descriptor: "(Ljava/lang/Object;)I".into(),
                     },
                     std::slice::from_ref(&array),
-                    "demo/Stream",
-                    "probe",
                 )
                 .unwrap(),
             Some(Value::Int(2))
@@ -37334,6 +37479,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -37341,13 +37487,13 @@ mandatory = true
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::from([
-                ("array/params".into(), Vec::new()),
-                ("array/args".into(), Vec::new()),
+                ("[Ljava/lang/Class;#0".into(), Vec::new()),
+                ("[Ljava/lang/Object;#1".into(), Vec::new()),
                 (
-                    "array/int-param".into(),
+                    "[Ljava/lang/Class;#2".into(),
                     vec![Value::Ref(Some("int".into()))],
                 ),
-                ("array/int-arg".into(), vec![Value::Int(7)]),
+                ("[Ljava/lang/Object;#3".into(), vec![Value::Int(7)]),
             ]),
             next_array: 0,
             next_object: 0,
@@ -37369,6 +37515,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -37383,7 +37531,7 @@ mandatory = true
                 Some(&Value::Ref(Some("demo/Reflective".into()))),
                 &[
                     Value::Ref(Some("answer".into())),
-                    Value::Ref(Some("array/params".into())),
+                    host_array::handle("[Ljava/lang/Class;#0"),
                 ],
             )
             .unwrap()
@@ -37419,8 +37567,6 @@ mandatory = true
                     descriptor: "(Ljava/lang/Object;)I".into(),
                 },
                 std::slice::from_ref(&methods),
-                "demo/Reflective",
-                "probe",
             )
             .unwrap();
         assert_eq!(method_count, Some(Value::Int(2)));
@@ -37469,7 +37615,10 @@ mandatory = true
                 .invoke_reflect_method(
                     &invoke,
                     Some(&method),
-                    &[Value::Ref(None), Value::Ref(Some("array/args".into()))],
+                    &[
+                        Value::Ref(None),
+                        host_array::handle("[Ljava/lang/Object;#1")
+                    ],
                 )
                 .unwrap(),
             Some(Value::Int(42))
@@ -37490,7 +37639,7 @@ mandatory = true
                 Some(&Value::Ref(Some("demo/Reflective".into()))),
                 &[
                     Value::Ref(Some("answer".into())),
-                    Value::Ref(Some("array/int-param".into())),
+                    host_array::handle("[Ljava/lang/Class;#2"),
                 ],
             )
             .unwrap()
@@ -37513,7 +37662,10 @@ mandatory = true
                 .invoke_reflect_method(
                     &invoke,
                     Some(&overloaded),
-                    &[Value::Ref(None), Value::Ref(Some("array/int-arg".into()))],
+                    &[
+                        Value::Ref(None),
+                        host_array::handle("[Ljava/lang/Object;#3")
+                    ],
                 )
                 .unwrap(),
             Some(Value::Int(7))
@@ -37638,6 +37790,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -37665,6 +37818,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -37681,8 +37836,7 @@ mandatory = true
             )
             .unwrap()
             .unwrap();
-        let declared_marker = expect_ref(&declared_fields).unwrap();
-        let declared = runtime.arrays.get(declared_marker).unwrap().clone();
+        let declared = runtime.array(&declared_fields).unwrap().clone();
         assert_eq!(declared.len(), 2);
 
         let public_fields = runtime
@@ -37697,8 +37851,7 @@ mandatory = true
             )
             .unwrap()
             .unwrap();
-        let public_marker = expect_ref(&public_fields).unwrap();
-        let public = runtime.arrays.get(public_marker).unwrap().clone();
+        let public = runtime.array(&public_fields).unwrap().clone();
         // The same field, as `Field.equals` sees it, but its own copy: JDK 27
         // hands every lookup a fresh `Field` (`ReflectionFactory.copyField`).
         let field = |value: &Value| host_reflect::field_copy_free(value).unwrap().to_owned();
@@ -37996,7 +38149,7 @@ mandatory = true
             &constructor,
             &type_marker,
             &[
-                Value::Ref(Some("identifier/demo:ping".into())),
+                identifier_value("demo", "ping"),
                 Value::Ref(Some("stream-codec".into())),
             ],
         )
@@ -38008,7 +38161,7 @@ mandatory = true
         };
         assert_eq!(
             host.invoke_instance(&id, &type_marker, &[]).unwrap(),
-            Value::Ref(Some("identifier/demo:ping".into()))
+            identifier_value("demo", "ping")
         );
         let to_string = MethodRef {
             owner: id.owner.clone(),
@@ -39930,17 +40083,21 @@ mandatory = true
 
     #[test]
     fn resource_keys_name_the_registration_id_they_carry() {
-        let key = Value::Ref(Some(
-            "resource-key/registry/minecraft:item/ridentifier/beautify:hanging_pot".into(),
-        ));
-        assert_eq!(
-            resource_key_identifier(&key),
-            Some(("beautify", "hanging_pot"))
+        let id = identifier_value("beautify", "hanging_pot");
+        let key = host_ids::resource_key(
+            &Value::Ref(Some("registry/minecraft:item".into())),
+            &id,
+            Some("beautify:hanging_pot".into()),
         );
-        assert_eq!(
-            resource_key_identifier(&Value::Ref(Some("resource-key/other/thing".into()))),
-            None
-        );
+        let named = Some(("beautify".to_owned(), "hanging_pot".to_owned()));
+        assert_eq!(resource_key_identifier(&key), named);
+        // A registry argument no model names: an unnamed key, which still
+        // names its location; a location that is no id names nothing.
+        let other = Value::Ref(Some("other".into()));
+        let unnamed = host_ids::resource_key(&other, &id, None);
+        assert_eq!(resource_key_identifier(&unnamed), named);
+        let nameless = host_ids::resource_key(&other, &Value::Ref(Some("thing".into())), None);
+        assert_eq!(resource_key_identifier(&nameless), None);
     }
 
     #[test]
@@ -42436,11 +42593,7 @@ mandatory = true
             Host::invoke(
                 &mut host,
                 &register,
-                &[
-                    registry,
-                    Value::Ref(Some("identifier/ruby:wand".into())),
-                    value.clone(),
-                ],
+                &[registry, identifier_value("ruby", "wand"), value.clone()],
             )
             .unwrap(),
             value
@@ -42459,7 +42612,7 @@ mandatory = true
             &register,
             &[
                 Value::Ref(None),
-                Value::Ref(Some("identifier/ruby:wand".into())),
+                identifier_value("ruby", "wand"),
                 Value::Ref(Some("@indy:ruby-wand".into())),
             ],
         )
@@ -42492,16 +42645,12 @@ mandatory = true
                 .insert(marker.to_owned(), BTreeMap::new());
         }
         for (id, marker) in [
-            ("identifier/", "@block-unnamed"),
-            ("identifier/ruby:ore", "@block-named"),
+            (identifier_value("minecraft", ""), "@block-unnamed"),
+            (identifier_value("ruby", "ore"), "@block-named"),
         ] {
             let value = Value::Ref(Some(marker.into()));
-            let answer = Host::invoke(
-                &mut host,
-                &register,
-                &[registry.clone(), Value::Ref(Some(id.into())), value.clone()],
-            )
-            .unwrap();
+            let answer =
+                Host::invoke(&mut host, &register, &[registry.clone(), id, value.clone()]).unwrap();
             // The caller's static field still gets its value either way.
             assert_eq!(answer, value);
         }
@@ -42772,6 +42921,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -42799,20 +42949,23 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
-        let marker = runtime.new_multidim_array("[[I", "demo/M", "m", &[2, 3]);
-        let outer = runtime.arrays.get(&marker).unwrap();
+        let grid = runtime.new_multidim_array("[[I", &[2, 3]);
+        assert_eq!(host_array::exact_class(&grid), Some("[[I"));
+        let outer = runtime.array(&grid).unwrap().clone();
         assert_eq!(outer.len(), 2);
-        for row in outer {
-            let Value::Ref(Some(row)) = row else {
-                panic!("outer slot is not an array marker: {row:?}");
-            };
-            let cells = runtime.arrays.get(row).unwrap();
+        for row in &outer {
+            // Each row is an `int[]` of its own.
+            assert_eq!(host_array::exact_class(row), Some("[I"), "{row:?}");
+            let cells = runtime.array(row).unwrap();
             assert_eq!(cells.len(), 3);
             assert!(cells.iter().all(|cell| *cell == Value::Int(0)));
         }
+        assert_ne!(outer[0], outer[1]);
     }
 
     #[test]
@@ -42821,6 +42974,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            mixin_index: std::cell::OnceCell::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -42848,6 +43002,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            stream_plan: Default::default(),
+            store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
@@ -42860,8 +43016,6 @@ mandatory = true
                 },
                 None,
                 &[Value::Ref(Some(",".into()))],
-                "demo/M",
-                "m",
             )
             .unwrap_err();
         assert!(

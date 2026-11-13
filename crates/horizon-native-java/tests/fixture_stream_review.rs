@@ -255,6 +255,29 @@ public final class Probe {
         return take(r + "," + b.build().toList());
     }
 
+    /// `count()` of `source.peek(log).map(f)`: no lambda runs where the
+    /// source's spliterator reports SIZED (JDK 25's `makeRefCounting`).
+    static String peekCount(String tag, Stream<?> s) {
+        return tag + s.peek(x -> log(tag)).map(x -> x).count();
+    }
+
+    public static String countBySource() {
+        List<String> out = new ArrayList<>();
+        out.add(peekCount("al", new ArrayList<>(List.of(1, 2)).stream()));
+        out.add(peekCount("hs", new HashSet<>(List.of(1, 2)).stream()));
+        out.add(peekCount("lhm", new LinkedHashMap<>(Map.of(1, 2)).keySet().stream()));
+        out.add(peekCount("clq", new java.util.concurrent.ConcurrentLinkedQueue<>(List.of(1, 2)).stream()));
+        out.add(peekCount("cow", new java.util.concurrent.CopyOnWriteArrayList<>(List.of(1, 2)).stream()));
+        out.add(peekCount("chm", new java.util.concurrent.ConcurrentHashMap<>(Map.of(1, 2)).keySet().stream()));
+        out.add(peekCount("arr", Arrays.stream(new Integer[] {1, 2})));
+        out.add(peekCount("of", Stream.of(1, 2)));
+        out.add(peekCount("cat", Stream.concat(Stream.of(1), new java.util.concurrent.ConcurrentLinkedQueue<>(List.of(2)).stream())));
+        out.add(peekCount("cat2", Stream.concat(Stream.of(1), Stream.of(2))));
+        out.add("srt" + Stream.of(new int[0], new int[0]).sorted().count());
+        out.add("flt" + Stream.of(1, 2).peek(x -> log("f")).filter(x -> true).count());
+        return take(out);
+    }
+
     public static String liveStreamClass() {
         Stream<Integer> s = Stream.of(1).map(x -> x);
         String name = s.getClass().getName();
@@ -291,6 +314,12 @@ fn review_cases_run_as_jdk_25_does() {
         ("a13SortedDistinctKeepsFirst", "c11 eq1/1 => 1,true,false"),
         ("a14DistinctKeepsFirst", "h1 h1 eq1/1 => 1,true"),
         ("a15TreeSetDistinctNoHash", "c11 c21 | => 2"),
+        // `count()` of a SIZED pipeline runs no stage; SIZED by source as
+        // JDK 25 reports it (#166's rule, with the copy-on-write lists).
+        (
+            "countBySource",
+            "clq clq chm cat cat f f => [al2, hs2, lhm1, clq2, cow2, chm1, arr2, of2, cat2, cat22, srt2, flt2]",
+        ),
         // A String spelled like a live stream's marker is a String.
         (
             "forgedStream",

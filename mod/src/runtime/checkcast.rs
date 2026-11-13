@@ -94,7 +94,7 @@ fn in_java_base(class: &str) -> bool {
 /// `runtime_class` (internal names). Two `java.base` classes get the JVM's
 /// whole message (`SharedRuntime::generate_class_cast_message`); otherwise
 /// the module/loader clause is left out (a named departure, above).
-fn class_cast_exception(runtime_class: &str, target: &str) -> NativeError {
+pub(crate) fn class_cast_exception(runtime_class: &str, target: &str) -> NativeError {
     let (from, to) = (runtime_class.replace('/', "."), target.replace('/', "."));
     let message = if in_java_base(runtime_class) && in_java_base(target) {
         format!(
@@ -186,7 +186,12 @@ impl<H: Host> Runtime<'_, H> {
         let cast = MethodRef {
             owner: target.to_owned(),
             name: "<checkcast>".into(),
-            descriptor: format!("(Ljava/lang/Object;)L{target};"),
+            // An array class is already a descriptor (`[I`).
+            descriptor: if target.starts_with('[') {
+                format!("(Ljava/lang/Object;){target}")
+            } else {
+                format!("(Ljava/lang/Object;)L{target};")
+            },
         };
         self.host
             .invoke(&cast, std::slice::from_ref(value))
@@ -211,8 +216,11 @@ impl<H: Host> Runtime<'_, H> {
                 None => HostCast::Unknown,
             });
         }
-        HostKind::of_class(target)?;
-        if *value == Value::Ref(None) {
+        // An array class's objects are array handles only (`host_array.rs`).
+        if !target.starts_with('[') {
+            HostKind::of_class(target)?;
+        }
+        if *value == Value::Ref(None) || crate::runtime::host_ids::text_is_a(value, target) {
             return Some(HostCast::Fits);
         }
         Some(match self.exact_class(value) {
@@ -246,11 +254,10 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// The exact class of a value that is no handle, where the runtime knows
-    /// it: a string, a box, an array whose component was recorded, a jar
-    /// object, a JDK object a jar constructed
+    /// it: a string, a box, a jar object, a JDK object a jar constructed
     /// (`java/util/ArrayList#3`). Not a host model's collection or entry,
     /// whose JDK class (`List12` or `ListN`, `KeyValueHolder`) is not kept.
-    fn exact_class(&self, value: &Value) -> Option<String> {
+    pub(super) fn exact_class(&self, value: &Value) -> Option<String> {
         let marker = match value {
             Value::Ref(Some(marker)) => marker,
             Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {
@@ -260,9 +267,6 @@ impl<H: Host> Runtime<'_, H> {
         };
         if crate::runtime::value_class::is_plain_string(marker) {
             return Some("java/lang/String".into());
-        }
-        if let Some(component) = self.array_component(marker) {
-            return Some(crate::runtime::value_class::array_class_marker(&component));
         }
         // `class#n`: an object `new` built (a host model's own copies use
         // other serials, `#neutral0`, `#immutable0`). A `Class` is not told
@@ -314,6 +318,10 @@ impl<H: Host> Runtime<'_, H> {
             // `null` is never an instance; a box is a JDK object.
             _ => return false,
         };
+        // Every array is a handle (`host_array.rs`): no other value is one.
+        if target.starts_with('[') {
+            return false;
+        }
         if ["java/", "javax/", "jdk/"]
             .iter()
             .any(|prefix| target.starts_with(prefix))
@@ -559,22 +567,41 @@ impl<H: Host> Runtime<'_, H> {
     /// `class` among its targets. The class file of `class` does not list
     /// that interface, so the plain walk cannot see it.
     fn mixin_adds_interface(&self, class: &str, target: &str) -> bool {
-        self.classes.values().any(|mixin| {
-            let provides = mixin.name == target
-                || mixin.interface_names().iter().any(|interface| {
-                    interface == target || self.interface_extends(interface, target)
-                });
-            provides
-                && mixin
-                    .annotations
-                    .iter()
-                    .filter(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)
-                    .any(|annotation| {
-                        mixin_target_owners(annotation)
-                            .iter()
-                            .any(|owner| owner == class)
+        self.mixins_targeting(class)
+            .iter()
+            .filter_map(|name| self.classes.get(name))
+            .any(|mixin| {
+                mixin.name == target
+                    || mixin.interface_names().iter().any(|interface| {
+                        interface == target || self.interface_extends(interface, target)
                     })
-        })
+            })
+    }
+
+    /// The jar's `@Mixin` classes that name `class` among their targets, from
+    /// the index built once per runtime (`Runtime::mixin_index`).
+    fn mixins_targeting(&self, class: &str) -> &[String] {
+        self.mixin_index
+            .get_or_init(|| {
+                let mut index: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for mixin in self.classes.values() {
+                    for annotation in mixin
+                        .annotations
+                        .iter()
+                        .filter(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)
+                    {
+                        for owner in mixin_target_owners(annotation) {
+                            let mixins = index.entry(owner).or_default();
+                            if !mixins.contains(&mixin.name) {
+                                mixins.push(mixin.name.clone());
+                            }
+                        }
+                    }
+                }
+                index
+            })
+            .get(class)
+            .map_or(&[], Vec::as_slice)
     }
 }
 

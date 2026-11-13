@@ -197,7 +197,6 @@ impl<H: Host> Runtime<'_, H> {
                     .collect();
                 // `ProviderSpliterator` is not `SIZED`.
                 let stream = self.new_stream("java/util/ServiceLoader", "stream", providers);
-                self.mark_unsized_stream(&stream);
                 Ok(Some(stream))
             }
             ("reload", "()V") => {

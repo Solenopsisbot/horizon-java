@@ -149,7 +149,12 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
     match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
         // `Arrays.asList(new T[0])`: the shared empty array has no elements,
         // so the list is empty rather than a one-element list holding it.
-        ("java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;") if matches!(args.first(), Some(Value::Ref(Some(marker))) if marker == "array/empty") => {
+        ("java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;")
+            if args
+                .first()
+                .and_then(crate::runtime::host_array::array_key)
+                .is_some_and(crate::runtime::host_array::is_shared_empty) =>
+        {
             Some(Ok(Value::Ref(Some("list".into()))))
         }
         // `Modifier`'s predicates over the access flags reflection answers
@@ -834,7 +839,8 @@ pub(crate) fn platform_instance_of(marker: &str, wanted: &str) -> bool {
     let Some((class, _)) = marker.split_once('#') else {
         return false;
     };
-    class_instance_of(class, wanted)
+    // `[I#0` is a string: arrays are handles (`host_array.rs`).
+    !crate::runtime::host_array::handle_only_class(class) && class_instance_of(class, wanted)
 }
 
 /// Whether an instance of the platform class `class` is a `wanted`.
@@ -924,7 +930,10 @@ pub(crate) fn class_access_flags(file: &crate::runtime::ClassFile) -> Option<u16
 /// (`owner/Class#n`), as opposed to string text.
 fn is_object_marker(marker: &str) -> bool {
     marker.rsplit_once('#').is_some_and(|(class, number)| {
-        class.contains('/') && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+        class.contains('/')
+            && !crate::runtime::host_array::handle_only_class(class)
+            && !number.is_empty()
+            && number.bytes().all(|b| b.is_ascii_digit())
     })
 }
 
@@ -948,11 +957,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         };
         let elements: Vec<Value> = match r.descriptor.as_str() {
             "(Ljava/lang/CharSequence;[Ljava/lang/CharSequence;)Ljava/lang/String;" => {
-                let Some(values) = args
-                    .get(1)
-                    .and_then(expect_ref)
-                    .and_then(|array| self.arrays.get(array))
-                else {
+                let Some(values) = args.get(1).and_then(|array| self.owned_array(array)) else {
                     return Ok(None);
                 };
                 values.clone()
@@ -1219,7 +1224,6 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         values.extend(found.into_iter().map(|entry| crate::runtime::path_value(&entry)));
         // `spliteratorUnknownSize` over the directory iterator: not `SIZED`.
         let stream = self.new_stream(class, method, values);
-        self.mark_unsized_stream(&stream);
         Ok(stream)
     }
 
@@ -1600,13 +1604,19 @@ mod tests {
             "([Ljava/lang/Object;)Ljava/util/List;",
         );
         assert_eq!(
-            static_call(&as_list, &[text("array/empty")])
-                .unwrap()
-                .unwrap(),
+            static_call(
+                &as_list,
+                &[crate::runtime::host_array::shared_empty("[Ljava/lang/String;")]
+            )
+            .unwrap()
+            .unwrap(),
             text("list")
         );
-        // A runtime-owned array is the interpreter's to expand.
-        assert!(static_call(&as_list, &[text("array/demo/Probe/run/0")]).is_none());
+        // A runtime-owned array is the interpreter's to expand, and a string
+        // spelled like the old shared empty array is no array.
+        let owned = crate::runtime::host_array::handle(crate::runtime::host_array::key("[Ljava/lang/Object;", 0));
+        assert!(static_call(&as_list, &[owned]).is_none());
+        assert!(static_call(&as_list, &[text("array/empty")]).is_none());
     }
 
     #[test]

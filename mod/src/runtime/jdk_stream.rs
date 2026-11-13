@@ -38,6 +38,17 @@ use crate::runtime::{Boxed, MethodRef, NativeError, Value, expect_ref};
 /// Prefix of a modelled `Comparator` marker.
 const COMPARATOR_PREFIX: &str = "@cmp:";
 
+/// The streams whose JDK spliterator reports SIZED (#166 F3): the lazy
+/// pipeline (`stream_pipeline.rs`) reads it, so `count()` of a SIZED
+/// pipeline answers the size without traversing (JDK 25's
+/// `ReduceOps.makeRefCounting`): no `peek` or `map` runs, and a `sorted()`
+/// never compares, so `Stream.of(new int[0], new int[0]).sorted().count()`
+/// is `2`, not the `ClassCastException` of comparing two arrays.
+#[derive(Default)]
+pub(crate) struct StreamPlan {
+    sized: std::collections::BTreeSet<String>,
+}
+
 fn comparator(body: &str) -> Value {
     Value::Ref(Some(format!("{COMPARATOR_PREFIX}{body}")))
 }
@@ -189,6 +200,33 @@ pub(crate) fn natural_compare(a: &Value, b: &Value) -> Result<i32, NativeError> 
                 }
             }
         }
+    }
+    // `((Comparable) a).compareTo(b)`: a handle whose kind is known not to
+    // be `Comparable` (an array) fails the cast, as `ComparableTimSort` does.
+    if let Value::Host(handle) = a
+        && handle.instance_of("java/lang/Comparable", &crate::runtime::host_ref::JdkHierarchy) == Some(false)
+        && let Some(class) = handle.class()
+    {
+        return Err(crate::runtime::checkcast::class_cast_exception(
+            class,
+            "java/lang/Comparable",
+        ));
+    }
+    // `String.compareTo(Object)`/`Integer.compareTo(Object)`... are bridges
+    // that cast the argument to their own class: a handle of another known
+    // class fails that cast (`"s".compareTo(new int[0])`).
+    let own = match a {
+        Value::Ref(Some(text)) if crate::runtime::value_class::is_plain_string(text) => {
+            Some("java/lang/String")
+        }
+        Value::Boxed(boxed) => Some(boxed.class()),
+        _ => None,
+    };
+    if let (Some(own), Value::Host(other)) = (own, b)
+        && other.instance_of(own, &crate::runtime::host_ref::JdkHierarchy) == Some(false)
+        && let Some(class) = other.class()
+    {
+        return Err(crate::runtime::checkcast::class_cast_exception(class, own));
     }
     Err(NativeError::Metadata(format!(
         "natural order of {} and {} is not modelled",
@@ -465,7 +503,10 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             ("empty", _) => Vec::new(),
             _ => return Ok(None),
         };
-        Ok(Some(self.new_stream(class, method, values)))
+        // `range`, `of` and `empty` are SIZED.
+        let stream = self.new_stream(class, method, values);
+        self.mark_sized(&stream);
+        Ok(Some(stream))
     }
 
     /// The value-list terminals beyond the interpreter's core set, applied to
@@ -504,6 +545,21 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             _ => return Ok(None),
         };
         Ok(Some(result))
+    }
+}
+
+impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
+    /// A stream built from a source whose spliterator reports SIZED
+    /// (`Stream.of`, an array, a collection, `IntStream.range`).
+    pub(crate) fn mark_sized(&mut self, stream: &Value) {
+        if let Some(marker) = expect_ref(stream) {
+            self.stream_plan.sized.insert(marker.clone());
+        }
+    }
+
+    /// Whether a stream's pipeline reports SIZED.
+    pub(crate) fn stream_is_sized(&self, marker: &str) -> bool {
+        self.stream_plan.sized.contains(marker)
     }
 }
 

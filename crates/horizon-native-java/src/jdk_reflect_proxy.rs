@@ -131,7 +131,7 @@ impl<H: Host> Runtime<'_, H> {
     /// holds, since only those can say which methods the proxy has.
     fn new_proxy(&mut self, args: &[Value]) -> Result<Value, NativeError> {
         let interfaces = match args.get(1) {
-            Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+            Some(value @ Value::Host(_)) => self.array(value)?.clone(),
             _ => return Err(npe(Some("interfaces"))),
         };
         let handler = args.get(2).cloned().unwrap_or(Value::Ref(None));
@@ -170,17 +170,18 @@ impl<H: Host> Runtime<'_, H> {
         }
         let proxy = self.new_object(PROXY_CLASS);
         let marker = expect_ref(&proxy).cloned().unwrap_or_default();
-        let list = self.new_array("java/lang/Class", "newProxyInstance");
-        self.arrays.insert(list.clone(), names);
-        self.fields
-            .insert(proxy_field(&marker, "interfaces"), Value::Ref(Some(list)));
+        let list = self.new_array_value("[Ljava/lang/Class;", names);
+        self.fields.insert(proxy_field(&marker, "interfaces"), list);
         self.fields.insert(proxy_field(&marker, "h"), handler);
         Ok(proxy)
     }
 
     /// The interfaces a proxy implements, in the order it was built with.
     fn proxy_interfaces(&self, marker: &str) -> Vec<String> {
-        let Some(Value::Ref(Some(list))) = self.fields.get(&proxy_field(marker, "interfaces"))
+        let Some(list) = self
+            .fields
+            .get(&proxy_field(marker, "interfaces"))
+            .and_then(host_array::array_key)
         else {
             return Vec::new();
         };
@@ -284,9 +285,7 @@ impl<H: Host> Runtime<'_, H> {
             for (parameter, value) in parameters.iter().zip(args) {
                 boxed.push(self.box_primitive(parameter, value)?);
             }
-            let array = self.new_array("java/lang/Object", "proxy");
-            self.arrays.insert(array.clone(), boxed);
-            Value::Ref(Some(array))
+            self.new_array_value("[Ljava/lang/Object;", boxed)
         };
         let handler = self
             .fields
@@ -478,7 +477,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut types = Vec::new();
                 for value in args {
                     match value {
-                        Value::Ref(Some(marker)) if self.arrays.contains_key(marker) => {
+                        array if self.owned_array(array).is_some() => {
                             types.extend(self.array(value)?.clone());
                         }
                         Value::Ref(Some(marker)) if marker.starts_with(METHOD_TYPE_PREFIX) => {
@@ -538,7 +537,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let mut values = match args.first() {
-                    Some(value @ Value::Ref(Some(_))) => self.array(value)?.clone(),
+                    Some(value @ Value::Host(_)) => self.array(value)?.clone(),
                     _ => Vec::new(),
                 };
                 if bound != "-" {
