@@ -140,7 +140,11 @@ impl<H: Host> Runtime<'_, H> {
                 let registry = expect_ref(args.first()?)?;
                 let key = self.fields.get(&format!("{registry}{KEY_FIELD}"))?;
                 let id = crate::runtime::host_ids::named_id(key)?;
-                Some(Value::Ref(Some(format!("fabric-registry-builder/{id}"))))
+                // A `MappedRegistry` (or its defaulted subclass) the jar built.
+                Some(Value::Ref(Some(format!(
+                    "fabric-registry-builder/{}{id}",
+                    crate::runtime::host_registry::MAPPED
+                ))))
             }
             _ => None,
         }

@@ -30,11 +30,24 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
             let id = registry_id(args.first()?)?;
             Some(Ok(crate::host_ids::registry_key_of(&id)))
         }
+        // `create` builds a `MappedRegistry`, `createDefaulted` a
+        // `DefaultedMappedRegistry` (fabric-registry-sync 8.0.4), and `from`
+        // wraps the registry it is given. The builder's marker keeps that
+        // digit before the (validated) id.
         (BUILDER, "create" | "createSimple" | "createDefaulted" | "from")
             if r.descriptor.ends_with(&format!(")L{BUILDER};")) =>
         {
-            let id = registry_id(args.first()?)?;
-            Some(Ok(Value::Ref(Some(format!("{BUILDER_PREFIX}{id}")))))
+            let arg = args.first()?;
+            let id = registry_id(arg)?;
+            let implementation = match r.name.as_str() {
+                "createDefaulted" => crate::host_registry::DEFAULTED_MAPPED,
+                "from" => crate::host_registry::registry_implementation(arg)
+                    .unwrap_or(crate::host_registry::ONLY_REGISTRY),
+                _ => crate::host_registry::MAPPED,
+            };
+            Some(Ok(Value::Ref(Some(format!(
+                "{BUILDER_PREFIX}{implementation}{id}"
+            )))))
         }
         _ => None,
     }
@@ -44,13 +57,16 @@ pub(crate) fn instance_call(r: &MethodRef, receiver: &Value) -> Option<Result<Va
     if r.owner != BUILDER {
         return None;
     }
-    let id = expect_ref(receiver)?
-        .strip_prefix(BUILDER_PREFIX)?
-        .to_owned();
+    let built = expect_ref(receiver)?.strip_prefix(BUILDER_PREFIX)?;
+    let implementation = built.chars().next()?;
+    let id = built.get(1..)?.to_owned();
     match r.name.as_str() {
         // Fluent setters answer the builder itself.
         _ if r.descriptor.ends_with(&format!(")L{BUILDER};")) => Some(Ok(receiver.clone())),
-        "buildAndRegister" => Some(Ok(crate::host_registry::registry(&id))),
+        "buildAndRegister" => Some(Ok(crate::host_registry::built_registry(
+            implementation,
+            &id,
+        ))),
         _ => None,
     }
 }

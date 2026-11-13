@@ -11,13 +11,16 @@
 //! registry key is now a `ResourceKey` handle in `minecraft:root`
 //! (`host_ids.rs`), and these three are handles:
 //!
-//! * `Registry`: key the registry's id. One object per registry key, so
-//!   canonical. Its runtime class is an implementation (`MappedRegistry`,
-//!   `DefaultedMappedRegistry`, a loader's own), so the class is unknown
-//!   ([`ClassRule::Unknown`](crate::host_ref::ClassRule)): `getClass()` is
-//!   counted, `instanceof` answers from the types it surely is. A vanilla
-//!   built-in registry is a `MappedRegistry` (a `DefaultedRegistry` for the
-//!   ten defaulted ones); any other only a `Registry`.
+//! * `Registry`: key one digit for what the host knows of its implementation
+//!   (`0` only a `Registry`, `1` a `MappedRegistry`, `2` a
+//!   `DefaultedMappedRegistry`) followed by the registry's id. One object per
+//!   registry key, so canonical. Its exact class is not known, so the class
+//!   is unknown ([`ClassRule::Unknown`](crate::host_ref::ClassRule)):
+//!   `getClass()` is counted, `instanceof` answers from the types it surely
+//!   is. A vanilla built-in registry is a `MappedRegistry` (a
+//!   `DefaultedMappedRegistry` for the ten defaulted ones), and so is one
+//!   Fabric's `FabricRegistryBuilder.create`/`createDefaulted` built
+//!   (fabric-registry-sync 8.0.4 bytecode); NeoForge's own only a `Registry`.
 //! * holder: a `DeferredHolder` (NeoForge) or `RegistryObject` (Forge) one
 //!   `DeferredRegister.register` call made. Key: [`HostRef::of_values`] of the
 //!   loader, the registration's serial and the entry's `ResourceKey` (or
@@ -49,7 +52,7 @@ const REGISTRY_TYPES: &[&str] = &[
     "net/minecraft/core/HolderOwner",
 ];
 
-/// A vanilla built-in registry: a `MappedRegistry`, so a `WritableRegistry`.
+/// A `MappedRegistry`, so a `WritableRegistry`.
 const BUILT_IN_TYPES: &[&str] = &[
     "net/minecraft/core/MappedRegistry",
     "net/minecraft/core/WritableRegistry",
@@ -63,8 +66,9 @@ const BUILT_IN_TYPES: &[&str] = &[
     "net/minecraft/core/HolderOwner",
 ];
 
-/// One of the ten `BuiltInRegistries` fields typed `DefaultedRegistry`.
+/// A `DefaultedMappedRegistry`.
 const DEFAULTED_TYPES: &[&str] = &[
+    "net/minecraft/core/DefaultedMappedRegistry",
     "net/minecraft/core/DefaultedRegistry",
     "net/minecraft/core/MappedRegistry",
     "net/minecraft/core/WritableRegistry",
@@ -150,27 +154,64 @@ fn declared_instance_of(
     })
 }
 
-/// `BuiltInRegistries.X`, a jar's built registry: the `Registry` for `id`.
+/// What the host knows of a registry's implementation: the first character
+/// of a `Registry` key.
+pub(crate) const ONLY_REGISTRY: char = '0';
+pub(crate) const MAPPED: char = '1';
+pub(crate) const DEFAULTED_MAPPED: char = '2';
+
+/// A registry `id`'s implementation, as far as the host knows it: a vanilla
+/// built-in's from 26.3's `BuiltInRegistries`, anything else's unknown.
+fn known_implementation(id: &str) -> char {
+    if DEFAULTED.contains(&id) {
+        DEFAULTED_MAPPED
+    } else if crate::vanilla_registries::is_built_in(id) {
+        MAPPED
+    } else {
+        ONLY_REGISTRY
+    }
+}
+
+/// `BuiltInRegistries.X`, NeoForge's own: the `Registry` for `id`.
 pub(crate) fn registry(id: &str) -> Value {
-    Value::Host(HostRef::new(HostKind::Registry, id))
+    built_registry(known_implementation(id), id)
+}
+
+/// A registry the host built knowing its implementation (`MAPPED`, …), or a
+/// vanilla built-in's (its table's).
+pub(crate) fn built_registry(implementation: char, id: &str) -> Value {
+    let implementation = match known_implementation(id) {
+        ONLY_REGISTRY => implementation,
+        built_in => built_in,
+    };
+    Value::Host(HostRef::new(
+        HostKind::Registry,
+        format!("{implementation}{id}"),
+    ))
 }
 
 /// The id of a `Registry` handle.
 pub(crate) fn registry_id(value: &Value) -> Option<&str> {
     match value {
-        Value::Host(handle) if handle.kind() == HostKind::Registry => Some(handle.key()),
+        Value::Host(handle) if handle.kind() == HostKind::Registry => handle.key().get(1..),
         _ => None,
     }
 }
 
-/// The declared types of a `Registry` with key `id`.
-pub(crate) fn registry_types(id: &str) -> &'static [&'static str] {
-    if DEFAULTED.contains(&id) {
-        DEFAULTED_TYPES
-    } else if crate::vanilla_registries::is_built_in(id) {
-        BUILT_IN_TYPES
-    } else {
-        REGISTRY_TYPES
+/// What the host knows of a `Registry` handle's implementation.
+pub(crate) fn registry_implementation(value: &Value) -> Option<char> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::Registry => handle.key().chars().next(),
+        _ => None,
+    }
+}
+
+/// The declared types of a `Registry` with this key.
+pub(crate) fn registry_types(key: &str) -> &'static [&'static str] {
+    match key.chars().next() {
+        Some(DEFAULTED_MAPPED) => DEFAULTED_TYPES,
+        Some(MAPPED) => BUILT_IN_TYPES,
+        _ => REGISTRY_TYPES,
     }
 }
 
