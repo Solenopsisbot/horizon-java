@@ -307,8 +307,8 @@ impl<H: Host> Runtime<'_, H> {
             return counted("no consumer");
         };
         let class = match shape.class {
-            Some(at) => match args.get(at).and_then(expect_ref) {
-                Some(class) => class.clone(),
+            Some(at) => match args.get(at).and_then(crate::host_class::class_name) {
+                Some(class) => class.to_owned(),
                 None => return counted("event class is not a class literal"),
             },
             None => match self.consumer_event_class(&consumer) {
