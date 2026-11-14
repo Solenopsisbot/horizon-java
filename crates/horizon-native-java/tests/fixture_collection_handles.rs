@@ -113,7 +113,18 @@ fn host_made_collections_are_objects_of_java_25s_classes() {
         "strings",
     ] {
         let mut host = fixture.jar.seed_host(horizon_native_java::StdHost::new());
-        let text = fixture.text_on(&mut host, method);
+        let answer = fixture.jar.invoke_method_with_args(
+            "demo/Probe",
+            method,
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        );
+        let text = match answer {
+            Ok(horizon_native_java::Value::Ref(Some(text))) => text,
+            other => format!("{other:?}"),
+        };
         let unknown = host.unknown_host_calls();
         if text != expected(method) || !unknown.is_empty() {
             failures.push(format!(
