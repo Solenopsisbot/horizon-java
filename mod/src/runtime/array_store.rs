@@ -187,9 +187,9 @@ impl<H: Host> Runtime<'_, H> {
             self.class(component)?;
             return self.known_instance_of(value, component);
         }
-        // A `String`, a `Class` (text until #156 P13: `int.class` is "int")
-        // or a host marker whose class is unknown. A `String`'s components
-        // fit, or this is undecided either way.
+        // A `String` or a host marker whose class is unknown (a `Class` is
+        // a handle, #156 P13c). A `String`'s components fit, or this is
+        // undecided either way.
         if is_box(component) {
             return Some(false);
         }

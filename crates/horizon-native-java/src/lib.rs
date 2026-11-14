@@ -5997,15 +5997,6 @@ impl Host for StdHost {
                         method: r.name.clone(),
                     })
             }
-            ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;")
-                if Self::argument(r, args, 0)
-                    .ok()
-                    .and_then(expect_ref)
-                    .is_some_and(|text| owned_class::owned_class_name(text)) =>
-            {
-                // A `Class` of a family kind, or a String spelled like it (`owned_class.rs`).
-                self.unknown_host_call(r)
-            }
             ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;") => {
                 // A model object prints its own `toString`, not its marker.
                 let value = Self::argument(r, args, 0)?;
@@ -8883,13 +8874,6 @@ impl Host for StdHost {
                     Some(text) => Ok(Value::Ref(Some(text))),
                     None => self.unknown_host_call(r),
                 }
-            }
-            // `Object::toString` on a `Class` of a family kind, or a String spelled like it
-            // (`owned_class.rs`).
-            ("java/lang/Object", "toString", "()Ljava/lang/String;")
-                if expect_ref(receiver).is_some_and(|text| owned_class::owned_class_name(text)) =>
-            {
-                self.unknown_host_call(r)
             }
             ("java/lang/String", "toString", "()Ljava/lang/String;")
             | ("java/lang/Object", "toString", "()Ljava/lang/String;") => {
@@ -12161,11 +12145,6 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
                 host_text(value)
             }
         },
-        // A `Class` of a family kind, or a String spelled like it (`owned_class.rs`): counted.
-        Value::Ref(Some(marker)) if owned_class::owned_class_name(marker) => {
-            let _ = host.unknown_host_call(&jar_text::object_to_string());
-            marker.clone()
-        }
         Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
             // An object no model prints (a jar object, an identity hash)
             // is counted; the element keeps its marker in the text. A
