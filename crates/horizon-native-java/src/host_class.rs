@@ -23,12 +23,14 @@
 //!   `getParameterTypes`/`getDeclaringClass`), type nodes that are classes
 //!   (`getGenericType`, `getRawType`, arguments, bounds,
 //!   `getGenericDeclaration`), commons-lang's `ClassUtils` boxing,
-//!   `ServiceLoader.Provider.type` and Fabric's `getEntrypointClass`. Until
-//!   P13c `expect_ref` answers a handle's key, as it does a jar object's, so a
-//!   reader not yet moved to [`class_name`] keeps the text it read.
-//! * **P13b2:** the rest: annotation `Class` values and `annotationType`,
-//!   `MethodType`/`Lookup`, `Proxy`, `StackWalker` frames, an enum's
-//!   `getDeclaringClass`, Guava's `TypeToken` beyond `getRawType`.
+//!   `ServiceLoader.Provider.type` and Fabric's `getEntrypointClass`; and,
+//!   pulled forward from P13b2 by #215's review, annotation `Class` values
+//!   and `annotationType`, `MethodType` return and parameter types,
+//!   `StackWalker` caller and frame classes, a proxy's `getClass`, Guava's
+//!   and Gson's `TypeToken` classes. Every `Class` a jar can obtain is a
+//!   handle (#216 lists the members still counted). Until P13c `expect_ref`
+//!   answers a handle's key, as it does a jar object's, so a reader not yet
+//!   moved to [`class_name`] keeps the text it read.
 //! * **P13c:** text is never a `Class`: a `String` spelled like a class name
 //!   is that `String` everywhere, and [`class_name`] stops reading text.
 //!
