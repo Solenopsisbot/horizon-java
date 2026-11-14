@@ -663,8 +663,12 @@ fn builder_class(owner: &str) -> bool {
 
 impl<H: Host> Runtime<'_, H> {
     /// The text of the builder `value` is: a `StringBuilder`/`StringBuffer`
-    /// the jar `new`ed (by its key), or a host builder marker.
+    /// the jar `new`ed, or a host builder marker. A `String` spelling a
+    /// builder's key is no builder (`jar_object.rs`).
     pub(crate) fn builder_text(&self, value: &Value) -> Option<&String> {
+        if crate::runtime::jar_object::spells_key(value) {
+            return None;
+        }
         self.string_builders.get(expect_ref(value)?)
     }
 
@@ -677,6 +681,10 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        // A `String` spelling a builder's key is no builder (`jar_object.rs`).
+        if receiver.is_some_and(crate::runtime::jar_object::spells_key) {
+            return Ok(None);
+        }
         let Some(marker) = receiver.and_then(expect_ref).cloned() else {
             return Ok(None);
         };
@@ -821,6 +829,7 @@ impl<H: Host> Runtime<'_, H> {
                     // receiver, so a builder inserted into itself is not
                     // the text it held.
                     if expect_ref(value).is_some_and(|marker| marker == receiver)
+                        && !crate::runtime::jar_object::spells_key(value)
                         && r.name == "insert"
                     {
                         return Ok(None);
@@ -843,6 +852,10 @@ impl<H: Host> Runtime<'_, H> {
     /// `None` for an object whose text only its own class knows.
     fn builder_argument_text(&mut self, param: &str, value: &Value) -> Option<String> {
         let marker = expect_ref(value)?;
+        // A `String` spelling an object's key is that text (`jar_object.rs`).
+        if crate::runtime::jar_object::spells_key(value) {
+            return Some(marker.clone());
+        }
         if let Some(text) = self.string_builders.get(marker) {
             return Some(text.clone());
         }

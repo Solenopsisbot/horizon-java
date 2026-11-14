@@ -361,9 +361,6 @@ pub(crate) const IDENTIFIER_METHODS: Methods = Methods {
                 .is_none_or(|class| class != RESOURCE_LOCATION && class != IDENTIFIER)
                 .then_some(false),
             Value::Host(other) => Some(other == handle),
-            Value::Ref(Some(marker)) => crate::jar_object::packaged_key_class(marker)
-                .is_none_or(|class| class != RESOURCE_LOCATION && class != IDENTIFIER)
-                .then_some(false),
             _ => Some(false),
         })
     },

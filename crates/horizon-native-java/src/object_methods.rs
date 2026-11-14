@@ -825,6 +825,10 @@ impl<H: Host> Runtime<'_, H> {
     /// extends a concrete JDK collection, which the host keeps a row for)
     /// is, as the receiver's own class rather than the call site's owner.
     pub(crate) fn host_collection_class(&self, value: &Value) -> Option<String> {
+        // A `String` is no collection, whatever it spells.
+        if crate::jar_object::spells_key(value) {
+            return None;
+        }
         let marker = expect_ref(value)?;
         let (head, _) = marker
             .split_once(['#', '/'])

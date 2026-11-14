@@ -4,10 +4,9 @@
 //! An object is a handle, `Value::Host` of [`HostKind::JarObject`], whose key
 //! is `<internal class name>#<n>`: its class and the runtime's allocation
 //! number. Every allocation is one (a jar class's, a JDK class's a jar `new`s,
-//! a model's own), so no object is text a `String` can spell (#156 P12b): the
-//! accessors below answer for handles only. (A `Value::Ref` spelling a key
-//! still reads as it did where a reader reads text; #156 P12b2 makes it a
-//! `String` to every reader.) The key is the text the object used to be, so every
+//! a model's own), so no object is text a `String` can spell (#156 P12b): a
+//! `Value::Ref` spelling a key is a `String` to every reader (`is_plain_string`,
+//! the accessors below). The key is the text the object used to be, so every
 //! table keyed by an object (instance fields, the host's throwable messages and
 //! collections, the resident heap) keeps its rows, and `expect_ref` answers a
 //! handle's key to the readers that look one up.
@@ -68,6 +67,12 @@ pub(crate) fn is_object(value: &Value) -> bool {
     object_key(value).is_some()
 }
 
+/// Whether `value` is a `String` whose text spells an object's key (no
+/// object is text, so it is just that string).
+pub(crate) fn spells_key(value: &Value) -> bool {
+    matches!(value, Value::Ref(Some(text)) if parse_key(text).is_some())
+}
+
 /// Whether `handle` is an allocated object.
 pub(crate) fn is_object_handle(handle: &HostRef) -> bool {
     handle.kind() == HostKind::JarObject
@@ -106,23 +111,32 @@ fn split_key(key: &str) -> Option<(&str, &str)> {
 
 /// Whether a reference's *text* spells an object's key, `(class, n)`: what
 /// decides that a `Ref` is a `String` and no host marker. Stricter than a
-/// handle's key: not an array's (`[I#0`), no `:`, space, `.` or `,`, and
-/// not a host collection marker.
+/// handle's key: not an array's (`[I#0`), and no `:`, space, `.`, `,` or `\`
+/// (no class name has one; a host marker may). Whatever the class's package:
+/// `map/Thing#0` is a jar class's key, so a `String` spelling it is a
+/// `String`. No host collection text is shaped like this
+/// ([`unspell_key`]).
 pub(crate) fn parse_key(text: &str) -> Option<(&str, &str)> {
     let (class, number) = split_key(text)?;
-    (!crate::host_array::handle_only_class(class)
-        && !class.contains([':', ' ', '.', ','])
-        && !is_collection_marker(text))
-    .then_some((class, number))
+    (!crate::host_array::handle_only_class(class) && !class.contains([':', ' ', '.', ',', '\\']))
+        .then_some((class, number))
 }
 
-/// A host collection's text marker (`list/a,b`, `set/x#3`, `list#i1/…`,
-/// collections #156 P14), whose last element may end in `#<digits>` like a
-/// key does.
-fn is_collection_marker(text: &str) -> bool {
-    let head = text.split_once('/').map_or(text, |(head, _)| head);
-    let kind = head.split_once('#').map_or(head, |(kind, _)| kind);
-    matches!(kind, "list" | "set" | "map")
+/// A host collection's text (`list/<element markers>`, collections #156
+/// P14) as no `String` can be confused with: a one-element literal whose
+/// element ends in `#<digits>` (`list/rfoo#3`, the String `foo#3`) is
+/// [`parse_key`]-shaped, like a jar class `list/rfoo`'s key, so its last `#`
+/// is escaped (`list/rfoo\#3`), which the element splitter reads back as
+/// `#`.
+pub(crate) fn unspell_key(text: String) -> String {
+    if parse_key(&text).is_none() {
+        return text;
+    }
+    let mut text = text;
+    if let Some(at) = text.rfind('#') {
+        text.insert(at, '\\');
+    }
+    text
 }
 
 /// The class of a handle's key (`class#n`), `None` for a text with no
@@ -162,18 +176,20 @@ pub(crate) fn object_key(value: &Value) -> Option<&str> {
 
 /// The text an instance field of `value` is filed under
 /// (`<receiver>|<owner>#<name><descriptor>`): an object's key, or the text of
-/// any other reference with fields (a jar enum constant's `enum/…`).
+/// any other reference with fields (a jar enum constant's `enum/…`). A
+/// `String` spelling a key has none.
 pub(crate) fn instance_key(value: &Value) -> Option<&str> {
-    object_key(value).or(match value {
-        Value::Ref(Some(text)) => Some(text.as_str()),
+    object_key(value).or_else(|| match value {
+        Value::Ref(Some(text)) if parse_key(text).is_none() => Some(text.as_str()),
         _ => None,
     })
 }
 
-/// [`marker_class`] of a `Ref`'s text.
+/// [`marker_class`] of a `Ref`'s text, `None` for a `String` that spells an
+/// object's key (it is no marker).
 fn ref_marker_class(value: &Value) -> Option<&str> {
     match value {
-        Value::Ref(Some(text)) => marker_class(text),
+        Value::Ref(Some(text)) if parse_key(text).is_none() => marker_class(text),
         _ => None,
     }
 }
@@ -198,6 +214,31 @@ pub(crate) fn packaged_key_class(text: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A jar class in a package named like a host collection (`map`, `list`,
+    /// `set`) has keys a `String` can spell; no collection literal is shaped
+    /// like one, and a literal whose element ends like a key reads back its
+    /// element.
+    #[test]
+    fn no_collection_literal_spells_a_key() {
+        assert_eq!(parse_key("map/Thing#0"), Some(("map/Thing", "0")));
+        assert_eq!(
+            parse_key("list/render/Thing#2"),
+            Some(("list/render/Thing", "2"))
+        );
+        let literal = crate::collection_value("set", &[Value::Ref(Some("foo#3".into()))]);
+        assert_eq!(literal, Value::Ref(Some("set/rfoo\\#3".into())));
+        assert_eq!(parse_key(crate::expect_string(&literal)), None);
+        assert_eq!(
+            crate::collection_values(&literal).unwrap(),
+            [Value::Ref(Some("foo#3".into()))]
+        );
+        // Any other literal is unchanged.
+        assert_eq!(
+            crate::collection_value("list", &[Value::Ref(Some("a#1".into())), Value::Int(2)]),
+            Value::Ref(Some("list/ra#1,i2".into()))
+        );
+    }
 
     /// The class is everything before the last `#`, whatever the class name
     /// holds; a suffix that is no allocation number is no object.
@@ -224,8 +265,7 @@ mod tests {
             "plain text",
             // A host collection marker whose element ends like a key.
             "list/r#1,r#2,r#3",
-            "set/r#3",
-            "list#i1/a#3",
+            "set/r\\#3",
         ] {
             assert_eq!(parse_key(text), None, "{text:?}");
         }
@@ -242,13 +282,20 @@ mod tests {
         // A handle's key is the runtime's: its class is the split, even in a
         // package named like a host collection.
         assert_eq!(object_class(&handle("map/Foo#3".into())), Some("map/Foo"));
-        // A host collection marker a model kept stays that marker.
+        // A host collection marker a model kept stays that marker: a
+        // literal is never key-shaped (`unspell_key`), so its text reads back
+        // as the `Ref` it was.
         assert_eq!(
-            stored_value("list/r#3"),
-            Value::Ref(Some("list/r#3".into()))
+            stored_value("list/r\\#3"),
+            Value::Ref(Some("list/r\\#3".into()))
         );
-        // Text is no object.
+        // The key of an object of a jar class in a package named like a host
+        // collection, kept by a model, is that object again.
+        assert_eq!(stored_value("map/Thing#0"), handle("map/Thing#0".into()));
+        // A `String` spelling a key is no object.
         assert_eq!(object_class(&Value::Ref(Some("demo/Foo#4".into()))), None);
+        assert_eq!(instance_key(&Value::Ref(Some("demo/Foo#4".into()))), None);
+        assert!(spells_key(&Value::Ref(Some("demo/Foo#4".into()))));
         assert_eq!(object_class(&Value::Int(4)), None);
     }
 }

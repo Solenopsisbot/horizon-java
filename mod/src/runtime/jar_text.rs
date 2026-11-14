@@ -193,6 +193,10 @@ impl<H: Host> Runtime<'_, H> {
                     .map(Some),
             };
         }
+        // A `String` spelling an object's key is that text.
+        if crate::runtime::jar_object::spells_key(value) {
+            return Ok(None);
+        }
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };

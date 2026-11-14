@@ -5,8 +5,15 @@
 //! what OpenJDK 25.0.5 printed for `demo.Probe` (`javac --release 21`, two runs
 //! alike):
 //!
-//! * `forged`: whether a `String` spelling an object's key is only that
-//!   string; its test comes with that change (#156 P12b2).
+//! * `forged`: 384 strings spelling `<class>#<n>` for six classes the method
+//!   allocates (`demo/Probe$Foo`, `java/util/concurrent/ThreadPoolExecutor`,
+//!   `ArrayList`, `StringBuilder`, `LinkedBlockingQueue`, `HashMap`) and every
+//!   `n` below 64, so they spell the live objects' keys (the test finds two
+//!   of them in the host's call log). Each of 11 checks (`instanceof`, casts, `getClass`, `equals`
+//!   both ways, `hashCode`, `String.valueOf`/concat/`append`/`format`,
+//!   collection lookups, `==`, reflective `Field.get`/`Method.invoke`, a
+//!   pattern switch, `CharSequence`) counts the texts that behave as the
+//!   `String` they are: all of them on a JVM.
 //! * `identity`: one object keeps one identity through a list, a map, an
 //!   array, a lambda capture, an `Optional`, a synchronized view, a copied
 //!   list and a static field; two allocations are two objects.
@@ -35,7 +42,7 @@
 #[path = "support/javac_fixture.rs"]
 mod javac_fixture;
 
-use horizon_native_java::{StdHost, Value};
+use horizon_native_java::{HostKind, StdHost, Value};
 use javac_fixture::Fixture;
 
 const PROBE: &str = include_str!("fixtures/jar_objects/Probe.java");
@@ -76,6 +83,9 @@ public @interface Mixin {
 }
 "#;
 
+const FORGED: &str = "instanceof=384,cast=384,getClass=384,equals=384,hashCode=384,text=384,\
+                      collections=384,identity=384,reflection=384,switch=384,charSequence=384";
+
 fn fixture() -> Fixture {
     Fixture::build(
         "jar-objects",
@@ -85,6 +95,39 @@ fn fixture() -> Fixture {
             ("org/spongepowered/asm/mixin/Mixin.java", MIXIN_STUB),
         ],
     )
+}
+
+/// The keys of the objects the host saw (receivers and arguments of its
+/// calls): handles, never text.
+fn object_keys(host: &StdHost) -> Vec<String> {
+    host.invocations()
+        .iter()
+        .flat_map(|call| call.receiver.iter().chain(&call.args))
+        .filter_map(|value| match value {
+            Value::Host(handle) if handle.kind() == HostKind::JarObject => {
+                Some(handle.key().to_owned())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_string_spelling_an_object_key_is_only_that_string() {
+    let fixture = fixture();
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    assert_eq!(fixture.text_on(&mut host, "forged"), FORGED);
+    // The texts spelled live keys: `<class>#<n>` with `n` below 64.
+    let keys = object_keys(&host);
+    for class in ["demo/Probe$Foo", "java/util/concurrent/ThreadPoolExecutor"] {
+        assert!(
+            keys.iter().any(|key| key
+                .strip_prefix(&format!("{class}#"))
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| n < 64)),
+            "no {class} object below #64 in {keys:?}"
+        );
+    }
 }
 
 #[test]

@@ -386,14 +386,11 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Ok(equal);
             }
-            // Untyped (`Object`, an array element of unknown type): a text
-            // spelled like an object's key and a host model's marker are no
-            // plain text; anything else may be a `String`.
+            // Untyped (`Object`, an array element of unknown type): a host
+            // model's marker is no plain text; anything else may be a
+            // `String` (an object is a handle, compared above).
             let typed = left == Ty::String || right == Ty::String;
-            if !typed
-                && (crate::runtime::jar_object::packaged_key_class(text).is_some()
-                    || !value_class::is_plain_string(text))
-            {
+            if !typed && !value_class::is_plain_string(text) {
                 return Ok(equal);
             }
             let identity = operands.map_or(Identity::Unknown, |(l, r)| {

@@ -146,6 +146,8 @@ impl StdHost {
     fn guava_parts(&mut self, value: &Value) -> Result<Option<Vec<Value>>, NativeError> {
         let marker = match value {
             Value::Ref(None) => return Err(npe()),
+            // A `String` is no `Iterable`, whatever it spells.
+            Value::Ref(Some(_)) if crate::runtime::jar_object::spells_key(value) => return Ok(None),
             Value::Ref(Some(marker)) => marker,
             // A collection a jar `new`ed, by its key (`jar_object.rs`).
             Value::Host(_) if crate::runtime::jar_object::is_object(value) => {
