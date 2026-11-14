@@ -12067,6 +12067,18 @@ impl GenericSignatureParser<'_> {
                 }
                 b'.' => {
                     self.pos += 1;
+                    // After a parameterized segment, every segment is a
+                    // `ParameterizedType` of its own, with no arguments and
+                    // the segment before as its owner, as Java 25's `Reifier`
+                    // builds it: `Outer<String>.Mid.Deep<Long>`'s owner is
+                    // `Outer<String>.Mid`, whose owner is `Outer<String>`.
+                    if owner.is_some() {
+                        owner = Some(Box::new(GenericType::Parameterized {
+                            raw: name.clone(),
+                            owner: owner.take(),
+                            args: Vec::new(),
+                        }));
+                    }
                     name.push('$');
                 }
                 b';' => {
@@ -21076,8 +21088,10 @@ impl<H: Host> Runtime<'_, H> {
         }
         // `Field.getGenericType` reads the field's `Signature` attribute; a
         // field without one answers the erased class, exactly as the JVM does.
-        // `getAnnotatedType` is that type's `AnnotatedType` (type-use
-        // annotations are not read: none, as for a type nobody annotated).
+        // `getAnnotatedType` is that type's `AnnotatedType`. Type-use
+        // annotations are not read: a field with none answers none exactly,
+        // one with `RuntimeVisibleTypeAnnotations` has its annotation reads
+        // and text counted (`host_reflect_type.rs`).
         let annotated =
             r.name == "getAnnotatedType" && r.descriptor == "()Ljava/lang/reflect/AnnotatedType;";
         if r.owner == "java/lang/reflect/Field"
@@ -21114,7 +21128,14 @@ impl<H: Host> Runtime<'_, H> {
                     |value| generic_type_value(&value),
                 );
             return Ok(Some(if annotated {
-                host_reflect_type::annotated(value)
+                // A field's `RuntimeVisibleTypeAnnotations` all target its
+                // type: Java 25 reports them, so the annotations are counted.
+                let unread = reflect_generic::type_annotations_unread(
+                    self.class(class),
+                    true,
+                    (name, descriptor.as_deref().unwrap_or_default()),
+                );
+                host_reflect_type::annotated(value, unread)
             } else {
                 value
             }));
@@ -21138,7 +21159,9 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 // `Class.equals` is identity, and one class has one marker
                 // (#156 P13 makes it a handle): another class's marker, a type
-                // handle (no `Class`) or `null` is another object.
+                // handle (no `Class`) or `null` is another object. The same
+                // spelling may be that `Class` or a `String` spelled like it
+                // (text until P13): counted, never `true` from the text.
                 if r.name == "equals"
                     && r.descriptor == "(Ljava/lang/Object;)Z"
                     && let Some(marker) = marker
@@ -21149,7 +21172,7 @@ impl<H: Host> Runtime<'_, H> {
                         Value::Ref(Some(other))
                             if class_marker_like(other, self.classes, &self.linked) =>
                         {
-                            Some(Value::Int(i32::from(other == marker)))
+                            (other != marker).then_some(Value::Int(0))
                         }
                         Value::Ref(None) | Value::Host(_) => Some(Value::Int(0)),
                         // A string or a jar object: no class marker.

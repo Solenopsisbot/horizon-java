@@ -13,10 +13,13 @@
 //!   (the internal name), so `getGenericType() == String.class` holds. #156
 //!   P13 (`Class` objects) must turn both into one `Class` handle.
 //! * `ParameterizedTypeImpl`, `TypeVariableImpl`, `WildcardTypeImpl` and
-//!   `GenericArrayTypeImpl` are built afresh by every reflective call (a
-//!   `Field` caches its own, but `getDeclaredField` hands out copies): not
-//!   canonical, so identity between two answers is counted unless the same
-//!   handle flows. Their `equals` is specified and structural:
+//!   `GenericArrayTypeImpl`: two lookups of one member usually answer the
+//!   **same** object on Java 25 (`getField("ls").getGenericType() ==
+//!   getField("ls").getGenericType()` is `true`: a `Field` or `Method` copy
+//!   shares its root's generic repository), but that cache is soft-referenced
+//!   and may be rebuilt, so the kind is not canonical and identity between
+//!   two answers is counted unless the same handle flows. Their `equals` is
+//!   specified and structural:
 //!   * `ParameterizedTypeImpl`: owner, raw type and arguments equal (an
 //!     implicit owner is the raw class's declaring class);
 //!   * `TypeVariableImpl`: the same generic declaration and name;
@@ -36,6 +39,10 @@
 //! * `AnnotatedType`: an `AnnotatedTypeFactory` implementation per shape,
 //!   built afresh per call (not canonical); its `equals` compares types,
 //!   annotations and owners (counted here unless the same handle flows).
+//!   Type-use annotations are not read: a member with no
+//!   `RuntimeVisibleTypeAnnotations` has none (exact); one with them marks
+//!   its `AnnotatedType`s ([`annotations_unread`]), whose annotation reads and
+//!   text are counted, nested ones included (Java 25 reports them).
 //!
 //! Keys hold a node through [`HostRef::of_values`]: a class is its name, a
 //! nested node its own handle. Class and variable names (jar text with `<`,
@@ -43,9 +50,17 @@
 //!
 //! **For #156 P5b (Gson `TypeToken`):** `new TypeToken<List<String>>(){}`
 //! reads the anonymous class's `getGenericSuperclass()`, which answers this
-//! module's handle; take its type argument with [`type_node`] and hand the
-//! same `Value` back from `getType()` ([`type_value`] builds one from a
-//! node). A `TypeToken` must not re-encode the type as text.
+//! module's handle; read its type argument with [`type_node`]. Gson 2.14.0's
+//! `TypeToken` stores `GsonTypes.canonicalize(arg)`, a **new Gson object**:
+//! `getType() == arg` is `false`, `equals` and `hashCode` agree with the JDK
+//! node both ways, its class is `com.google.gson.internal.GsonTypes$
+//! ParameterizedTypeImpl`, and a nested generic prints differently
+//! (`g.G$Outer$Inner<java.lang.Integer>`, where the JDK prints
+//! `g.G$Outer<java.lang.String>$Inner<java.lang.Integer>`); a `Class` stays
+//! itself. So P5b must model Gson's canonical type (its own kind or a flag:
+//! equal by content, Gson's class and `toString`), never hand this module's
+//! handle back, and never build one with [`type_value`] (that would claim
+//! the JDK's class). It must not re-encode the type as text either.
 //!
 //! [`ClassRule::Unknown`]: crate::runtime::host_ref::ClassRule
 
@@ -379,9 +394,30 @@ pub(crate) const TYPE_METHODS: Methods = Methods {
     compare_to: None,
 };
 
+/// The mark an `AnnotatedType`'s key carries when its member has type-use
+/// annotations the runtime does not read (`RuntimeVisibleTypeAnnotations`).
+const UNREAD: &str = "type-annotations";
+
 /// The `AnnotatedType` of the type `inner` (a class marker or a type handle).
-pub(crate) fn annotated(inner: Value) -> Value {
-    Value::Host(HostRef::of_values(HostKind::AnnotatedType, &[inner]))
+/// `unread`: its member carries type-use annotations the runtime does not
+/// read, so its annotations and text are counted (Java 25 reports them).
+pub(crate) fn annotated(inner: Value, unread: bool) -> Value {
+    let values = if unread {
+        vec![inner, Value::Ref(Some(UNREAD.into()))]
+    } else {
+        vec![inner]
+    };
+    Value::Host(HostRef::of_values(HostKind::AnnotatedType, &values))
+}
+
+/// Whether an `AnnotatedType` handle's annotations are unknown here.
+pub(crate) fn annotations_unread(value: &Value) -> bool {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::AnnotatedType => {
+            handle.values().is_some_and(|values| values.len() == 2)
+        }
+        _ => false,
+    }
 }
 
 /// The type an `AnnotatedType` handle annotates.
@@ -389,7 +425,7 @@ pub(crate) fn annotated_inner(value: &Value) -> Option<Value> {
     match value {
         Value::Host(handle) if handle.kind() == HostKind::AnnotatedType => {
             match handle.values()?.as_slice() {
-                [inner] => Some(inner.clone()),
+                [inner] | [inner, _] => Some(inner.clone()),
                 _ => None,
             }
         }
@@ -441,6 +477,11 @@ fn names_nested_class(node: &GenericType) -> bool {
 /// `AnnotatedType.toString` of a type nobody annotated: the type's name
 /// (Java 25, the fixture's `annotated` line); a nested class is counted.
 fn annotated_text(handle: &HostRef, _: &mut dyn Nested) -> Result<Option<String>, NativeError> {
+    // Unread type-use annotations print before the type (`@demo.TU()
+    // java.lang.String`): counted.
+    if annotations_unread(&Value::Host(handle.clone())) {
+        return Ok(None);
+    }
     Ok(annotated_inner(&Value::Host(handle.clone()))
         .and_then(|inner| type_node(&inner))
         .filter(|node| !names_nested_class(node))

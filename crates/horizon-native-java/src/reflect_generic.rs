@@ -72,6 +72,63 @@ impl ClassFile {
     }
 }
 
+impl ClassFile {
+    /// Whether one field (`field`) or method carries the attribute named
+    /// `attribute` (`RuntimeVisibleTypeAnnotations`); `None` for a member the
+    /// file does not hold or a malformed file.
+    pub(crate) fn member_has_attribute(
+        &self,
+        field: bool,
+        member: (&str, &str),
+        attribute: &str,
+    ) -> Option<bool> {
+        let mut r = Reader::new(&self.raw);
+        if r.u4().ok()? != 0xCAFE_BABE {
+            return None;
+        }
+        r.skip(4).ok()?;
+        let pool = read_pool(&mut r).ok()?;
+        r.skip(6).ok()?; // access, this, super
+        let interfaces = r.u2().ok()? as usize;
+        r.skip(interfaces.checked_mul(2)?).ok()?;
+        for table in [true, false] {
+            let count = r.u2().ok()? as usize;
+            for _ in 0..count {
+                r.skip(2).ok()?;
+                let name = utf8(&pool, r.u2().ok()?).ok()?;
+                let descriptor = utf8(&pool, r.u2().ok()?).ok()?;
+                if table != field || (name.as_str(), descriptor.as_str()) != member {
+                    skip_attributes(&mut r)?;
+                    continue;
+                }
+                let attributes = r.u2().ok()? as usize;
+                let mut found = false;
+                for _ in 0..attributes {
+                    found |= utf8(&pool, r.u2().ok()?).ok()? == attribute;
+                    let length = r.u4().ok()? as usize;
+                    r.skip(length).ok()?;
+                }
+                return Some(found);
+            }
+        }
+        None
+    }
+}
+
+/// Whether the `AnnotatedType`s of a member's type may carry type-use
+/// annotations the runtime does not read: its `RuntimeVisibleTypeAnnotations`
+/// (a field's all target its type; a method's may target only a parameter,
+/// which still makes its return type's answers counted). A member the
+/// runtime does not hold, or a malformed file, may too.
+pub(crate) fn type_annotations_unread(
+    file: Option<&ClassFile>,
+    field: bool,
+    member: (&str, &str),
+) -> bool {
+    file.and_then(|file| file.member_has_attribute(field, member, "RuntimeVisibleTypeAnnotations"))
+        .unwrap_or(true)
+}
+
 fn skip_attributes(r: &mut Reader<'_>) -> Option<()> {
     let count = r.u2().ok()? as usize;
     for _ in 0..count {
@@ -225,9 +282,10 @@ fn method_marker(value: Option<&Value>) -> Option<(String, String, String)> {
     Some((method.class, method.name, descriptor))
 }
 
-/// The `AnnotatedType` of a type node (`host_reflect_type.rs`).
-fn annotated(value: &GenericType) -> Value {
-    crate::host_reflect_type::annotated(generic_type_value(value))
+/// The `AnnotatedType` of a type node (`host_reflect_type.rs`); `unread`:
+/// its member carries type-use annotations the runtime does not read.
+fn annotated(value: &GenericType, unread: bool) -> Value {
+    crate::host_reflect_type::annotated(generic_type_value(value), unread)
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -379,10 +437,20 @@ impl<H: Host> Runtime<'_, H> {
                 Some((_, result)) => generic_type_value(&result),
                 None => erased(&erased_return),
             },
-            ("getAnnotatedReturnType", "()Ljava/lang/reflect/AnnotatedType;") => match generic() {
-                Some((_, result)) => annotated(&result),
-                None => annotated(&GenericType::Class(erased_field_type(&erased_return))),
-            },
+            ("getAnnotatedReturnType", "()Ljava/lang/reflect/AnnotatedType;") => {
+                let unread = type_annotations_unread(
+                    self.class(&class),
+                    false,
+                    (name.as_str(), descriptor.as_str()),
+                );
+                match generic() {
+                    Some((_, result)) => annotated(&result, unread),
+                    None => annotated(
+                        &GenericType::Class(erased_field_type(&erased_return)),
+                        unread,
+                    ),
+                }
+            }
             ("getParameterTypes", "()[Ljava/lang/Class;") => {
                 let types = erased_parameters();
                 self.generic_type_array("[Ljava/lang/Class;", &types)
@@ -436,6 +504,22 @@ impl<H: Host> Runtime<'_, H> {
     fn annotated_type_member(&mut self, r: &MethodRef, receiver: Option<&Value>) -> Option<Value> {
         let inner = crate::host_reflect_type::annotated_inner(receiver?)?;
         let node = crate::host_reflect_type::type_node(&inner)?;
+        // A member with type-use annotations the runtime does not read: its
+        // annotations are counted (`None`), and the nested `AnnotatedType`s
+        // carry the same mark. Its type and shape stay exact.
+        let unread = crate::host_reflect_type::annotations_unread(receiver?);
+        let annotation_read = matches!(
+            r.name.as_str(),
+            "getAnnotations"
+                | "getDeclaredAnnotations"
+                | "getAnnotation"
+                | "getDeclaredAnnotation"
+                | "isAnnotationPresent"
+        );
+        if unread && annotation_read {
+            return None;
+        }
+        let annotated = |value: &GenericType| annotated(value, unread);
         Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("getType", "()Ljava/lang/reflect/Type;") => inner,
             (

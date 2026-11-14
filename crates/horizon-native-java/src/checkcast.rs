@@ -148,6 +148,29 @@ impl<H: Host> Runtime<'_, H> {
         if *value == Value::Ref(None) || target == "java/lang/Object" {
             return Ok(());
         }
+        // A reference's text cast to a reflective `Type` shape: no text is a
+        // `ParameterizedType`, `TypeVariable`, `WildcardType` or
+        // `GenericArrayType` (those are handles, `host_reflect_type.rs`), and
+        // a `String` is no `Type`. A plain string throws Java's CCE; a text
+        // that may be a `Class` (text until #156 P13) or a host marker is
+        // counted, since the exception's class is not known.
+        if let Value::Ref(Some(text)) = value
+            && matches!(
+                target,
+                "java/lang/reflect/ParameterizedType"
+                    | "java/lang/reflect/TypeVariable"
+                    | "java/lang/reflect/WildcardType"
+                    | "java/lang/reflect/GenericArrayType"
+                    | "java/lang/reflect/Type"
+            )
+        {
+            if crate::value_class::is_plain_string(text)
+                && !crate::class_marker_like(text, self.classes, &self.linked)
+            {
+                return Err(class_cast_exception("java/lang/String", target));
+            }
+            return self.count_cast(value, target);
+        }
         // A host handle is its kind's class, and only a handle is one of a
         // handle kind's classes (`host_ref.rs`): `(String) Optional.empty()`
         // and `(Optional<?>) "text"` throw.
