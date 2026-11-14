@@ -160,10 +160,13 @@ impl<H: Host> Runtime<'_, H> {
                     &collection,
                     &[],
                 )?;
-                return Ok(Some(
-                    self.host
-                        .new_enumeration(EnumerationOver::Iterator(iterator)),
-                ));
+                return match self
+                    .host
+                    .new_enumeration(EnumerationOver::Iterator(iterator))
+                {
+                    Some(enumeration) => Ok(Some(enumeration)),
+                    None => self.host.unknown_operand_call(r).map(Some),
+                };
             }
             (
                 0xb6,
@@ -178,10 +181,13 @@ impl<H: Host> Runtime<'_, H> {
             }) =>
             {
                 let vector = receiver.cloned().unwrap_or(Value::Ref(None));
-                return Ok(Some(
-                    self.host
-                        .new_enumeration(EnumerationOver::Vector { vector, count: 0 }),
-                ));
+                return match self
+                    .host
+                    .new_enumeration(EnumerationOver::Vector { vector, count: 0 })
+                {
+                    Some(enumeration) => Ok(Some(enumeration)),
+                    None => self.host.unknown_operand_call(r).map(Some),
+                };
             }
             _ => {}
         }
@@ -241,6 +247,82 @@ impl<H: Host> Runtime<'_, H> {
                 _ => return Ok(None),
             },
         ))
+    }
+}
+
+/// `Joiner`'s class (Guava).
+const JOINER: &str = "com/google/common/base/Joiner";
+
+/// Parts one `Joiner.join(Iterator)` may drain before the call is counted instead.
+const MAX_JOINED_PARTS: usize = 65_536;
+
+impl<H: Host> Runtime<'_, H> {
+    /// Guava's `Joiner.join(Iterator)` on a plain joiner (the host's model): `appendTo` walks the
+    /// iterator through its own `hasNext`/`next`, so it consumes it and fails fast as that
+    /// iterator does (#225). The parts it drew are then joined by the host's `join(Iterable)`. A
+    /// `null` part stops the walk where Java's `toString(part)` throws, after consuming it.
+    /// `Ok(None)` leaves any other call (and any other joiner) to the chain.
+    pub(crate) fn invoke_joiner_iterator(
+        &mut self,
+        r: &MethodRef,
+        opcode: u8,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let (0xb6, true, Some(joiner), [iterator]) = (
+            opcode,
+            r.owner == JOINER
+                && r.name == "join"
+                && r.descriptor == "(Ljava/util/Iterator;)Ljava/lang/String;",
+            receiver,
+            args,
+        ) else {
+            return Ok(None);
+        };
+        // A configured joiner (`skipNulls`, `useForNull`) is the host's to count; a `null`
+        // iterator its NPE; an iterator that is neither the host's nor a jar object is counted.
+        if crate::runtime::host_guava::separator(joiner, true).is_none()
+            || marker(iterator).is_none() && crate::runtime::jar_object::object_key(iterator).is_none()
+        {
+            return Ok(None);
+        }
+        let mut parts = Vec::new();
+        loop {
+            let more = self.call_virtual(
+                Site::Interface,
+                "java/util/Iterator",
+                "hasNext",
+                "()Z",
+                iterator,
+                &[],
+            )?;
+            if more != Value::Int(1) {
+                break;
+            }
+            if parts.len() >= MAX_JOINED_PARTS {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
+            let part = self.call_virtual(
+                Site::Interface,
+                "java/util/Iterator",
+                "next",
+                "()Ljava/lang/Object;",
+                iterator,
+                &[],
+            )?;
+            let null = part == Value::Ref(None);
+            parts.push(part);
+            if null {
+                break;
+            }
+        }
+        let parts = self.new_array_list(parts);
+        let join = MethodRef {
+            owner: JOINER.into(),
+            name: "join".into(),
+            descriptor: "(Ljava/lang/Iterable;)Ljava/lang/String;".into(),
+        };
+        self.host.invoke_instance(&join, joiner, &[parts]).map(Some)
     }
 }
 
