@@ -70,10 +70,8 @@ fn a_bound_reference_through_a_bound_reference_throws_what_the_inner_call_throws
 }
 
 /// A list iterator's `li::previous` at its start, through `p::get`, a lambda
-/// and directly. Main has no list-iterator model yet (even the direct
-/// `li.previous()` is refused); #222 adds it, and this runs once it lands.
+/// and directly, through #222's list-iterator model.
 #[test]
-#[ignore = "needs #222's list-iterator model (#156 P14f)"]
 fn a_list_iterators_previous_through_a_bound_reference_throws() {
     let fixture = build();
     if let Some(failure) = run(&fixture, "listIterator") {
