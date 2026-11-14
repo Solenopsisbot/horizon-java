@@ -556,7 +556,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     /// A new `ArrayList` of its own holding `values` (`Collectors.toList()`).
     pub(crate) fn new_array_list(&mut self, values: Vec<Value>) -> Value {
         match self.host.empty_mutable_collection("list") {
-            Some(list) if self.host.mutable_collection_values(&list).is_some() => {
+            Some(list) if self.host.holds_collection(&list) => {
                 self.host.replace_mutable_collection(&list, values);
                 list
             }
@@ -716,7 +716,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             return;
         }
         let class = crate::runtime::jar_object::marker_class(source).unwrap_or("");
-        if FAIL_FAST.contains(&class) && self.host.mutable_collection_values(collection).is_some() {
+        if FAIL_FAST.contains(&class) && self.host.holds_collection(collection) {
             self.pipelines.origins.insert(
                 marker.clone(),
                 Origin {

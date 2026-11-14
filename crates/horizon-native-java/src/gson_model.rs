@@ -1055,7 +1055,7 @@ pub(super) fn non_executable_prefix(style: &GsonStyle) -> Option<&'static str> {
 /// name whose list/set/map family decides how its pairs or elements serialize.
 fn gson_marker_kind<H: Host>(host: &H, value: &Value) -> Option<&'static str> {
     let marker = expect_ref(value)?;
-    if host.mutable_collection_values(value).is_some() {
+    if host.holds_collection(value) {
         let class = marker
             .split_once('#')
             .map_or(marker.as_str(), |(class, _)| class);
