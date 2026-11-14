@@ -5,7 +5,7 @@ import java.lang.reflect.Method;
 public final class HostLibraryValuesOracle {
   public static void main(String[] args) throws Exception {
     for (String probe : new String[] {"spelled", "spelledTypes", "styles", "tokens", "styleText", "tokenHash", "typeSwitch", "gsonSubclass", "gsonGet", "gsonNested", "gsonWildcards",
-        "gsonMember", "gsonHash"}) {
+        "gsonMember", "gsonHash", "listed", "sorted"}) {
       Method m = HostLibraryValues.class.getMethod(probe);
       Object answer;
       try {

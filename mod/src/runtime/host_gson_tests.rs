@@ -159,6 +159,13 @@ fn styles_and_tokens_answer_as_java_25_or_count() {
         ),
         // Classes' identity hashes: counted.
         ("gsonHash", Counted),
+        // Inside host collections: the tokens' and types' text.
+        (
+            "listed",
+            Exact("[java.lang.String, java.lang.Integer]|[java.util.List<java.lang.String>]"),
+        ),
+        // No natural order (Java `CCECCECCE`): counted.
+        ("sorted", Counted),
         // An interface a library class could gain is counted; Java's case is `F`.
         ("typeSwitch", CountedAs("F")),
     ];

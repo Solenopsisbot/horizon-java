@@ -1,6 +1,8 @@
-# Gson `FormattingStyle` and Guava `TypeToken` as host objects (#156 P5b)
+# Gson `FormattingStyle` and `TypeToken`, Guava `TypeToken` as host objects (#156 P5b)
 
-`demo/HostLibraryValues.java` makes styles and tokens through the real API. `host_gson_tests.rs`
+`demo/HostLibraryValues.java` makes styles and tokens through the real API: Gson's
+`FormattingStyle`, Guava's `TypeToken.of`, and Gson's `TypeToken` (`get`, `getArray`, a jar's
+`new TypeToken<T>() {}`), whose type is Gson's own canonical copy of the JDK's. `host_gson_tests.rs`
 compiles it against the compile-only stubs in `stubs/` and ships only `demo/*`, so every call
 reaches the runtime's model.
 

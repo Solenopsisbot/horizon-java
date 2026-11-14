@@ -160,4 +160,25 @@ public final class HostLibraryValues {
   public static String gsonHash() {
     return "" + new com.google.gson.reflect.TypeToken<List<String>>() {}.hashCode();
   }
+
+  /** Inside host collections: a list prints its tokens and types. */
+  public static String listed() {
+    return List.of(com.google.gson.reflect.TypeToken.get(String.class), TypeToken.of(Integer.class)).toString() + "|"
+        + List.of(new com.google.gson.reflect.TypeToken<List<String>>() {}.getType());
+  }
+
+  /** None is Comparable: a TreeSet throws (counted). */
+  public static String sorted() {
+    StringBuilder out = new StringBuilder();
+    for (Object o : new Object[] {com.google.gson.reflect.TypeToken.get(String.class), TypeToken.of(String.class),
+        FormattingStyle.PRETTY}) {
+      try {
+        new TreeSet<Object>().add(o);
+        out.append("added");
+      } catch (ClassCastException x) {
+        out.append("CCE");
+      }
+    }
+    return out.toString();
+  }
 }
