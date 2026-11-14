@@ -37,6 +37,13 @@ const RETIRED_PREFIXES: &[&str] = &[
     "mixin/callback-info/",
     "mixin-plugin/",
     "mixin-side/",
+    // Iterators, enumerations and list iterators are handles, and `Collectors`' results
+    // `Collector` handles (#156 P14f, `host_iterator.rs`, `host_collector.rs`).
+    "iterator/",
+    "resource-enumeration/",
+    "enumeration/",
+    "list-iterator/",
+    "collector/",
 ];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
