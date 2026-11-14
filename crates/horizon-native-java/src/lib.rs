@@ -5970,9 +5970,9 @@ impl Host for StdHost {
             // `URI.create`/`URI.parse` keep the text in the marker: a mod's
             // null-check on the result must not see null just because the
             // loader it came from is not modelled.
-            ("java/net/URI", "create" | "parse", "(Ljava/lang/String;)Ljava/net/URI;") => {
-                Ok(host_jdk_value::uri(expect_string(Self::argument(r, args, 0)?)))
-            }
+            ("java/net/URI", "create" | "parse", "(Ljava/lang/String;)Ljava/net/URI;") => Ok(
+                host_jdk_value::uri(expect_string(Self::argument(r, args, 0)?)),
+            ),
             ("java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;") => {
                 let key = match Self::argument(r, args, 0)? {
                     Value::Ref(Some(key)) => key,
@@ -10140,32 +10140,51 @@ fn duration_seconds_nanos(nanos: i128) -> (i128, i128) {
     (seconds, nanos.rem_euclid(1_000_000_000))
 }
 
-/// `java.time.Duration#toString` for the marker's exact value: hours, minutes
-/// and seconds with the fractional part only when it is non-zero.
-fn duration_text(nanos: i128) -> String {
-    if nanos == 0 {
-        return "PT0S".to_owned();
+/// `Duration.toString()` (Java 25): `PT` and the hours, minutes and seconds of the duration's
+/// seconds (one less for a negative duration with nanos), the nanos as a fraction with trailing
+/// zeros dropped, so `ofSeconds(-1, 500_000_000)` is `PT-0.5S`.
+fn duration_text(total: i128) -> String {
+    let seconds = total.div_euclid(1_000_000_000) as i64;
+    let nanos = total.rem_euclid(1_000_000_000) as i64;
+    if seconds == 0 && nanos == 0 {
+        return "PT0S".into();
     }
-    let sign = if nanos < 0 { "-" } else { "" };
-    let (seconds, fraction) = duration_seconds_nanos(nanos.abs());
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let seconds = seconds % 60;
-    let mut text = format!("{sign}PT");
+    let effective = if seconds < 0 && nanos > 0 {
+        seconds + 1
+    } else {
+        seconds
+    };
+    let hours = effective / 3600;
+    let minutes = (effective % 3600) / 60;
+    let secs = effective % 60;
+    let mut text = String::from("PT");
     if hours != 0 {
         text.push_str(&format!("{hours}H"));
     }
     if minutes != 0 {
         text.push_str(&format!("{minutes}M"));
     }
-    if seconds != 0 || fraction != 0 {
-        if fraction == 0 {
-            text.push_str(&format!("{seconds}S"));
-        } else {
-            let fraction = format!("{fraction:09}").trim_end_matches('0').to_owned();
-            text.push_str(&format!("{seconds}.{fraction}S"));
-        }
+    if secs == 0 && nanos == 0 && text.len() > 2 {
+        return text;
     }
+    if seconds < 0 && nanos > 0 && secs == 0 {
+        text.push_str("-0");
+    } else {
+        text.push_str(&secs.to_string());
+    }
+    if nanos > 0 {
+        let fraction = if seconds < 0 {
+            2 * 1_000_000_000 - nanos
+        } else {
+            nanos + 1_000_000_000
+        };
+        let fraction = fraction.to_string();
+        let fraction = fraction.trim_end_matches('0');
+        // The leading digit stands for the point.
+        text.push('.');
+        text.push_str(&fraction[1..]);
+    }
+    text.push('S');
     text
 }
 

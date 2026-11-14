@@ -85,6 +85,7 @@ mod host_guava;
 mod host_ids;
 mod host_invoke;
 mod host_jdk;
+mod host_jdk_value;
 mod host_list_iterator;
 mod host_mixin;
 mod host_neoforge_loader;
@@ -4262,16 +4263,8 @@ impl StdHost {
                 }
                 duration_value(nanos / i128::from(divisor))
             }
-            ("compareTo", "(Ljava/time/Duration;)I") => Value::Int(match nanos.cmp(&other()?) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            }),
-            ("equals", "(Ljava/lang/Object;)Z") => Value::Int(i32::from(
-                duration_nanos(Self::argument(r, args, 0)?) == Some(nanos),
-            )),
-            ("hashCode", "()I") => Value::Int(stable_hash(&format!("duration/{nanos}"))),
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(duration_text(nanos))),
+            // `equals`/`hashCode`/`compareTo`/`toString` are the kind's row
+            // (`host_jdk_value.rs`).
             _ => return Ok(None),
         }))
     }
@@ -4333,7 +4326,7 @@ impl StdHost {
         if r.owner != "java/net/URI" {
             return None;
         }
-        let text = expect_ref(receiver)?.strip_prefix("uri/")?;
+        let text = host_jdk_value::uri_text(receiver)?;
         let (scheme, rest) = text.split_once("://").unwrap_or(("", text));
         let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
         let host = authority
@@ -5980,12 +5973,9 @@ impl Host for StdHost {
             // `URI.create`/`URI.parse` keep the text in the marker: a mod's
             // null-check on the result must not see null just because the
             // loader it came from is not modelled.
-            ("java/net/URI", "create" | "parse", "(Ljava/lang/String;)Ljava/net/URI;") => {
-                Ok(Value::Ref(Some(format!(
-                    "uri/{}",
-                    expect_string(Self::argument(r, args, 0)?)
-                ))))
-            }
+            ("java/net/URI", "create" | "parse", "(Ljava/lang/String;)Ljava/net/URI;") => Ok(
+                host_jdk_value::uri(expect_string(Self::argument(r, args, 0)?)),
+            ),
             ("java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;") => {
                 let key = match Self::argument(r, args, 0)? {
                     Value::Ref(Some(key)) => key,
@@ -8752,21 +8742,6 @@ impl Host for StdHost {
                     None => self.unknown_host_call(r),
                 }
             }
-            ("java/util/UUID", "toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
-                uuid_text(receiver)
-                    .ok_or_else(|| NativeError::Metadata("malformed UUID marker".into()))?
-                    .to_owned(),
-            ))),
-            ("java/util/UUID", "equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(
-                (uuid_text(receiver).is_some()
-                    && uuid_text(Self::argument(r, args, 0)?)
-                        .is_some_and(|other| uuid_text(receiver) == Some(other)))
-                    as i32,
-            )),
-            ("java/util/UUID", "hashCode", "()I") => Ok(Value::Int(stable_hash(
-                uuid_text(receiver)
-                    .ok_or_else(|| NativeError::Metadata("malformed UUID marker".into()))?,
-            ))),
             // A handle's `toString`/`hashCode`/`equals` are its kind's row in the
             // kind table (`host_ref.rs`), whatever class the call names.
             // A host `null` typed as an optional reads as the empty one.
@@ -9429,7 +9404,6 @@ impl Host for StdHost {
                 "()Ljava/lang/String;",
             ) => {
                 let value = expect_string(receiver);
-                let value = value.strip_prefix("version/").unwrap_or(value);
                 Ok(Value::Ref(Some(
                     value.rsplit('/').next().unwrap_or(value).to_owned(),
                 )))
@@ -10157,11 +10131,11 @@ fn is_event_bus_owner(owner: &str) -> bool {
 /// `ArithmeticException`, which is the same bounded compromise the host makes
 /// for other fixed-width conversions.
 fn duration_value(nanos: i128) -> Value {
-    Value::Ref(Some(format!("duration/{nanos}")))
+    host_jdk_value::duration(nanos)
 }
 
 fn duration_nanos(value: &Value) -> Option<i128> {
-    expect_ref(value)?.strip_prefix("duration/")?.parse().ok()
+    host_jdk_value::duration_nanos(value)
 }
 
 fn duration_seconds_nanos(nanos: i128) -> (i128, i128) {
@@ -10169,32 +10143,51 @@ fn duration_seconds_nanos(nanos: i128) -> (i128, i128) {
     (seconds, nanos.rem_euclid(1_000_000_000))
 }
 
-/// `java.time.Duration#toString` for the marker's exact value: hours, minutes
-/// and seconds with the fractional part only when it is non-zero.
-fn duration_text(nanos: i128) -> String {
-    if nanos == 0 {
-        return "PT0S".to_owned();
+/// `Duration.toString()` (Java 25): `PT` and the hours, minutes and seconds of the duration's
+/// seconds (one less for a negative duration with nanos), the nanos as a fraction with trailing
+/// zeros dropped, so `ofSeconds(-1, 500_000_000)` is `PT-0.5S`.
+fn duration_text(total: i128) -> String {
+    let seconds = total.div_euclid(1_000_000_000) as i64;
+    let nanos = total.rem_euclid(1_000_000_000) as i64;
+    if seconds == 0 && nanos == 0 {
+        return "PT0S".into();
     }
-    let sign = if nanos < 0 { "-" } else { "" };
-    let (seconds, fraction) = duration_seconds_nanos(nanos.abs());
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let seconds = seconds % 60;
-    let mut text = format!("{sign}PT");
+    let effective = if seconds < 0 && nanos > 0 {
+        seconds + 1
+    } else {
+        seconds
+    };
+    let hours = effective / 3600;
+    let minutes = (effective % 3600) / 60;
+    let secs = effective % 60;
+    let mut text = String::from("PT");
     if hours != 0 {
         text.push_str(&format!("{hours}H"));
     }
     if minutes != 0 {
         text.push_str(&format!("{minutes}M"));
     }
-    if seconds != 0 || fraction != 0 {
-        if fraction == 0 {
-            text.push_str(&format!("{seconds}S"));
-        } else {
-            let fraction = format!("{fraction:09}").trim_end_matches('0').to_owned();
-            text.push_str(&format!("{seconds}.{fraction}S"));
-        }
+    if secs == 0 && nanos == 0 && text.len() > 2 {
+        return text;
     }
+    if seconds < 0 && nanos > 0 && secs == 0 {
+        text.push_str("-0");
+    } else {
+        text.push_str(&secs.to_string());
+    }
+    if nanos > 0 {
+        let fraction = if seconds < 0 {
+            2 * 1_000_000_000 - nanos
+        } else {
+            nanos + 1_000_000_000
+        };
+        let fraction = fraction.to_string();
+        let fraction = fraction.trim_end_matches('0');
+        // The leading digit stands for the point.
+        text.push('.');
+        text.push_str(&fraction[1..]);
+    }
+    text.push('S');
     text
 }
 
@@ -10236,12 +10229,7 @@ fn random_uuid() -> String {
 }
 
 fn uuid_value(text: &str) -> Result<Value, NativeError> {
-    let canonical = canonical_uuid(text)?;
-    Ok(Value::Ref(Some(format!("uuid/{canonical}"))))
-}
-
-fn uuid_text(value: &Value) -> Option<&str> {
-    expect_ref(value)?.strip_prefix("uuid/")
+    Ok(host_jdk_value::uuid(&canonical_uuid(text)?))
 }
 
 fn canonical_uuid(text: &str) -> Result<String, NativeError> {
@@ -33653,12 +33641,26 @@ mandatory = true
                     descriptor: "(Ljava/lang/Object;)Z".into(),
                 },
                 &uuid,
+                &[host_jdk_value::uuid("550e8400-e29b-41d4-a716-446655440000")],
+            )
+            .unwrap(),
+            Value::Int(1)
+        );
+        // A String spelled like the old marker is no UUID.
+        assert_eq!(
+            host.invoke_instance(
+                &MethodRef {
+                    owner: "java/util/UUID".into(),
+                    name: "equals".into(),
+                    descriptor: "(Ljava/lang/Object;)Z".into(),
+                },
+                &uuid,
                 &[Value::Ref(Some(
                     "uuid/550e8400-e29b-41d4-a716-446655440000".into(),
                 ))],
             )
             .unwrap(),
-            Value::Int(1)
+            Value::Int(0)
         );
         let random = host
             .invoke(
@@ -33683,10 +33685,7 @@ mandatory = true
             .unwrap(),
             {
                 // A distinct version-4 UUID per call, as `UUID.randomUUID`.
-                let text = expect_string(&random)
-                    .strip_prefix("uuid/")
-                    .unwrap()
-                    .to_owned();
+                let text = host_jdk_value::uuid_text(&random).unwrap().to_owned();
                 assert_eq!((text.len(), &text[14..15]), (36, "4"));
                 assert!("89ab".contains(&text[19..20]));
                 Value::Ref(Some(text))

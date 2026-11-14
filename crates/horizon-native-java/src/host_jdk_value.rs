@@ -72,11 +72,13 @@ fn uuid_compare(
     ) else {
         return Ok(None);
     };
-    Ok(Some(match own.0.cmp(&theirs.0).then(own.1.cmp(&theirs.1)) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
+    Ok(Some(
+        match own.0.cmp(&theirs.0).then(own.1.cmp(&theirs.1)) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
+    ))
 }
 
 pub(crate) const UUID_METHODS: Methods = Methods {
@@ -135,13 +137,7 @@ fn duration_compare(
 }
 
 pub(crate) const DURATION_METHODS: Methods = Methods {
-    to_string: |handle, _| {
-        Ok(handle
-            .key()
-            .parse::<i128>()
-            .ok()
-            .map(crate::duration_text))
-    },
+    to_string: |handle, _| Ok(handle.key().parse::<i128>().ok().map(crate::duration_text)),
     hash_code: duration_hash,
     equals: same_kind_equals,
     instance_of: instance_of_class,
