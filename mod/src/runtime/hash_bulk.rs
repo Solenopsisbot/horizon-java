@@ -446,7 +446,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut entries = self.collection_elements(receiver)?;
                 entries.extend([key.clone(), value.clone()]);
                 self.host.replace_mutable_collection(receiver, entries);
-                table.insert_at_head(collection_item_marker(key), hash);
+                table.insert_at_head(key, hash);
             }
             None => {}
         }
@@ -808,7 +808,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut entries = self.collection_elements(map)?;
                 entries.extend([key.clone(), value]);
                 self.host.replace_mutable_collection(map, entries);
-                table.insert_at_head(collection_item_marker(&key), hash);
+                table.insert_at_head(&key, hash);
             }
             Lookup::Found(stored) => {
                 let entries = self.collection_elements(map)?;
