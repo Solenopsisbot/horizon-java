@@ -1,0 +1,6 @@
+jdkClasses=ImmutableCollections$ListN,ImmutableCollections$List12,ImmutableCollections$List12,ImmutableCollections$ListN,ImmutableCollections$List12,ImmutableCollections$ListN,ImmutableCollections$SetN,ImmutableCollections$Set12,ImmutableCollections$Set12,ImmutableCollections$SetN,ImmutableCollections$Set12,ImmutableCollections$MapN,ImmutableCollections$Map1,ImmutableCollections$MapN,ImmutableCollections$Map1,Collections$EmptyList,Collections$EmptySet,Collections$EmptyMap,Collections$SingletonList,Collections$SingletonSet,Collections$SingletonMap,Collections$UnmodifiableRandomAccessList,Collections$UnmodifiableList,Collections$UnmodifiableSet,Collections$UnmodifiableMap,ImmutableCollections$ListN,ImmutableCollections$ListN,ImmutableCollections$ListN,
+guavaClasses=g.RegularImmutableList,g.SingletonImmutableList,g.RegularImmutableList,g.SingletonImmutableList,g.RegularImmutableList,g.RegularImmutableSet,g.SingletonImmutableSet,g.RegularImmutableSet,
+behaves=[1, 2]|2|[1, 2]|2T|994|TTTFT|UOE|TT
+identity=FTTFTTTTTTFF|23|12
+writes=[1]|[2, 3]|FF
+strings=java.lang.StringFTFFFT3128;java.lang.StringFTFFFT3147;java.lang.StringFTFFFT3128;java.lang.StringFTFFFT3147;java.lang.StringFTFFFT3128;java.lang.StringFTFFFT3147;

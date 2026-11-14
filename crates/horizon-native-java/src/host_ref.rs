@@ -1585,7 +1585,7 @@ const KINDS: &[KindInfo] = &[
     },
     KindInfo {
         kind: HostKind::Collection,
-        tag: "coll",
+        tag: "hcoll",
         class: ClassRule::FromKey(crate::jar_object::collection_class),
         // The host numbers every collection it makes once.
         canonical: always_canonical,

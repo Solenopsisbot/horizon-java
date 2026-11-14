@@ -2890,6 +2890,11 @@ pub struct StdHost {
     /// `Collections.emptyList()`/`emptySet()`/`emptyMap()` markers, whose
     /// mutators JDK 25 does not all refuse (`java_immutable.rs`).
     empty_collections: std::collections::BTreeSet<String>,
+    /// The one object each factory with a shared empty answers for it
+    /// (`List.of()` is `ImmutableCollections.EMPTY_LIST`,
+    /// `Collections.emptyList()` is `Collections.EMPTY_LIST`): its key, by
+    /// class (`java_immutable.rs`).
+    shared_empties: BTreeMap<&'static str, String>,
     /// The JDK's own `List.of`/`List.copyOf` lists among the unmodifiable
     /// ones (`java_immutable.rs`); `list_equality.rs` runs their
     /// null-hostile `List12`/`ListN` rules.
@@ -3064,6 +3069,7 @@ impl StdHost {
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
+            shared_empties: BTreeMap::new(),
             jdk_list_of: std::collections::BTreeSet::new(),
             charset_decoders: BTreeMap::new(),
             synchronized_views: BTreeMap::new(),

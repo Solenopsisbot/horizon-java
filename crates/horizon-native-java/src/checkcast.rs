@@ -365,9 +365,18 @@ impl<H: Host> Runtime<'_, H> {
 
     /// The exact class of a value that is no handle, where the runtime knows
     /// it: a string, a box, a jar object, a JDK object a jar constructed
-    /// (`java/util/ArrayList#3`). Not a host model's collection or entry,
-    /// whose JDK class (`List12` or `ListN`, `KeyValueHolder`) is not kept.
+    /// (`java/util/ArrayList#3`), an unmodifiable collection the host made as
+    /// Java's class (`List12`, `Collections$EmptyList`, #156 P14c). Not a
+    /// host model's other collections (an unmodelled call's answer, a
+    /// `subList`: `#neutral`, whose class is the host's stand-in) or entries.
     pub(super) fn exact_class(&self, value: &Value) -> Option<String> {
+        if let Value::Host(handle) = value
+            && handle.kind() == crate::host_ref::HostKind::Collection
+        {
+            return crate::jar_object::collection_key(handle.key())
+                .filter(|_| handle.key().contains("#immutable"))
+                .map(|(class, _)| class.to_owned());
+        }
         let marker = match value {
             Value::Host(handle) if crate::jar_object::is_object_handle(handle) => handle.key(),
             Value::Ref(Some(marker)) => marker,
