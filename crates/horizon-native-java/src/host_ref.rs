@@ -359,6 +359,19 @@ pub enum HostKind {
     /// A modelled JDK spliterator over jar code (`jdk_spliterators.rs`): key
     /// `iter:<n>` or `ra:<n>`, which names its class.
     Spliterator,
+    /// Fabric Loader's `FabricLoaderImpl.INSTANCE` (`host_fabric_runtime.rs`).
+    FabricLoaderInstance,
+    /// The loader's one `MappingResolver`.
+    FabricMappingResolver,
+    /// An `EnvType` constant: key its name.
+    FabricEnvType,
+    /// An `EntrypointContainer`: key its kind, class, provider and the
+    /// requested type.
+    FabricEntrypointContainer,
+    /// A `PayloadTypeRegistry`: key its direction.
+    FabricPayloadTypes,
+    /// A `ResourceLoader`: key its `PackType`.
+    FabricResourceLoader,
 }
 
 /// How a kind's Java class follows from its key.
@@ -542,6 +555,10 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::AttachmentBuilder,
         &crate::host_attachment::BUILDER_CLASS_SIDE,
+    ),
+    (
+        HostKind::FabricEnvType,
+        &crate::host_fabric_runtime::ENV_TYPE_CLASS_SIDE,
     ),
 ];
 
@@ -1398,6 +1415,65 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::FromKey(crate::jdk_spliterators::spliterator_class),
         canonical: never_canonical,
         methods: &crate::jdk_spliterators::JDK_SPLITERATOR,
+    },
+    KindInfo {
+        kind: HostKind::FabricLoaderInstance,
+        tag: "fli",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::loader_types,
+        },
+        // `FabricLoaderImpl.INSTANCE`.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::EXACT_OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricMappingResolver,
+        tag: "fmr",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::mapping_resolver_types,
+        },
+        // Made once and kept.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::EXACT_OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricEnvType,
+        tag: "fenv",
+        // A final enum: its class is exact, with its class side.
+        class: ClassRule::FromKey(crate::host_fabric_runtime::env_type_class),
+        // An enum constant.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::ENV_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricEntrypointContainer,
+        tag: "fepc",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::entrypoint_container_types,
+        },
+        // A new container per entry on every call.
+        canonical: never_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricPayloadTypes,
+        tag: "fpt",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::payload_types_types,
+        },
+        // One of four static constants.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricResourceLoader,
+        tag: "frl",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::resource_loader_types,
+        },
+        // One per `PackType` (`IMPL_MAP`).
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
     },
 ];
 

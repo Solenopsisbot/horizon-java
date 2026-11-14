@@ -308,19 +308,10 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
             "net/fabricmc/fabric/api/resource/v1/ResourceLoader",
             "get",
             "(Lnet/minecraft/server/packs/PackType;)Lnet/fabricmc/fabric/api/resource/v1/ResourceLoader;",
-        ) => {
-            let kind = args
-                .first()
-                .map(expect_string)
-                .unwrap_or("SERVER_DATA")
-                .rsplit('/')
-                .next()
-                .unwrap_or("SERVER_DATA")
-                .to_owned();
-            Some(Ok(Value::Ref(Some(format!(
-                "fabric-resource-loader/{kind}"
-            )))))
-        }
+        ) => args
+            .first()
+            .and_then(crate::host_fabric_runtime::resource_loader)
+            .map(Ok),
         _ => None,
     }
 }
@@ -385,11 +376,7 @@ pub(crate) fn instance_call(
     {
         return logger_call(r, &name);
     }
-    let marker = expect_ref(receiver)?;
-    if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
-        return charset_call(r, canonical, args);
-    }
-    if let Some(kind) = marker.strip_prefix("fabric-resource-loader/") {
+    if crate::host_fabric_runtime::is_resource_loader(receiver) {
         return match (r.name.as_str(), r.descriptor.as_str()) {
             // Registration is kept nowhere: with no resource reload modelled,
             // there is no event to fire the listener from, and pretending one
@@ -402,11 +389,12 @@ pub(crate) fn instance_call(
                 "addListenerOrdering",
                 "(Lnet/minecraft/resources/Identifier;Lnet/minecraft/resources/Identifier;)V",
             ) => Some(Ok(Value::Void)),
-            ("toString", "()Ljava/lang/String;") => {
-                Some(Ok(Value::Ref(Some(format!("ResourceLoader[{kind}]")))))
-            }
             _ => None,
         };
+    }
+    let marker = expect_ref(receiver)?;
+    if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
+        return charset_call(r, canonical, args);
     }
     if let Some(pattern) = marker.strip_prefix("regex-pattern/") {
         return match (r.name.as_str(), r.descriptor.as_str()) {

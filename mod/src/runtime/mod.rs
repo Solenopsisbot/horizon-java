@@ -76,6 +76,7 @@ mod host_entry;
 mod host_events;
 mod host_executors;
 mod host_fabric_loader;
+mod host_fabric_runtime;
 mod host_game_event;
 mod host_guava;
 mod host_ids;
@@ -2491,6 +2492,11 @@ pub trait Host {
     /// no declaration table ignores it.
     fn note_content_builder(&mut self, _event: ContentBuilderEvent) {}
 
+    /// The runtime constructed the entrypoint instance of `class` (internal
+    /// name) and runs its method on it: the object a loader's own
+    /// `getEntrypoints` answers for that entry (`host_fabric_runtime.rs`).
+    fn note_entrypoint_constructed(&mut self, _class: &str) {}
+
     /// Sibling-jar classes this host lets the executing jar link against.
     ///
     /// `None` keeps single-jar behavior exactly as before: a symbol the
@@ -2809,6 +2815,9 @@ pub struct StdHost {
     /// Entries are seeded by the loaded jar, so this query never scans a host
     /// classpath or invents providers.
     fabric_entrypoint_containers: Vec<FabricEntrypointContainer>,
+    /// The entrypoint classes (internal names) the runtime constructed: their
+    /// instances are the run's own entrypoint objects.
+    constructed_entrypoints: BTreeSet<String>,
     /// Identifiers retained by `CustomPacketPayload.Type` values created by
     /// the bounded networking façade.
     packet_types: BTreeMap<String, String>,
@@ -3001,6 +3010,7 @@ impl StdHost {
             incoming_payloads: Vec::new(),
             payload_bytes: BTreeMap::new(),
             fabric_entrypoint_containers: Vec::new(),
+            constructed_entrypoints: BTreeSet::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
             deferred_registers: BTreeMap::new(),
@@ -3149,6 +3159,41 @@ impl StdHost {
     /// path answer `get(2)` with `IndexOutOfBoundsException: Index 2 out of
     /// bounds for length 2`. A jar's own `new ArrayList()` was never limited,
     /// and the execution budget bounds how many either kind a run can make.
+    /// A new `ArrayList` holding `values`: its own object, compared by
+    /// content (`List.equals`), never by its text.
+    fn fresh_list(&mut self, values: Vec<Value>) -> Value {
+        let list = self.empty_collection("list");
+        if let Some(marker) = expect_ref(&list) {
+            self.mutable_collections.insert(marker.clone(), values);
+        }
+        list
+    }
+
+    /// The object Fabric's `getEntrypoints(kind, requested)` and a
+    /// container's `getEntrypoint()` answer for the entry `class` (as
+    /// `fabric.mod.json` names it): `Entry.getOrCreate(requested)` caches one
+    /// instance per requested type, and the loader's own `invokeEntrypoints`
+    /// made the one for the kind's initializer interface, which is the
+    /// object the runtime constructed and ran (`this` in its
+    /// `onInitialize*`). Any other type (a fresh instance, or Fabric's
+    /// `EntrypointException` when the class is not one), a `Class::member`
+    /// entry (a proxy), or an entry the runtime has not constructed: `None`,
+    /// counted by the caller.
+    fn fabric_entrypoint_object(
+        &self,
+        kind: &str,
+        class: &str,
+        requested: Option<&str>,
+    ) -> Option<Value> {
+        if class.contains("::") || requested.is_none() {
+            return None;
+        }
+        let internal = class.replace('.', "/");
+        (requested == host_fabric_runtime::invocation_type(kind)
+            && self.constructed_entrypoints.contains(&internal))
+        .then_some(Value::Ref(Some(internal)))
+    }
+
     fn empty_collection(&mut self, kind: &str) -> Value {
         let class = match kind {
             "map" => "java/util/LinkedHashMap",
@@ -3963,20 +4008,12 @@ impl StdHost {
             if !r.descriptor.starts_with("()") {
                 return None;
             }
-            let direction = match r.name.as_str() {
-                "clientboundPlay" => "playToClient",
-                "serverboundPlay" => "playToServer",
-                "clientboundConfiguration" => "configurationToClient",
-                "serverboundConfiguration" => "configurationToServer",
-                _ => return None,
-            };
-            return Some(Value::Ref(Some(format!(
-                "fabric-payload-types/{direction}"
-            ))));
+            let (_, direction) = host_fabric_runtime::PAYLOAD_DIRECTIONS
+                .iter()
+                .find(|(factory, _)| *factory == r.name)?;
+            return Some(host_fabric_runtime::payload_types(direction));
         };
-        let direction = expect_ref(receiver)?
-            .strip_prefix("fabric-payload-types/")?
-            .to_owned();
+        let direction = host_fabric_runtime::payload_types_direction(receiver)?;
         if !matches!(r.name.as_str(), "register" | "registerLarge") || args.len() < 2 {
             return None;
         }
@@ -4385,6 +4422,10 @@ impl Host for StdHost {
             return Ok(value);
         }
         self.get_static(r)
+    }
+
+    fn note_entrypoint_constructed(&mut self, class: &str) {
+        self.constructed_entrypoints.insert(class.to_owned());
     }
 
     fn note_content_builder(&mut self, event: ContentBuilderEvent) {
@@ -4857,12 +4898,11 @@ impl Host for StdHost {
                 Ok(Value::Ref(Some("locale/ENGLISH".into())))
             }
 
-            ("net/fabricmc/api/EnvType", "CLIENT", "Lnet/fabricmc/api/EnvType;") => {
-                Ok(Value::Ref(Some("CLIENT".into())))
-            }
-            ("net/fabricmc/api/EnvType", "SERVER", "Lnet/fabricmc/api/EnvType;") => {
-                Ok(Value::Ref(Some("SERVER".into())))
-            }
+            (
+                "net/fabricmc/api/EnvType",
+                name @ ("CLIENT" | "SERVER"),
+                "Lnet/fabricmc/api/EnvType;",
+            ) => Ok(host_fabric_runtime::env_type(name).unwrap_or(Value::Ref(None))),
             // Item rarity is a bounded set of constants. The marker names the
             // value so a recorded builder chain can name it back.
             (
@@ -5965,7 +6005,19 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/FabricLoader",
                 "getInstance",
                 "()Lnet/fabricmc/loader/api/FabricLoader;",
-            ) => Ok(Value::Ref(Some("fabric-loader".into()))),
+            ) => Ok(host_fabric_runtime::loader()),
+            // `EnvType.valueOf(name)`: the constant; another name throws, which
+            // is counted here.
+            (
+                "net/fabricmc/api/EnvType",
+                "valueOf",
+                "(Ljava/lang/String;)Lnet/fabricmc/api/EnvType;",
+            ) => match Self::argument(r, args, 0)? {
+                Value::Ref(Some(name)) if host_fabric_runtime::env_type(name).is_some() => {
+                    Ok(host_fabric_runtime::env_type(name).unwrap_or(Value::Ref(None)))
+                }
+                _ => self.unknown_host_call(r),
+            },
             // The loader singletons the façade's instance members answer for
             // (`getModEventBus`, `getModContainerById`). These arms used to sit
             // in `get_static`, where a method descriptor never matches, so the
@@ -8543,6 +8595,19 @@ impl Host for StdHost {
                     _ => "null".into(),
                 })))
             }
+            // `EnvType`'s own members on its constant handles
+            // (`host_fabric_runtime.rs`): `Enum`'s too, whichever class the
+            // call names.
+            ("net/fabricmc/api/EnvType" | "java/lang/Enum", "name" | "ordinal" | "isClient", _)
+                if host_fabric_runtime::env_type_name(receiver).is_some() =>
+            {
+                let name = host_fabric_runtime::env_type_name(receiver).unwrap_or_default();
+                Ok(match r.name.as_str() {
+                    "name" => Value::Ref(Some(name)),
+                    "isClient" => Value::Int(i32::from(name == "CLIENT")),
+                    _ => Value::Int(host_fabric_runtime::env_type_ordinal(receiver).unwrap_or(0)),
+                })
+            }
             // A jar constant the runtime has no name for (`class#n`): its
             // marker's tail is not its name.
             ("java/lang/Enum", "name" | "toString", "()Ljava/lang/String;")
@@ -8603,12 +8668,6 @@ impl Host for StdHost {
                 uuid_text(receiver)
                     .ok_or_else(|| NativeError::Metadata("malformed UUID marker".into()))?,
             ))),
-            ("net/fabricmc/api/EnvType", "isClient", "()Z") => {
-                Ok(Value::Int((expect_string(receiver) == "CLIENT") as i32))
-            }
-            ("net/fabricmc/api/EnvType", "toString", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(enum_name(receiver).to_owned())))
-            }
             // A handle's `toString`/`hashCode`/`equals` are its kind's row in the
             // kind table (`host_ref.rs`), whatever class the call names.
             // A host `null` typed as an optional reads as the empty one.
@@ -8959,6 +9018,14 @@ impl Host for StdHost {
                     None => self.unknown_host_call(r),
                 }
             }
+            // A `String` is no `FabricLoader` (Java's cast throws; #156 P17's
+            // cast still passes text): its calls are counted, never answered
+            // as the loader's.
+            ("net/fabricmc/loader/api/FabricLoader", _, _)
+                if expect_ref(receiver).is_some_and(|text| value_class::is_plain_string(text)) =>
+            {
+                self.unknown_host_call(r)
+            }
             ("net/fabricmc/loader/api/FabricLoader", "isModLoaded", "(Ljava/lang/String;)Z") => {
                 let id = match Self::argument(r, args, 0)? {
                     Value::Ref(Some(id)) => id,
@@ -9049,19 +9116,45 @@ impl Host for StdHost {
                 "(Ljava/lang/String;)Ljava/util/List;"
                 | "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;",
             ) => {
-                let kind = expect_string(Self::argument(r, args, 0)?);
-                let values = self
+                // `EntrypointStorage`: no entries is the shared
+                // `Collections.emptyList()`; otherwise every call builds a new
+                // `ArrayList`. `getEntrypointContainers` holds a new container
+                // per entry (whose lazy `getEntrypoint` checks the type);
+                // `getEntrypoints` creates each instance eagerly for the type.
+                let kind = expect_string(Self::argument(r, args, 0)?).to_owned();
+                let requested = args.get(1).and_then(expect_ref).cloned();
+                let entries = self
                     .fabric_entrypoint_containers
                     .iter()
                     .filter(|entry| entry.kind == kind)
-                    .map(|entry| {
-                        Value::Ref(Some(format!(
-                            "fabric-entrypoint/{}/{}/{}",
-                            entry.kind, entry.class, entry.provider
-                        )))
-                    })
+                    .cloned()
                     .collect::<Vec<_>>();
-                Ok(collection_value("list", &values))
+                if entries.is_empty() {
+                    return Ok(collection_value("list", &[]));
+                }
+                let mut values = Vec::new();
+                for entry in entries {
+                    if r.name == "getEntrypointContainers" {
+                        values.push(host_fabric_runtime::entrypoint_container(
+                            &host_fabric_runtime::ContainerParts {
+                                kind: entry.kind,
+                                class: entry.class,
+                                provider: entry.provider,
+                                requested: requested.clone(),
+                            },
+                        ));
+                    } else {
+                        match self.fabric_entrypoint_object(
+                            &kind,
+                            &entry.class,
+                            requested.as_deref(),
+                        ) {
+                            Some(object) => values.push(object),
+                            None => return self.unknown_host_call(r),
+                        }
+                    }
+                }
+                Ok(self.fresh_list(values))
             }
             ("net/fabricmc/loader/api/FabricLoader", "getGameDir", "()Ljava/nio/file/Path;") => {
                 Ok(path_value("/horizon/game"))
@@ -9076,12 +9169,15 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/FabricLoader",
                 "getEnvironmentType",
                 "()Lnet/fabricmc/api/EnvType;",
-            ) => Ok(Value::Ref(Some(self.environment_type.clone()))),
+            ) => {
+                Ok(host_fabric_runtime::env_type(&self.environment_type)
+                    .unwrap_or(Value::Ref(None)))
+            }
             (
                 "net/fabricmc/loader/api/FabricLoader",
                 "getMappingResolver",
                 "()Lnet/fabricmc/loader/api/MappingResolver;",
-            ) => Ok(Value::Ref(Some("fabric-mapping-resolver".into()))),
+            ) => Ok(host_fabric_runtime::mapping_resolver()),
             ("net/fabricmc/loader/api/FabricLoader", "isDevelopmentEnvironment", "()Z") => {
                 Ok(Value::Int(self.development_environment as i32))
             }
@@ -9111,24 +9207,36 @@ impl Host for StdHost {
                 "getEntrypointClass",
                 "()Ljava/lang/Class;",
             ) => Ok(Value::Ref(
-                fabric_entrypoint_part(expect_ref(receiver), 2)
-                    .map(|class| class.replace('/', ".")),
+                host_fabric_runtime::entrypoint_container_parts(receiver)
+                    .map(|parts| parts.class.replace('/', ".")),
             )),
             (
-                "net/fabricmc/loader/api/EntrypointContainer",
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getEntrypoint",
                 "()Ljava/lang/Object;",
-            ) => Ok(Value::Ref(
-                fabric_entrypoint_part(expect_ref(receiver), 2)
-                    .map(|class| format!("fabric-entrypoint-instance/{class}")),
-            )),
+            ) => {
+                let object =
+                    host_fabric_runtime::entrypoint_container_parts(receiver).and_then(|parts| {
+                        self.fabric_entrypoint_object(
+                            &parts.kind,
+                            &parts.class,
+                            parts.requested.as_deref(),
+                        )
+                    });
+                match object {
+                    Some(object) => Ok(object),
+                    None => self.unknown_host_call(r),
+                }
+            }
             (
-                "net/fabricmc/loader/api/EntrypointContainer",
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getProvider",
                 "()Lnet/fabricmc/loader/api/ModContainer;",
-            ) => Ok(fabric_entrypoint_part(expect_ref(receiver), 3)
-                .map_or(Value::Ref(None), |provider| {
-                    self.fabric_container(&provider)
+            ) => Ok(host_fabric_runtime::entrypoint_container_parts(receiver)
+                .map_or(Value::Ref(None), |parts| {
+                    self.fabric_container(&parts.provider)
                 })),
             // A container's own metadata, origin and root.
             (
@@ -10048,11 +10156,6 @@ fn canonical_uuid(text: &str) -> Result<String, NativeError> {
         )));
     }
     Ok(text.to_ascii_lowercase())
-}
-
-fn fabric_entrypoint_part(value: Option<&String>, index: usize) -> Option<String> {
-    let marker = value?.strip_prefix("fabric-entrypoint/")?;
-    marker.split('/').nth(index - 1).map(str::to_owned)
 }
 
 fn enum_name(value: &Value) -> &str {
@@ -16350,6 +16453,7 @@ impl NativeJar {
                     neoforge_imc::set_active(runtime.host, previous.as_deref());
                 }
                 constructed?;
+                runtime.host.note_entrypoint_constructed(&class_name);
             }
             if method != "<init>" {
                 // The loader constructs the entrypoint instance and then calls
@@ -21728,6 +21832,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A loader enum whose constants are host handles (`ModConfig.Type`).
         if let Some(values) = crate::runtime::host_neoforge_loader::enum_values(&r.owner)
+            .or_else(|| crate::runtime::host_fabric_runtime::enum_values(&r.owner))
             && r.descriptor == format!("()[L{};", r.owner)
         {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
@@ -31767,7 +31872,7 @@ mandatory = true
             ..NativeJar::default()
         };
         let mut host = jar.seed_host(StdHost::new());
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let loaded = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "isModLoaded".into(),
@@ -35549,7 +35654,7 @@ mandatory = true
     #[test]
     fn standard_host_maps_fabric_loader_metadata_and_paths() {
         let mut host = StdHost::new().with_mod("demo", "1.2.3");
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let environment = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getEnvironmentType".into(),
@@ -35557,7 +35662,7 @@ mandatory = true
         };
         assert_eq!(
             host.invoke_instance(&environment, &loader, &[]).unwrap(),
-            Value::Ref(Some("CLIENT".into()))
+            host_fabric_runtime::env_type("CLIENT").unwrap()
         );
         let resolver_method = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
@@ -35567,7 +35672,7 @@ mandatory = true
         let resolver = host
             .invoke_instance(&resolver_method, &loader, &[])
             .unwrap();
-        assert_eq!(resolver, Value::Ref(Some("fabric-mapping-resolver".into())));
+        assert_eq!(resolver, host_fabric_runtime::mapping_resolver());
         let map_class = MethodRef {
             owner: "net/fabricmc/loader/api/MappingResolver".into(),
             name: "mapClassName".into(),
@@ -35610,7 +35715,7 @@ mandatory = true
                 .clone()
                 .invoke_instance(&environment, &loader, &[])
                 .unwrap(),
-            Value::Ref(Some("SERVER".into()))
+            host_fabric_runtime::env_type("SERVER").unwrap()
         );
         let development = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
@@ -35907,7 +36012,7 @@ mandatory = true
             descriptor: "Lnet/fabricmc/api/EnvType;".into(),
         };
         let client = host.get_static(&client).unwrap();
-        assert_eq!(client, Value::Ref(Some("CLIENT".into())));
+        assert_eq!(client, host_fabric_runtime::env_type("CLIENT").unwrap());
         let is_client = MethodRef {
             owner: "net/fabricmc/api/EnvType".into(),
             name: "isClient".into(),
@@ -35932,8 +36037,12 @@ mandatory = true
             descriptor: "()I".into(),
         };
         assert_eq!(
-            host.invoke_instance(&ordinal, &Value::Ref(Some("SERVER".into())), &[])
-                .unwrap(),
+            host.invoke_instance(
+                &ordinal,
+                &host_fabric_runtime::env_type("SERVER").unwrap(),
+                &[]
+            )
+            .unwrap(),
             Value::Int(1)
         );
     }
@@ -41194,27 +41303,55 @@ mandatory = true
             .with_mod("demo", "1.2.3")
             .with_fabric_entrypoint("main", "demo.Main", "demo")
             .with_fabric_entrypoint("client", "demo.Client", "demo");
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let entries = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getEntrypoints".into(),
-            descriptor: "(Ljava/lang/String;)Ljava/util/List;".into(),
+            descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
         };
+        let initializer = Value::Ref(Some("net/fabricmc/api/ModInitializer".into()));
+        let size = MethodRef {
+            owner: "java/util/List".into(),
+            name: "size".into(),
+            descriptor: "()I".into(),
+        };
+        // Before the runtime constructed `demo.Main`, Fabric would construct
+        // it here: counted.
+        host.invoke_instance(
+            &entries,
+            &loader,
+            &[Value::Ref(Some("main".into())), initializer.clone()],
+        )
+        .unwrap();
+        assert!(host.unknown_host_calls().iter().any(|(call, _)| {
+            call.starts_with("net/fabricmc/loader/api/FabricLoader#getEntrypoints")
+        }));
+        // Once it did, the loader's own `ModInitializer` instance is that
+        // object; another type is a fresh instance (or a mismatch): counted.
+        host.note_entrypoint_constructed("demo/Main");
         let main = host
-            .invoke_instance(&entries, &loader, &[Value::Ref(Some("main".into()))])
+            .invoke_instance(
+                &entries,
+                &loader,
+                &[Value::Ref(Some("main".into())), initializer.clone()],
+            )
             .unwrap();
+        assert_eq!(
+            host.invoke_instance(&size, &main, &[]).unwrap(),
+            Value::Int(1)
+        );
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
                     owner: "java/util/List".into(),
-                    name: "size".into(),
-                    descriptor: "()I".into(),
+                    name: "get".into(),
+                    descriptor: "(I)Ljava/lang/Object;".into(),
                 },
                 &main,
-                &[],
+                &[Value::Int(0)],
             )
             .unwrap(),
-            Value::Int(1)
+            Value::Ref(Some("demo/Main".into()))
         );
         let typed_entries = host
             .invoke_instance(
@@ -41224,10 +41361,7 @@ mandatory = true
                     descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
                 },
                 &loader,
-                &[
-                    Value::Ref(Some("main".into())),
-                    Value::Ref(Some("class/net.fabricmc.api.ModInitializer".into())),
-                ],
+                &[Value::Ref(Some("main".into())), initializer.clone()],
             )
             .unwrap();
         assert_eq!(
@@ -41251,7 +41385,7 @@ mandatory = true
                     name: "get".into(),
                     descriptor: "(I)Ljava/lang/Object;".into(),
                 },
-                &main,
+                &typed_entries,
                 &[Value::Int(0)],
             )
             .unwrap();
@@ -41281,20 +41415,23 @@ mandatory = true
             .unwrap(),
             host_fabric_loader::container("demo", Some("1.2.3"))
         );
+        let containers = MethodRef {
+            owner: "net/fabricmc/loader/api/FabricLoader".into(),
+            name: "getEntrypointContainers".into(),
+            descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
+        };
         let client = host
-            .invoke_instance(&entries, &loader, &[Value::Ref(Some("client".into()))])
+            .invoke_instance(
+                &containers,
+                &loader,
+                &[
+                    Value::Ref(Some("client".into())),
+                    Value::Ref(Some("net/fabricmc/api/ClientModInitializer".into())),
+                ],
+            )
             .unwrap();
         assert_eq!(
-            host.invoke_instance(
-                &MethodRef {
-                    owner: "java/util/List".into(),
-                    name: "size".into(),
-                    descriptor: "()I".into(),
-                },
-                &client,
-                &[],
-            )
-            .unwrap(),
+            host.invoke_instance(&size, &client, &[]).unwrap(),
             Value::Int(1)
         );
         assert!(host.fabric_entrypoint_containers().iter().any(|entry| {
