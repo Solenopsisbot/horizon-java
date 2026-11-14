@@ -452,7 +452,7 @@ impl<H: Host> Runtime<'_, H> {
             self.write_back_sub_list(&token.marker, structural);
         }
         if let (Some((from, to)), Some(view)) = (token.creates, expect_ref(value))
-            && self.host.mutable_collection_values(value).is_some()
+            && self.host.holds_collection(value)
         {
             self.host.store_sub_list_link(
                 view,

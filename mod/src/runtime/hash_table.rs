@@ -42,7 +42,7 @@
 //! whose hash changed after it was put (a chat component appended to) is not
 //! in its new bin, as in the JDK.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::runtime::{Value, collection_item_marker};
 
@@ -107,6 +107,19 @@ pub struct HashTable {
     pub(crate) access_order: bool,
     /// Filled from a source whose order was unknown.
     pub(crate) tainted: bool,
+    /// Every node by marker, with its spread hash (`None`: unplaced), so
+    /// `contains`/`stored_hash`/`remove`/`refresh` reach a node in its bin
+    /// without walking the table (#203).
+    index: HashMap<String, Option<i32>>,
+    /// The host collection generation (`collection_store.rs`) at which the
+    /// table last mirrored the host's list exactly (the same keys and, when
+    /// [`Self::ordered`], in this table's order): while the generation is
+    /// still that, the reconciliation (`Runtime::resync_hash_table`) has
+    /// nothing to do.
+    pub(crate) synced: Option<u64>,
+    /// Moves on every structural change (insert, remove, resize, clear), as
+    /// a `HashMap`'s `modCount` does for a function run inside `compute`.
+    pub(crate) version: u64,
 }
 
 impl HashTable {
@@ -122,7 +135,29 @@ impl HashTable {
             linked: false,
             access_order: false,
             tainted: false,
+            index: HashMap::new(),
+            synced: None,
+            version: 0,
         }
+    }
+
+    /// Whether the host's list is kept in this table's iteration order
+    /// (`Runtime::resync_hash_table` sorts it so): not an insertion-ordered
+    /// table, and an order that is known.
+    pub(crate) fn ordered(&self) -> bool {
+        !self.linked && !self.order_unknown()
+    }
+
+    /// The position of the node `marker` in iteration order: the nodes of
+    /// the bins before its own, then its place in its bin. `None` for an
+    /// unplaced key and a marker not in the table.
+    pub(crate) fn rank_of(&self, marker: &str) -> Option<usize> {
+        let spread = (*self.index.get(marker)?)?;
+        let bin = spread as u32 as usize & (self.bins.len() - 1);
+        let within = self.bins[bin]
+            .iter()
+            .position(|node| node.marker == marker)?;
+        Some(self.bins[..bin].iter().map(Vec::len).sum::<usize>() + within)
     }
 
     /// Whether the table's iteration order is unknown. One entry (or none)
@@ -141,7 +176,12 @@ impl HashTable {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.bins.iter().map(Vec::len).sum::<usize>() + self.unplaced.len()
+        self.index.len()
+    }
+
+    /// The number of bins (a resize changes it).
+    pub(crate) fn capacity(&self) -> usize {
+        self.bins.len()
     }
 
     /// Whether the table has been allocated (`table != null`).
@@ -151,7 +191,7 @@ impl HashTable {
 
     /// Whether a node is named `marker`.
     pub(crate) fn contains(&self, marker: &str) -> bool {
-        self.unplaced.contains_key(marker) || self.bins.iter().flatten().any(|n| n.marker == marker)
+        self.index.contains_key(marker)
     }
 
     /// The keys a lookup with `hash` compares, in bin order: the bin's nodes
@@ -171,11 +211,14 @@ impl HashTable {
 
     /// The stored (spread) hash of the node `marker`, when it is in a bin.
     pub(crate) fn stored_hash(&self, marker: &str) -> Option<i32> {
-        self.bins
-            .iter()
-            .flatten()
-            .find(|node| node.marker == marker)
-            .map(|node| node.hash)
+        *self.index.get(marker)?
+    }
+
+    /// The node `marker` in its bin, through the index.
+    fn node_mut(&mut self, marker: &str) -> Option<&mut Node> {
+        let spread = (*self.index.get(marker)?)?;
+        let bin = spread as u32 as usize & (self.bins.len() - 1);
+        self.bins[bin].iter_mut().find(|node| node.marker == marker)
     }
 
     /// The nodes' markers in iteration order (bin by bin), unplaced keys last.
@@ -198,22 +241,22 @@ impl HashTable {
             .collect()
     }
 
-    /// Point the node named like `key` at `key` itself: the host's list holds
-    /// the object a node stands for (a path that rebuilt the list, or a
-    /// literal read again, may hand back a fresh value for it).
-    pub(crate) fn refresh(&mut self, key: &Value) {
-        let marker = collection_item_marker(key);
-        if let Some(stored) = self.unplaced.get_mut(&marker) {
+    /// Point the node `marker` at `key` itself: the host's list holds the
+    /// object a node stands for (a path that rebuilt the list, or a literal
+    /// read again, may hand back a fresh value for it).
+    pub(crate) fn refresh_named(&mut self, marker: &str, key: &Value) {
+        if let Some(stored) = self.unplaced.get_mut(marker) {
             *stored = key.clone();
             return;
         }
-        if let Some(node) = self.bins.iter_mut().flatten().find(|n| n.marker == marker) {
+        if let Some(node) = self.node_mut(marker) {
             node.key = key.clone();
         }
     }
 
     /// `HashMap.resize()`.
     fn resize(&mut self) {
+        self.version += 1;
         let old_cap = self.bins.len();
         let old_thr = self.threshold;
         let mut new_thr = 0_i64;
@@ -300,6 +343,8 @@ impl HashTable {
     pub(crate) fn insert(&mut self, key: &Value, hash: Option<i32>) {
         let marker = collection_item_marker(key);
         let size = self.len() as i64;
+        self.version += 1;
+        self.index.insert(marker.clone(), hash.map(spread));
         if self.bins.is_empty() {
             self.resize();
         }
@@ -328,6 +373,8 @@ impl HashTable {
     /// already held 7 nodes, and no resize afterwards.
     pub(crate) fn insert_at_head(&mut self, key: &Value, hash: Option<i32>) {
         let marker = collection_item_marker(key);
+        self.version += 1;
+        self.index.insert(marker.clone(), hash.map(spread));
         if self.bins.is_empty() {
             self.resize();
         }
@@ -353,14 +400,17 @@ impl HashTable {
 
     /// Unlink the node `marker`.
     pub(crate) fn remove(&mut self, marker: &str) {
-        if self.unplaced.remove(marker).is_some() {
+        let Some(spread) = self.index.remove(marker) else {
             return;
-        }
-        for bin in &mut self.bins {
-            if let Some(index) = bin.iter().position(|n| n.marker == marker) {
-                bin.remove(index);
-                return;
-            }
+        };
+        self.version += 1;
+        let Some(spread) = spread else {
+            self.unplaced.remove(marker);
+            return;
+        };
+        let bin = spread as u32 as usize & (self.bins.len() - 1);
+        if let Some(index) = self.bins[bin].iter().position(|n| n.marker == marker) {
+            self.bins[bin].remove(index);
         }
     }
 
@@ -370,6 +420,8 @@ impl HashTable {
             bin.clear();
         }
         self.unplaced.clear();
+        self.index.clear();
+        self.version += 1;
     }
 }
 

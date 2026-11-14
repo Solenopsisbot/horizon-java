@@ -1152,6 +1152,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.mutable_collection_values(value)
     }
 
+    fn holds_collection(&self, value: &Value) -> bool {
+        self.inner.holds_collection(value)
+    }
+
     fn is_jdk_list_of(&self, marker: &str) -> bool {
         self.inner.is_jdk_list_of(marker)
     }
