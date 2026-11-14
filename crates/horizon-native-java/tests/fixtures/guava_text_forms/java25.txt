@@ -1,0 +1,5 @@
+listText=com.google.common.collect.RegularImmutableList[b, a]|[b, a]|[solo]com.google.common.collect.SingletonImmutableList|[x, y]|[]|[3, 4]
+nested=[[1, 2], [z]]|[[q]]|[[1]]
+jarElements=[P[x=1]]|[P[x=2]]
+setAndMapText=[p, q]|[m, n]|[]|{k=v, k2=2}|{}|{only=[1]}
+jdkEquality=truetruetruefalse|truetruetrue|truetruetrue|994,97,96
