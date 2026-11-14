@@ -270,6 +270,40 @@ impl<H: Host> Runtime<'_, H> {
     /// `hashCode` body when the class has one. `None` when the answer is an
     /// identity hash, or a value whose class the runtime cannot tell (a
     /// `Value::Float` is a `Float` or a `Double`).
+    /// A jar's `new TypeToken<T>() {}` (Gson's or Guava's) keeps `TypeToken`'s `equals`: the
+    /// two types (#209). `None` for any other `a`; `Some(None)` where it cannot be told (a
+    /// `TypeToken` subclass whose type is not modelled).
+    fn subclass_token_equals(&self, a: &Value, b: &Value) -> Option<Option<bool>> {
+        crate::runtime::jar_object::object_key(a)?;
+        let (own, theirs, token) = if let Some(own) = self.gson_token_type(a) {
+            let theirs = crate::runtime::host_gson_type::token_type(b).or_else(|| self.gson_token_type(b));
+            (own, theirs, crate::runtime::host_gson_type::TOKEN)
+        } else {
+            let own = self.token_type(a)?;
+            let theirs = crate::runtime::host_type_token::token_type(b).or_else(|| {
+                crate::runtime::jar_object::object_key(b)?;
+                self.token_type(b)
+            });
+            (own, theirs, "com/google/common/reflect/TypeToken")
+        };
+        Some(match theirs {
+            Some(theirs) => {
+                if token == crate::runtime::host_gson_type::TOKEN {
+                    crate::runtime::host_gson_type::types_equal(&own, &theirs)
+                } else {
+                    crate::runtime::host_type_token::types_equal(&own, &theirs)
+                }
+            }
+            // Another of the token's subclasses whose type is not modelled.
+            None if crate::runtime::jar_object::object_class(b)
+                .is_some_and(|class| self.class_is_instance(class, token)) =>
+            {
+                None
+            }
+            None => Some(false),
+        })
+    }
+
     pub(crate) fn java_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         match self.equality_of(value) {
             Equality::Null => Ok(Some(0)),
@@ -371,6 +405,19 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `a.equals(b)` for a non-null `a`, as the JVM runs it.
     pub(crate) fn java_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
+        if let Some(equal) = self.subclass_token_equals(a, b) {
+            return match equal {
+                Some(equal) => Ok(equal),
+                None => {
+                    self.host.unknown_operand_call(&MethodRef {
+                        owner: "java/lang/Object".into(),
+                        name: "equals".into(),
+                        descriptor: EQUALS.into(),
+                    })?;
+                    Ok(false)
+                }
+            };
+        }
         match self.equality_of(a) {
             Equality::Null => Err(NativeError::UncaughtException {
                 class: "java/lang/NullPointerException".into(),
@@ -1033,6 +1080,15 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
             .value_of_text(value, "Ljava/lang/Object;", self.class, self.method)
             .map(Some)
     }
+    fn gson_token_type(&mut self, value: &Value) -> Option<Value> {
+        self.runtime.gson_token_type(value)
+    }
+
+    fn guava_token_type(&mut self, value: &Value) -> Option<Value> {
+        crate::runtime::jar_object::object_key(value)?;
+        self.runtime.token_type(value)
+    }
+
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
         crate::runtime::facade_text::json_now(value, self.runtime.host.component_states())
     }
