@@ -24,7 +24,6 @@
 use super::*;
 
 const TYPE_TOKEN: &str = "com/google/common/reflect/TypeToken";
-const TOKEN_PREFIX: &str = "typetoken/";
 /// The captured type a `TypeToken` subclass object keeps, under its marker.
 const RUNTIME_TYPE: &str = "#runtimeTypeLjava/lang/reflect/Type;";
 
@@ -68,14 +67,6 @@ fn boxed_class(primitive: &str) -> Option<&'static str> {
     })
 }
 
-/// Java's `String.hashCode` of `text`, so a token's hash is stable and the
-/// same for equal types.
-fn java_string_hash(text: &str) -> i32 {
-    text.encode_utf16().fold(0i32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
-    })
-}
-
 impl<H: Host> Runtime<'_, H> {
     /// The Guava calls this module answers, or `None`.
     pub(super) fn invoke_guava(
@@ -88,9 +79,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         if !r.owner.starts_with("com/google/common/")
-            && !receiver
-                .and_then(expect_ref)
-                .is_some_and(|marker| marker.starts_with(TOKEN_PREFIX))
+            && !receiver.is_some_and(|token| crate::runtime::host_type_token::token_type(token).is_some())
         {
             // A jar `TypeToken` subclass object answers through its type even
             // when the call site names the subclass.
@@ -398,35 +387,28 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    /// The `Type` marker a token names: a `typetoken/` marker's suffix, or
-    /// the type a jar subclass object captured.
-    fn token_type(&self, token: &Value) -> Option<String> {
-        let marker = expect_ref(token)?;
-        if let Some(inner) = marker.strip_prefix(TOKEN_PREFIX) {
-            return Some(inner.to_owned());
+    /// The `Type` marker a token names: a `TypeToken.of` handle's
+    /// (`host_type_token.rs`), or the type a jar subclass object captured.
+    pub(crate) fn token_type(&self, token: &Value) -> Option<Value> {
+        if let Some(inner) = crate::runtime::host_type_token::token_type(token) {
+            return Some(inner);
         }
-        match self
-            .fields
+        let marker = crate::runtime::jar_object::object_key(token)?;
+        self.fields
             .get(&format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"))
-        {
-            Some(Value::Ref(Some(inner))) => Some(inner.clone()),
-            _ => None,
-        }
+            .filter(|inner| crate::runtime::host_gson_type::any_node(inner).is_some())
+            .cloned()
     }
 
-    fn token_value(inner: &str) -> Value {
-        Value::Ref(Some(format!("{TOKEN_PREFIX}{inner}")))
+    fn token_value(inner: &Value) -> Value {
+        crate::runtime::host_type_token::token(inner)
     }
 
-    /// The raw class a type erases to (`inner`: [`host_reflect_type::type_text`]).
-    ///
-    /// [`host_reflect_type::type_text`]: crate::runtime::host_reflect_type::type_text
-    fn raw_class(inner: &str) -> String {
-        match crate::runtime::host_reflect_type::handle_node(&crate::runtime::host_reflect_type::type_from_text(
-            inner,
-        )) {
-            Some(GenericType::Parameterized { raw, .. }) => raw,
-            Some(GenericType::Wildcard { upper, .. }) => upper.first().map_or_else(
+    /// The raw class a type erases to.
+    fn raw_class(node: &GenericType) -> String {
+        match node {
+            GenericType::Parameterized { raw, .. } => raw.clone(),
+            GenericType::Wildcard { upper, .. } => upper.first().map_or_else(
                 || "java/lang/Object".to_owned(),
                 |bound| match bound {
                     GenericType::Class(name) => name.clone(),
@@ -437,17 +419,16 @@ impl<H: Host> Runtime<'_, H> {
             // A variable's erasure is its first bound's, which its declaration
             // holds; the model keeps `Object` (as it did for a use-site
             // variable, whose bounds were never written).
-            Some(GenericType::Variable { .. }) => "java/lang/Object".to_owned(),
-            Some(GenericType::Array(component)) => match *component {
+            GenericType::Variable { .. } => "java/lang/Object".to_owned(),
+            GenericType::Array(component) => match component.as_ref() {
                 GenericType::Parameterized { raw, .. } => format!("[L{raw};"),
                 _ => "[Ljava/lang/Object;".to_owned(),
             },
-            Some(GenericType::Class(name)) => name,
-            None => inner.to_owned(),
+            GenericType::Class(name) => name.clone(),
         }
     }
 
-    fn invoke_type_token(
+    pub(crate) fn invoke_type_token(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
@@ -459,10 +440,21 @@ impl<H: Host> Runtime<'_, H> {
                 "(Ljava/lang/Class;)Lcom/google/common/reflect/TypeToken;"
                 | "(Ljava/lang/reflect/Type;)Lcom/google/common/reflect/TypeToken;",
             ) => {
-                let Some(inner) = args.first().and_then(crate::runtime::host_reflect_type::type_text) else {
+                let Some(inner) = args.first().filter(|value| **value != Value::Ref(None)) else {
                     return Err(thrown("java/lang/NullPointerException", None));
                 };
-                return Ok(Some(Self::token_value(&inner)));
+                // A `Type` the model holds: a class marker, a JDK or a Gson node;
+                // anything else (a String cast to `Type`, a jar's own `Type`) counted.
+                let modelled = match inner {
+                    Value::Ref(Some(_)) => {
+                        crate::runtime::host_class::is_class(inner, self.classes, &self.linked)
+                    }
+                    _ => crate::runtime::host_gson_type::any_node(inner).is_some(),
+                };
+                if !modelled {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
+                return Ok(Some(Self::token_value(inner)));
             }
             // `new TypeToken<T>() {}`: the anonymous subclass's generic
             // superclass names `T`. A subclass that does not parameterize
@@ -497,10 +489,10 @@ impl<H: Host> Runtime<'_, H> {
                         Some(format!("{} isn't parameterized", class.replace('/', "."))),
                     ));
                 };
-                let captured = generic_type_value(&captured);
+                // The `Type` itself, as Guava's `runtimeType` field holds it.
                 self.fields.insert(
                     format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"),
-                    Value::Ref(crate::runtime::host_reflect_type::type_text(&captured)),
+                    generic_type_value(&captured),
                 );
                 return Ok(Some(Value::Void));
             }
@@ -509,61 +501,88 @@ impl<H: Host> Runtime<'_, H> {
         let Some(inner) = receiver.and_then(|token| self.token_type(token)) else {
             return Ok(None);
         };
+        let Some(node) = crate::runtime::host_gson_type::any_node(&inner) else {
+            return Ok(None);
+        };
+        let class = match &node {
+            GenericType::Class(name) => Some(name.as_str()),
+            _ => None,
+        };
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
-            ("getType", "()Ljava/lang/reflect/Type;") => {
-                crate::runtime::host_reflect_type::type_from_text(&inner)
-            }
+            // `runtimeType`: the very `Type` the token was made from.
+            ("getType", "()Ljava/lang/reflect/Type;") => inner.clone(),
             ("getRawType", "()Ljava/lang/Class;") => {
-                crate::runtime::host_class::class_value(&Self::raw_class(&inner))
+                crate::runtime::host_class::class_value(&Self::raw_class(&node))
             }
             ("wrap", "()Lcom/google/common/reflect/TypeToken;") => {
-                Self::token_value(boxed_class(&inner).unwrap_or(&inner))
+                match class.and_then(boxed_class) {
+                    Some(boxed) => Self::token_value(&crate::runtime::host_class::class_value(boxed)),
+                    None => receiver.cloned().unwrap_or(Value::Ref(None)),
+                }
             }
             ("unwrap", "()Lcom/google/common/reflect/TypeToken;") => {
                 let primitive = [
                     "boolean", "byte", "char", "short", "int", "long", "float", "double", "void",
                 ]
                 .into_iter()
-                .find(|primitive| boxed_class(primitive) == Some(inner.as_str()));
-                Self::token_value(primitive.unwrap_or(&inner))
-            }
-            ("isPrimitive", "()Z") => Value::Int(i32::from(boxed_class(&inner).is_some())),
-            ("isArray", "()Z") => Value::Int(i32::from(inner.starts_with('['))),
-            ("getComponentType", "()Lcom/google/common/reflect/TypeToken;") => {
-                match inner.strip_prefix('[') {
-                    Some(element) => Self::token_value(&erased_field_type(element)),
-                    None => Value::Ref(None),
+                .find(|primitive| class.is_some() && boxed_class(primitive) == class);
+                match primitive {
+                    Some(primitive) => {
+                        Self::token_value(&crate::runtime::host_class::class_value(primitive))
+                    }
+                    None => receiver.cloned().unwrap_or(Value::Ref(None)),
                 }
             }
-            ("equals", "(Ljava/lang/Object;)Z") => {
-                let other = args.first().and_then(|value| self.token_type(value));
-                Value::Int(i32::from(other.as_deref() == Some(inner.as_str())))
-            }
-            ("hashCode", "()I") => Value::Int(java_string_hash(&inner)),
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(
-                crate::runtime::host_reflect_type::handle_node(&crate::runtime::host_reflect_type::type_from_text(
-                    &inner,
-                ))
-                .map_or_else(
-                    || class_type_display(&inner),
-                    |node| generic_type_display(&node),
-                ),
+            ("isPrimitive", "()Z") => Value::Int(i32::from(class.and_then(boxed_class).is_some())),
+            ("isArray", "()Z") => Value::Int(i32::from(
+                class.is_some_and(|name| name.starts_with('['))
+                    || matches!(node, GenericType::Array(_)),
             )),
+            ("getComponentType", "()Lcom/google/common/reflect/TypeToken;") => match &node {
+                GenericType::Class(name) => match name.strip_prefix('[') {
+                    Some(element) => Self::token_value(&crate::runtime::host_class::class_value(
+                        &erased_field_type(element),
+                    )),
+                    None => Value::Ref(None),
+                },
+                GenericType::Array(component) => Self::token_value(&generic_type_value(component)),
+                _ => Value::Ref(None),
+            },
+            // `runtimeType.equals(that.runtimeType)` for another token;
+            // `false` for anything that is not one. Two types the model
+            // cannot compare are counted.
+            ("equals", "(Ljava/lang/Object;)Z") => {
+                let other = args
+                    .first()
+                    .ok_or_else(|| thrown("java/lang/NullPointerException", None))?;
+                let equal = match self.token_type(other) {
+                    Some(theirs) => crate::runtime::host_type_token::types_equal(&inner, &theirs),
+                    None if crate::runtime::jar_object::object_key(other).is_some() => None,
+                    None => Some(false),
+                };
+                match equal {
+                    Some(equal) => Value::Int(i32::from(equal)),
+                    None => return self.host.unknown_operand_call(r).map(Some),
+                }
+            }
+            // `runtimeType.hashCode()`: a class's identity hash.
+            ("hashCode", "()I") => return self.host.unknown_operand_call(r).map(Some),
+            ("toString", "()Ljava/lang/String;") => {
+                Value::Ref(Some(crate::runtime::host_type_token::guava_type_text(&node)))
+            }
             (
                 "isSubtypeOf" | "isSupertypeOf",
                 "(Lcom/google/common/reflect/TypeToken;)Z" | "(Ljava/lang/reflect/Type;)Z",
             ) => {
                 let other = args
                     .first()
-                    .and_then(|value| {
-                        self.token_type(value)
-                            .or_else(|| expect_ref(value).cloned())
-                    })
+                    .and_then(|value| self.token_type(value).or_else(|| Some(value.clone())))
+                    .and_then(|value| crate::runtime::host_gson_type::any_node(&value))
                     .ok_or_else(|| thrown("java/lang/NullPointerException", None))?;
                 let (sub, sup) = if r.name == "isSubtypeOf" {
-                    (Self::raw_class(&inner), Self::raw_class(&other))
+                    (Self::raw_class(&node), Self::raw_class(&other))
                 } else {
-                    (Self::raw_class(&other), Self::raw_class(&inner))
+                    (Self::raw_class(&other), Self::raw_class(&node))
                 };
                 // Raw assignability; type arguments are not compared.
                 Value::Int(i32::from(

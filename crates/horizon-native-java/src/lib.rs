@@ -58,6 +58,7 @@ mod game_hooks;
 mod game_rules;
 mod gson_model;
 mod gson_tree;
+mod gson_type_token;
 mod guava_model;
 mod guava_text;
 mod hash_bulk;
@@ -79,6 +80,8 @@ mod host_executors;
 mod host_fabric_loader;
 mod host_fabric_runtime;
 mod host_game_event;
+mod host_gson;
+mod host_gson_type;
 mod host_guava;
 mod host_ids;
 mod host_invoke;
@@ -93,6 +96,7 @@ mod host_reflect;
 mod host_reflect_type;
 mod host_registry;
 mod host_services;
+mod host_type_token;
 mod host_watch;
 mod immutable_collections;
 mod iteration_guard;
@@ -23434,7 +23438,7 @@ impl<H: Host> Runtime<'_, H> {
     /// that resolves, the token behaves like the same class literal would.
     /// A token the model cannot read answers `Object`, which the JSON shape
     /// still materializes into a map or a list.
-    fn type_token_class(&self, _token: &str) -> String {
+    fn type_token_class(&self, _token: &Value) -> String {
         "java/lang/Object".into()
     }
 
@@ -23814,9 +23818,12 @@ impl<H: Host> Runtime<'_, H> {
                                         "Gson.fromJson Reader {reader} is not a modelled reader"
                                     ))
                                 })?;
-                            let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
-                                NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
-                            })?;
+                            let token = args
+                                .get(1)
+                                .filter(|token| **token != Value::Ref(None))
+                                .ok_or_else(|| {
+                                    NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                                })?;
                             (text, self.type_token_class(token))
                         } else {
                             let text = args
@@ -23824,9 +23831,12 @@ impl<H: Host> Runtime<'_, H> {
                                 .map(expect_string)
                                 .unwrap_or_default()
                                 .to_owned();
-                            let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
-                                NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
-                            })?;
+                            let token = args
+                                .get(1)
+                                .filter(|token| **token != Value::Ref(None))
+                                .ok_or_else(|| {
+                                    NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                                })?;
                             (text, self.type_token_class(token))
                         };
                         Ok(Some(self.gson_from_json(&text, &class, &style)?))
@@ -25809,6 +25819,12 @@ impl<H: Host> Runtime<'_, H> {
                         self.invoke_tree_collection(&r, op, receiver.as_ref(), &args)
                     ) {
                         // `TreeMap`/`TreeSet`'s red-black tree (`tree_map.rs`).
+                        value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_gson_types(&r, receiver.as_ref(), &args))
+                    {
+                        // Gson's `TypeToken`, whose `equals`/`hashCode`/`toString`
+                        // a jar's subclass inherits (`gson_type_token.rs`).
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
