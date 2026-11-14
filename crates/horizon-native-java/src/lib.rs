@@ -79,6 +79,7 @@ mod host_invoke;
 mod host_jdk;
 mod host_list_iterator;
 mod host_mixin;
+mod host_neoforge_loader;
 mod host_optional;
 mod host_path;
 mod host_ref;

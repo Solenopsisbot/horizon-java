@@ -316,6 +316,17 @@ pub enum HostKind {
     AttachmentType,
     /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
     AttachmentBuilder,
+    /// A NeoForge `ModContainer`: key its mod id and what its class is known
+    /// to be (`host_neoforge_loader.rs`).
+    NeoForgeModContainer,
+    /// A NeoForge `IModInfo`: key its mod id.
+    NeoForgeModInfo,
+    /// A `ModFileInfo` `getModFileById` answered: key the id it was asked for.
+    NeoForgeModFileInfo,
+    /// A `ModConfig.Type` constant: key its name.
+    NeoForgeConfigType,
+    /// A detected `WorldVersion`: key its name.
+    WorldVersion,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1188,6 +1199,56 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::FromKey(crate::host_attachment::builder_class),
         canonical: always_canonical,
         methods: &crate::host_attachment::BUILDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::NeoForgeModContainer,
+        tag: "nfmc",
+        class: ClassRule::Unknown {
+            declared: crate::host_neoforge_loader::container_types,
+        },
+        // `indexedMods.get(id)`: one container per mod.
+        canonical: always_canonical,
+        methods: &crate::host_neoforge_loader::CONTAINER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::NeoForgeModInfo,
+        tag: "nfmi",
+        class: ClassRule::Unknown {
+            declared: crate::host_neoforge_loader::mod_info_types,
+        },
+        // The container's final `modInfo` field.
+        canonical: always_canonical,
+        methods: &crate::host_neoforge_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::NeoForgeModFileInfo,
+        tag: "nfmf",
+        class: ClassRule::Unknown {
+            declared: crate::host_neoforge_loader::mod_file_info_types,
+        },
+        // One per file, which two mod ids may share: not one per key.
+        canonical: never_canonical,
+        methods: &crate::host_neoforge_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::NeoForgeConfigType,
+        tag: "nfct",
+        class: ClassRule::Unknown {
+            declared: crate::host_neoforge_loader::config_type_types,
+        },
+        // An enum constant.
+        canonical: always_canonical,
+        methods: &crate::host_neoforge_loader::CONFIG_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::WorldVersion,
+        tag: "wver",
+        class: ClassRule::Unknown {
+            declared: crate::host_neoforge_loader::world_version_types,
+        },
+        // A new record per detection.
+        canonical: never_canonical,
+        methods: &crate::host_neoforge_loader::WORLD_VERSION_METHODS,
     },
 ];
 
