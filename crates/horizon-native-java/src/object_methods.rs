@@ -337,6 +337,13 @@ impl<H: Host> Runtime<'_, H> {
     /// The hash of a host-modelled value: a list, set or map by the JDK's
     /// formula over its elements, a handle by its kind's row.
     fn host_value_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
+        // A jar's `new UUID(msb, lsb)`: `UUID.hashCode` of its fields.
+        if crate::host_jdk_value::is_uuid_object(value) {
+            return Ok(self
+                .host
+                .constructed_uuid(value)
+                .map(|(msb, lsb)| crate::host_jdk_value::uuid_hash_of(msb, lsb)));
+        }
         // A handle's `hashCode` is its kind's row, a held value's own
         // `hashCode` run here (`host_ref.rs`).
         if let Value::Host(handle) = value
@@ -461,6 +468,24 @@ impl<H: Host> Runtime<'_, H> {
                         None => {
                             self.host.unknown_operand_call(&MethodRef {
                                 owner: "java/lang/Object".into(),
+                                name: "equals".into(),
+                                descriptor: EQUALS.into(),
+                            })?;
+                            Ok(false)
+                        }
+                    };
+                }
+                // A jar's `new UUID(msb, lsb)`: `UUID.equals` of its fields.
+                if crate::host_jdk_value::is_uuid_object(a) {
+                    let own = self.host.constructed_uuid(a);
+                    let theirs = crate::host_jdk_value::uuid_bits_of(b)
+                        .or_else(|| self.host.constructed_uuid(b));
+                    let unknown = crate::host_jdk_value::is_uuid_object(b) && theirs.is_none();
+                    return match own {
+                        Some(own) if !unknown => Ok(theirs == Some(own)),
+                        _ => {
+                            self.host.unknown_operand_call(&MethodRef {
+                                owner: "java/util/UUID".into(),
                                 name: "equals".into(),
                                 descriptor: EQUALS.into(),
                             })?;
@@ -1132,6 +1157,10 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
 
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
         crate::facade_text::json_now(value, self.runtime.host.component_states())
+    }
+
+    fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
+        self.runtime.host.constructed_uuid(value)
     }
 }
 

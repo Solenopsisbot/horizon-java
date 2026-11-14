@@ -40,6 +40,16 @@ impl<H: Host> Runtime<'_, H> {
                 None => self.count_compare_to(),
             };
         }
+        // A jar's `new UUID(msb, lsb)`: `UUID.compareTo` of the halves the host kept
+        // (`host_jdk_value.rs`), counted where it kept none.
+        if crate::host_jdk_value::is_uuid_object(a) {
+            let theirs =
+                crate::host_jdk_value::uuid_bits_of(b).or_else(|| self.host.constructed_uuid(b));
+            return match (self.host.constructed_uuid(a), theirs) {
+                (Some(own), Some(theirs)) => Ok(crate::host_jdk_value::uuid_order(own, theirs)),
+                _ => self.count_compare_to(),
+            };
+        }
         // A JDK object a jar built: Java 25's table says whether its class is `Comparable`
         // (`jdk_object_methods.rs`). One that is not fails `ComparableTimSort`'s cast; one
         // that is runs a body the host does not have: counted.
