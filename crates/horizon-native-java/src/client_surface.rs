@@ -1145,7 +1145,7 @@ impl StdHost {
             if matches!(r.name.as_str(), "withStyle" | "setStyle") {
                 // Departure D1 (`host_component.rs`): a new component, not the
                 // receiver changed in place; counted while its answer stands.
-                return Some(self.unknown_host_call(r).map(|_| answer));
+                crate::Host::count_departure(self, r);
             }
             return Some(Ok(answer));
         }

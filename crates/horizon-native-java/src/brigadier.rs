@@ -1444,7 +1444,8 @@ impl StdHost {
             // The command surface keeps text, not style: the style is dropped
             // and the receiver answered (its `getString` is Java's). Its
             // `equals`/`toString` would not be, so the call is counted.
-            return Some(self.unknown_host_call(r).map(|_| receiver.clone()));
+            crate::Host::count_departure(self, r);
+            return Some(Ok(receiver.clone()));
         }
         if let Value::Host(_) = receiver {
             // What a model does not answer is an unmodelled call: counted

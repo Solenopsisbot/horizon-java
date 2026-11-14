@@ -2253,6 +2253,17 @@ pub trait Host {
         Ok(Value::default_for(return_desc(&r.descriptor)))
     }
 
+    /// Count `r` with the unknown host calls while the model's answer
+    /// stands, even on a strict host: a known departure from Java whose
+    /// answer is right for its usual use (a chat component's `append` or
+    /// `withStyle` answers a new component where Java changes the receiver,
+    /// `host_component.rs` D1). A run that made one is never exact, and a
+    /// running command that styles its text still runs. A host that keeps
+    /// no count ignores it.
+    fn count_departure(&mut self, r: &MethodRef) {
+        let _ = r;
+    }
+
     /// Invoke an instance method with its receiver preserved. Existing hosts
     /// keep their old behavior through the default forwarding implementation.
     fn invoke_instance(
@@ -3085,13 +3096,18 @@ impl StdHost {
         std::mem::take(&mut self.console_out)
     }
 
+    /// Add one to `r`'s row of the unknown host calls.
+    fn count_unknown_host_call(&mut self, r: &MethodRef) {
+        let key = format!("{}#{}{}", r.owner, r.name, r.descriptor);
+        *self.unknown_host_calls.entry(key).or_default() += 1;
+    }
+
     pub(crate) fn unknown_host_call(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         // Every call is counted. The table is bounded by the distinct method
         // references in the jars' constant pools, so it needs no cap; a cap
         // (it was 64 keys) silently dropped every later new method from
         // `unknown_host_call_count()` and the per-phase deltas taken from it.
-        let key = format!("{}#{}{}", r.owner, r.name, r.descriptor);
-        *self.unknown_host_calls.entry(key).or_default() += 1;
+        self.count_unknown_host_call(r);
         if self.strict_unknown_host_calls {
             Err(NativeError::UnknownHostCall(r.clone()))
         } else if let Some(value) = game_builder_value(r) {
@@ -4344,6 +4360,10 @@ impl StdHost {
 impl Host for StdHost {
     fn unknown_operand_call(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         self.unknown_host_call(r)
+    }
+
+    fn count_departure(&mut self, r: &MethodRef) {
+        self.count_unknown_host_call(r);
     }
 
     fn counted_unknown_calls(&self) -> usize {
@@ -8579,7 +8599,7 @@ impl Host for StdHost {
                 };
                 // Flattened to its text, and a new component rather than the
                 // receiver changed (D1, `host_component.rs`): counted.
-                self.unknown_host_call(r)?;
+                self.count_departure(r);
                 Ok(component_value("literal", &format!("{current}{suffix}")))
             }
             ("net/minecraft/network/chat/MutableComponent", "copy", descriptor)

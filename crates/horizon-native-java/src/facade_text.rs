@@ -316,8 +316,8 @@ impl<H: Host> Runtime<'_, H> {
             // and returns it; the model answers a new component and leaves the
             // receiver's handle as it was. A later read of the receiver, or
             // `==` between it and the answer, would differ from Java, so the
-            // call is counted while its answer stands.
-            self.host.unknown_operand_call(r)?;
+            // call is counted while its answer stands (`Host::count_departure`).
+            self.host.count_departure(r);
         }
         Ok(Some(value))
     }
