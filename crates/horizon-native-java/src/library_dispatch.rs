@@ -550,7 +550,8 @@ impl<H: Host> Runtime<'_, H> {
         if let Value::Ref(Some(text)) = &value
             && crate::value_class::is_plain_string(text)
         {
-            let instance = crate::value_class::string_instance_of(text, &wanted);
+            let instance = wanted == "java/lang/Object"
+                || crate::value_class::string_instance_of(text, &wanted);
             if r.name == "isInstance" {
                 return Ok(Some(Value::Int(i32::from(instance))));
             }

@@ -21734,7 +21734,9 @@ impl<H: Host> Runtime<'_, H> {
                     _ => None,
                 };
                 let not_instance = match string {
-                    Some(text) => !value_class::string_instance_of(text, owner),
+                    Some(text) => {
+                        owner != "java/lang/Object" && !value_class::string_instance_of(text, owner)
+                    }
                     None => self.known_instance_of(receiver, owner) == Some(false),
                 };
                 if not_instance {
