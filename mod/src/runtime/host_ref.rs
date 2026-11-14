@@ -1829,10 +1829,12 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::runtime::game_object::declared_types,
         },
-        // One object per entity: P16b keys incarnations; the client's
-        // player is made again on each join and respawn (P16d).
-        canonical: crate::runtime::game_object::world_canonical,
-        methods: &crate::runtime::game_object::IDENTITY_METHODS,
+        // One key per entity object: a server player's carries their session
+        // and life (`game_object::player_value`); an unlisted player's names no
+        // session, and the client's player is made again on each join and
+        // respawn (P16d), so neither is one object.
+        canonical: crate::runtime::game_object::entity_canonical,
+        methods: &crate::runtime::game_object::ENTITY_METHODS,
     },
     KindInfo {
         kind: HostKind::GameLevel,
