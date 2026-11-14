@@ -40,7 +40,7 @@
 
 use crate::{
     Host, MethodRef, NativeError, Runtime, Value, is_collection_owner, is_map_owner,
-    parse_collection_value, runtime_collection_values,
+    runtime_collection_values,
 };
 
 /// `java/util/function/Consumer.accept`.
@@ -265,11 +265,8 @@ impl<H: Host> Runtime<'_, H> {
 }
 
 /// The host's collection values, each parsed back into a `Value`.
-fn owned_values(values: &[String]) -> Result<Vec<Value>, NativeError> {
-    values
-        .iter()
-        .map(|value| parse_collection_value(value))
-        .collect()
+fn owned_values(values: &[Value]) -> Result<Vec<Value>, NativeError> {
+    Ok(values.to_vec())
 }
 
 /// Where a JDK iterator's `forEachRemaining` leaves its cursor when the

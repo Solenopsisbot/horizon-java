@@ -1218,8 +1218,9 @@ impl<H: Host> Runtime<'_, H> {
     fn key_signature(&self, value: &Value, kind: TableKind) -> Result<Vec<String>, NativeError> {
         let step = if kind.map { 2 } else { 1 };
         let mut keys: Vec<String> = runtime_collection_values(self.host, value)?
-            .into_iter()
+            .iter()
             .step_by(step)
+            .map(collection_item_marker)
             .collect();
         keys.sort();
         Ok(keys)

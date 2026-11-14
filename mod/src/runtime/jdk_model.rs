@@ -630,12 +630,7 @@ impl crate::runtime::StdHost {
         if matches!(source, Value::Ref(None)) {
             return Some(Err(null_pointer()));
         }
-        let values = match super::host_collection_values(self, source).and_then(|items| {
-            items
-                .iter()
-                .map(|item| super::parse_collection_value(item))
-                .collect::<Result<Vec<_>, _>>()
-        }) {
+        let values = match super::host_collection_values(self, source) {
             Ok(values) => values,
             Err(error) => return Some(Err(error)),
         };
@@ -949,12 +944,6 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                     return Ok(None);
                 };
                 items
-                    .iter()
-                    .map(|item| {
-                        crate::runtime::parse_collection_value(item)
-                            .unwrap_or_else(|_| Value::Ref(Some(item.clone())))
-                    })
-                    .collect()
             }
             _ => return Ok(None),
         };

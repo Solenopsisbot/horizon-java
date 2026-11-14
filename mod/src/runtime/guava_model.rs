@@ -126,9 +126,7 @@ impl<H: Host> Runtime<'_, H> {
                         }
                         other => {
                             let items = runtime_collection_values(&*self.host, other)?;
-                            for item in items {
-                                values.push(parse_collection_value(&item)?);
-                            }
+                            values.extend(items);
                         }
                     }
                 }
@@ -806,10 +804,7 @@ impl<H: Host> Runtime<'_, H> {
             let set =
                 this.host
                     .invoke_instance(&map_ref("keySet", "()Ljava/util/Set;"), &map, &[])?;
-            runtime_collection_values(&*this.host, &set)?
-                .iter()
-                .map(|item| parse_collection_value(item))
-                .collect()
+            runtime_collection_values(&*this.host, &set)
         };
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("put", "(Ljava/lang/Object;Ljava/lang/Object;)Z") => {
@@ -879,9 +874,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut all = Vec::new();
                 for key in keys(self)? {
                     let collection = self.host.invoke_instance(&get, &map, &[key])?;
-                    for item in runtime_collection_values(&*self.host, &collection)? {
-                        all.push(parse_collection_value(&item)?);
-                    }
+                    all.extend(runtime_collection_values(&*self.host, &collection)?);
                 }
                 collection_value("list", &all)
             }

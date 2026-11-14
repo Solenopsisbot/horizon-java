@@ -1148,7 +1148,7 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.invoke_instance(r, receiver, args)
     }
 
-    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<String>> {
+    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         self.inner.mutable_collection_values(value)
     }
 

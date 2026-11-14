@@ -423,9 +423,6 @@ impl<H: Host> Runtime<'_, H> {
                     // `stream().allMatch`: stops at the first element refused.
                     let mut all = true;
                     for element in elements {
-                        let Ok(element) = parse_value_marker(&element) else {
-                            return Ok(Tested::Unknown);
-                        };
                         match self.invoke_callback(&element_validator, &[element])? {
                             Some(answer) if truthy(&answer) => {}
                             Some(_) => {
