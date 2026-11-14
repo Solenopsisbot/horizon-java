@@ -11437,10 +11437,6 @@ fn stand_in_class(kind: &str) -> &'static str {
     }
 }
 
-fn collection_empty(kind: &str) -> Value {
-    Value::Ref(Some(kind.to_owned()))
-}
-
 fn value_text(value: &Value) -> String {
     match value {
         // A box prints its value (`Short.valueOf("1")` is `1`).
