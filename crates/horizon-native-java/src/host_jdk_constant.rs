@@ -232,3 +232,7 @@ pub(crate) const ARTIFACT_VERSION_METHODS: Methods = Methods {
     crosses_jars: |_, _| true,
     ..crate::host_events::DECLARED_TYPE_METHODS
 };
+
+#[cfg(test)]
+#[path = "host_jdk_constant_tests.rs"]
+mod tests;
