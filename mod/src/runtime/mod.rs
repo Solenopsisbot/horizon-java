@@ -116,6 +116,7 @@ mod jdk_locale_thread;
 mod jdk_model;
 mod jdk_reflect_proxy;
 mod jdk_skeletons;
+mod jdk_spliterators;
 mod jdk_stream;
 mod jdk_string_builder;
 mod jdk_supertypes;
@@ -10464,6 +10465,10 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
         "org/slf4j/event/Level" => &["ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
         // The JDK's open options, checked by `Files`' writers (`open_options.rs`).
         "java/nio/file/StandardOpenOption" => open_options::STANDARD_OPEN_OPTIONS,
+        // `Collector.of`'s characteristics (`stream_pipeline.rs`).
+        "java/util/stream/Collector$Characteristics" => {
+            &["CONCURRENT", "UNORDERED", "IDENTITY_FINISH"]
+        }
         // `Files.copy`'s options (`files_copy.rs`).
         "java/nio/file/StandardCopyOption" => files_copy::STANDARD_COPY_OPTIONS,
         _ => return None,
@@ -20111,16 +20116,14 @@ impl<H: Host> Runtime<'_, H> {
         marker: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        // A `Stream.Builder` handle is a `Consumer` (`stream_pipeline.rs`).
+        // A `Stream.Builder` handle, or a push's sink handed to a
+        // spliterator, is a `Consumer` (`stream_pipeline.rs`).
         if let Some(value) = self.stream_callback(marker, args)? {
             return Ok(Some(value));
         }
         let Some(marker) = expect_ref(marker) else {
             return Ok(None);
         };
-        if marker.starts_with(jdk_model::COLLECTING_CONSUMER_PREFIX) {
-            return self.collecting_consumer_accept(marker, args);
-        }
         // A composition marker closes over the two callbacks it joined. Running
         // it means running both, in the order the combinator defines — not
         // answering the marker itself.
@@ -23591,7 +23594,25 @@ impl<H: Host> Runtime<'_, H> {
         Value::Ref(Some(marker))
     }
 
+    /// [`Self::invoke_stream_calls`], recording which stream interface a
+    /// new stream is (its call's declared result: `IntStream.range` answers an
+    /// `IntStream`), for `instanceof` and casts (`stream_pipeline.rs`).
     fn invoke_stream(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        let result = self.invoke_stream_calls(r, receiver, args, class, method)?;
+        if let Some(stream) = &result {
+            self.record_stream_kind(stream, return_desc(&r.descriptor));
+        }
+        Ok(result)
+    }
+
+    fn invoke_stream_calls(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
@@ -23602,9 +23623,6 @@ impl<H: Host> Runtime<'_, H> {
         // Stages, `concat`, builders and the per-element terminals run
         // lazily (`stream_pipeline.rs`).
         if let Some(value) = self.invoke_lazy_stream(r, receiver, args, class, method)? {
-            return Ok(Some(value));
-        }
-        if let Some(value) = self.stream_support_stream(r, args, class, method)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.primitive_stream_source(r, args, class, method)? {
@@ -24802,6 +24820,7 @@ impl<H: Host> Runtime<'_, H> {
                         || !wanted.starts_with('[')
                             && expect_ref(&value).is_some_and(|marker| {
                                 self.forged_stream_instance_of(marker, &wanted)
+                                    || self.live_stream_instance_of(marker, &wanted) == Some(true)
                                     || self.object_is_instance_of(marker, &wanted)
                                     || self.host.host_instance_of(marker, &wanted)
                                     || jdk_model::platform_instance_of(marker, &wanted)
@@ -25094,6 +25113,20 @@ impl<H: Host> Runtime<'_, H> {
                         // a jar class declares, while a skeleton
                         // `invokespecial` needs the member to resolve to the
                         // JDK class, as the JVM's resolution does.
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_jdk_spliterator(
+                            &r,
+                            op,
+                            receiver.as_ref(),
+                            &args,
+                            class,
+                            method
+                        )
+                    ) {
+                        // The JDK's spliterators and `StreamSupport.stream`
+                        // (`jdk_spliterators.rs`).
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
