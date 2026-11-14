@@ -128,6 +128,12 @@ impl<H: Host> Runtime<'_, H> {
             return None;
         }
         let marker = expect_ref(value)?;
+        // A map's `keySet()`/`values()`/`entrySet()` copy stands in for the
+        // map's view (`HashMap$KeySet`): its class is the host's stand-in, and
+        // its order is the map's, so it has no table of its own (#156 P14d1).
+        if self.host.is_view_copy(marker) {
+            return None;
+        }
         let (class, _) = marker.split_once('#')?;
         let mut class = class.to_owned();
         let mut kind = table_kind_of(&class);
