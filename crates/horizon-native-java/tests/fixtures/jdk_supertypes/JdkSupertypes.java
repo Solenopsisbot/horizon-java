@@ -6,8 +6,9 @@ import java.util.TreeSet;
 /**
  * Prints `src/jdk_supertypes_25.txt`: for each class the runtime's JDK hierarchy answers for, its
  * flags, every supertype (getSuperclass/getInterfaces, transitively, the class itself left out),
- * its direct superclass (`-` for none) and its direct interfaces in declaration order,
- * then every package of every system module and the module that holds it (a JDK class's
+ * its direct superclass (`-` for none), its direct interfaces in declaration order, and which of
+ * `equals`/`hashCode`/`toString`/`compareTo` its objects run some JDK class's own body for
+ * rather than `Object`'s (`-` for none, and for an interface), then every package of every system module and the module that holds it (a JDK class's
  * supertypes can only come from these).
  * Run on OpenJDK 25: `java JdkSupertypes.java > ../../../src/jdk_supertypes_25.txt`.
  */
@@ -156,6 +157,20 @@ public final class JdkSupertypes {
     for (Class<?> i : c.getInterfaces()) walk(i, out);
   }
 
+  /**
+   * The members of `equals`, `hashCode`, `toString` and `compareTo` that `c` declares or inherits
+   * from a superclass other than `Object` (`compareTo`: any `Comparable`), comma-separated.
+   */
+  static String overrides(Class<?> c) throws Exception {
+    if (c.isInterface()) return "-";
+    java.util.List<String> own = new java.util.ArrayList<>();
+    if (c.getMethod("equals", Object.class).getDeclaringClass() != Object.class) own.add("equals");
+    if (c.getMethod("hashCode").getDeclaringClass() != Object.class) own.add("hashCode");
+    if (c.getMethod("toString").getDeclaringClass() != Object.class) own.add("toString");
+    if (Comparable.class.isAssignableFrom(c)) own.add("compareTo");
+    return own.isEmpty() ? "-" : String.join(",", own);
+  }
+
   public static void main(String[] args) throws Exception {
     System.out.println("# Java " + System.getProperty("java.version")
         + " supertypes and system-module packages: tests/fixtures/jdk_supertypes/JdkSupertypes.java");
@@ -172,7 +187,7 @@ public final class JdkSupertypes {
       Set<String> declared = new java.util.LinkedHashSet<>();
       for (Class<?> i : c.getInterfaces()) declared.add(i.getName().replace('.', '/'));
       System.out.println("class\t" + c.getName().replace('.', '/') + "\t" + flags + "\t" + String.join(" ", supers)
-          + "\t" + direct + "\t" + String.join(" ", declared));
+          + "\t" + direct + "\t" + String.join(" ", declared) + "\t" + overrides(c));
     }
     // Each system package with the module that holds it (`Class.getModule()` of a JDK class).
     Set<String> packages = new TreeSet<>();

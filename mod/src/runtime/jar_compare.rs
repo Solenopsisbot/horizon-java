@@ -40,6 +40,25 @@ impl<H: Host> Runtime<'_, H> {
                 None => self.count_compare_to(),
             };
         }
+        // A JDK object a jar built: Java 25's table says whether its class is `Comparable`
+        // (`jdk_object_methods.rs`). One that is not fails `ComparableTimSort`'s cast; one
+        // that is runs a body the host does not have: counted.
+        if self.interpreted_object_class(a).is_none()
+            && let Some(base) = self.jdk_base_class(a)
+        {
+            if crate::runtime::jdk_object_methods::overrides(
+                &base,
+                crate::runtime::jdk_object_methods::Member::CompareTo,
+            ) == Some(false)
+                && let Some(class) = crate::runtime::jar_object::object_class(a)
+            {
+                return Err(crate::runtime::checkcast::class_cast_exception(
+                    class,
+                    "java/lang/Comparable",
+                ));
+            }
+            return self.count_compare_to();
+        }
         let Some(class) = self.interpreted_object_class(a) else {
             if self.interpreted_object_class(b).is_some() {
                 // A platform value's `compareTo` of a jar object: a JVM throws

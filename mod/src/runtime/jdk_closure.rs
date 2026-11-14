@@ -4,7 +4,9 @@
 //! `jdk_supertypes_25.txt` is generated, never edited: `tests/fixtures/jdk_supertypes/
 //! JdkSupertypes.java` run on OpenJDK 25 prints, for each class the runtime's JDK answers read,
 //! whether it is final or an interface and its whole supertype set (`getSuperclass()` and
-//! `getInterfaces()`, transitively), then every package of every system module with the module
+//! `getInterfaces()`, transitively) and which of `equals`/`hashCode`/`toString`/`compareTo` its
+//! objects run a JDK body of rather than `Object`'s (`jdk_object_methods.rs`, #217), then every
+//! package of every system module with the module
 //! that holds it (`module_of`). A JDK class's
 //! supertypes can only come from those packages: the boot and platform loaders that define JDK
 //! classes cannot see a class path, so a JDK class never extends or implements a jar's or a game's
@@ -29,6 +31,10 @@ pub(crate) struct JdkClass {
     pub(crate) superclass: Option<&'static str>,
     /// `getInterfaces()`, in declaration order.
     pub(crate) interfaces: Vec<&'static str>,
+    /// Which of `equals`, `hashCode`, `toString` and `compareTo` the class declares or inherits
+    /// from a superclass other than `Object` (`compareTo`: it is `Comparable`). Empty for an
+    /// interface.
+    pub(crate) overrides: Vec<&'static str>,
 }
 
 struct Table {
@@ -56,6 +62,11 @@ fn table() -> &'static Table {
                 (Some("class"), Some(name), Some(flags), supertypes) => {
                     let superclass = fields.next().filter(|name| *name != "-");
                     let interfaces = names(fields.next());
+                    let overrides = fields
+                        .next()
+                        .filter(|members| *members != "-")
+                        .map(|members| members.split(',').collect())
+                        .unwrap_or_default();
                     let supertypes: Vec<&str> = supertypes
                         .unwrap_or_default()
                         .split(' ')
@@ -75,6 +86,7 @@ fn table() -> &'static Table {
                             below_object,
                             superclass,
                             interfaces,
+                            overrides,
                         },
                     );
                 }

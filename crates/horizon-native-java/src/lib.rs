@@ -121,6 +121,7 @@ mod jdk_closure;
 mod jdk_float_text;
 mod jdk_locale_thread;
 mod jdk_model;
+mod jdk_object_methods;
 mod jdk_reflect_proxy;
 mod jdk_skeletons;
 mod jdk_spliterators;
@@ -9827,8 +9828,13 @@ impl Host for StdHost {
             _ => {
                 // The bounded object model has no per-class `toString`; a
                 // marker's text is the fallback a handler can observe (a
-                // payload id, for instance). Specific types answer above.
+                // payload id, for instance). Specific types answer above. A
+                // jar object's is its class's body or `Object`'s identity
+                // hash, neither the host's: counted, never its key (#217).
                 if r.name == "toString" && r.descriptor == "()Ljava/lang/String;" {
+                    if jar_object::object_key(receiver).is_some() {
+                        return self.unknown_host_call(r);
+                    }
                     return Ok(Value::Ref(Some(value_text(receiver))));
                 }
                 // A constructor the host does not model still leaves the
