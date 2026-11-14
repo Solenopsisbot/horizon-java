@@ -1549,7 +1549,8 @@ const KINDS: &[KindInfo] = &[
         kind: HostKind::Collector,
         tag: "coll",
         class: ClassRule::Fixed("java/util/stream/Collectors$CollectorImpl"),
-        canonical: never_canonical,
+        // Guava's two shared collectors; every other one is its own object.
+        canonical: crate::runtime::host_collector::canonical,
         methods: &crate::runtime::stream_pipeline::COLLECTOR_IMPL,
     },
     KindInfo {

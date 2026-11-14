@@ -8026,6 +8026,17 @@ impl Host for StdHost {
             && is_collection_owner(&r.owner)
             && !is_map_owner(&r.owner)
         {
+            // `Collections.EmptyList`/`EmptySet.iterator()` is `Collections.emptyIterator()`'s
+            // one object (Java 25's `javap`), never a new iterator (#222's review).
+            if is_collections_empty(
+                receiver,
+                &[
+                    "java/util/Collections$EmptyList",
+                    "java/util/Collections$EmptySet",
+                ],
+            ) {
+                return Ok(self.empty_iterator());
+            }
             let values = host_collection_values(self, receiver)?;
             let marker = format!("iterator/{}", self.next_iterator);
             self.next_iterator = self.next_iterator.saturating_add(1);
@@ -8345,6 +8356,23 @@ impl Host for StdHost {
                         .iter()
                         .any(|pair| collection_item_marker(&pair[1]) == needle)
                         as i32,
+                ))
+            }
+            // `Collections.EmptyMap`'s `keySet()`, `entrySet()` and `values()` are all
+            // `Collections.emptySet()`, the one `EMPTY_SET` (Java 25's `javap`), whose
+            // iterator is the one empty iterator.
+            (
+                owner,
+                "entrySet" | "keySet" | "values",
+                "()Ljava/util/Set;" | "()Ljava/util/Collection;",
+            ) if is_map_owner(owner)
+                && is_collections_empty(receiver, &["java/util/Collections$EmptyMap"]) =>
+            {
+                Ok(self.factory_unmodifiable(
+                    "java/util/Collections",
+                    "emptySet",
+                    "set",
+                    Vec::new(),
                 ))
             }
             (owner, "entrySet", "()Ljava/util/Set;") if is_map_owner(owner) => {
@@ -12130,6 +12158,14 @@ fn collection_values(value: &Value) -> Result<Vec<Value>, NativeError> {
 /// The class a host collection marker was constructed as
 /// (`java/util/ArrayList#3`, `java/util/ArrayList#neutral0`), or the kind of
 /// an encoded value (`set/...` is `set`).
+/// Whether `value` is the host-made object of one of `classes`, `Collections`' empty
+/// collections (`java_immutable.rs` makes each once, as `Collections.EMPTY_*`).
+fn is_collections_empty(value: &Value, classes: &[&str]) -> bool {
+    matches!(value, Value::Host(handle)
+        if handle.kind() == HostKind::Collection
+            && classes.contains(&jar_object::collection_class(handle.key())))
+}
+
 fn iterated_kind(marker: &str) -> Option<String> {
     if let Some((class, _)) = marker.split_once('#')
         && class.starts_with("java/util/")
@@ -24500,7 +24536,28 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     // `HashSet::new` (`hash_bulk.rs`).
                     host_collector::Builtin::Set => self.hash_set_collect(&values)?,
-                    host_collector::Builtin::OrderedSet => collection_value("set", &values),
+                    // Guava's `ImmutableSet.Builder`: `null` throws (`checkNotNull`), then each
+                    // element once in encounter order, as `RegularImmutableSet`/
+                    // `SingletonImmutableSet` (`RegularImmutableSet.EMPTY` when empty).
+                    host_collector::Builtin::OrderedSet => {
+                        if values.contains(&Value::Ref(None)) {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/NullPointerException".into(),
+                                message: None,
+                                frame: None,
+                            });
+                        }
+                        let kept = self.distinct_in_order(&values)?;
+                        let fallback = collection_value("set", &kept);
+                        self.host
+                            .factory_collection(
+                                "com/google/common/collect/ImmutableSet",
+                                "toImmutableSet",
+                                "set",
+                                kept,
+                            )
+                            .unwrap_or(fallback)
+                    }
                     // `Set.of(toSet().toArray())` (`immutable_collections.rs`).
                     host_collector::Builtin::UnmodifiableSet => {
                         let set = self.hash_set_collect(&values)?;

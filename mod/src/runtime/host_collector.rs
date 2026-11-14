@@ -9,6 +9,12 @@
 //! (`HostRef::of_values`): `builtin`, a serial (one per call), the collector's name, and its
 //! arguments (the joining texts, the `toMap` functions). Jar text reaches the key only through
 //! that encoder. `Collector.of`'s keys are bare numbers, so the two never meet.
+//!
+//! Guava's `toImmutableList()`/`toImmutableSet()` are the exception: Guava 33.6's
+//! `CollectCollectors` hands out its `TO_IMMUTABLE_LIST`/`TO_IMMUTABLE_SET` constants
+//! (`getstatic`, per `javap`), so every call is one object. Those two are keyed by what they are,
+//! with the [`SHARED`] serial, and [`canonical`] says so; `toImmutableMap(..)` makes a new one per
+//! call like the JDK's (#222's review).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -20,6 +26,10 @@ const BUILTIN: &str = "builtin";
 
 /// One serial per built-in collector made: a new object per call.
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// The serial of a collector the library shares (Guava's two constants): never a per-call one,
+/// which counts up from zero.
+const SHARED: i64 = -1;
 
 /// What a built-in collector collects into.
 #[derive(Clone, Debug, PartialEq)]
@@ -67,14 +77,39 @@ fn text(value: &str) -> Value {
     Value::Ref(Some(value.to_owned()))
 }
 
-/// A new collector handle for `builtin`.
+/// Whether the library hands out one shared object for `builtin` (Guava's `TO_IMMUTABLE_LIST`
+/// and `TO_IMMUTABLE_SET`) rather than a new one per call.
+fn is_shared(builtin: &Builtin) -> bool {
+    matches!(builtin, Builtin::ImmutableList | Builtin::OrderedSet)
+}
+
+/// The keys of the shared collectors, made once.
+fn shared_keys() -> &'static [String; 2] {
+    static KEYS: std::sync::OnceLock<[String; 2]> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        [Builtin::ImmutableList, Builtin::OrderedSet].map(|builtin| match collector(builtin) {
+            Value::Host(handle) => handle.key().to_owned(),
+            _ => unreachable!("a collector is a handle"),
+        })
+    })
+}
+
+/// The `Collector` row's canonical predicate: a shared collector's key names its one object.
+/// Every other key (a per-call built-in's, `Collector.of`'s) is not canonical, so two of them
+/// are the same object only when the same handle flows; their `equals` stays counted (equal
+/// records, different objects).
+pub(crate) fn canonical(key: &str) -> bool {
+    shared_keys().iter().any(|shared| shared == key)
+}
+
+/// The collector handle for `builtin`: a new one per call, or the library's shared one.
 pub(crate) fn collector(builtin: Builtin) -> Value {
-    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-    let mut values = vec![
-        text(BUILTIN),
-        Value::Long(serial as i64),
-        text(builtin.name()),
-    ];
+    let serial = if is_shared(&builtin) {
+        SHARED
+    } else {
+        NEXT.fetch_add(1, Ordering::Relaxed) as i64
+    };
+    let mut values = vec![text(BUILTIN), Value::Long(serial), text(builtin.name())];
     match builtin {
         Builtin::Joining {
             delimiter,
