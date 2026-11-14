@@ -137,6 +137,16 @@ fn components_answer_as_java_25_or_count() {
         ("typeSwitch", CountedAs("M")),
         // A hash set's answers follow from `equals` alone (equal objects hash alike).
         ("hashed", Exact("true1")),
+        // A list prints its elements' text; `Map.of` finds an equal key (equal objects hash alike).
+        (
+            "listed",
+            Exact("[literal{hi}, translation{key='demo.key', args=[]}]"),
+        ),
+        ("mapped", Exact("1")),
+        // `Set.of` meets an equal component (`Set12`'s `equals`, `SetN`'s probe: equal objects
+        // hash alike) and refuses it.
+        ("duplicate", Exact("duplicate element: literal{a}")),
+        ("duplicateN", Exact("duplicate element: literal{a}")),
         // `hashCode` combines contents, style and siblings (Java `132311680`) and there is no
         // natural order (Java `CCE`): counted.
         ("hash", Counted),

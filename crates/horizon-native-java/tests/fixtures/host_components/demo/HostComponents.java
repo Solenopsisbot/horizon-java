@@ -125,6 +125,32 @@ public final class HostComponents {
     return "" + set.contains(Component.literal("hi")) + Set.of(Component.literal("a")).size();
   }
 
+  /** Inside host collections: a list prints its elements; an immutable map looks up by hash. */
+  public static String listed() {
+    return List.of(Component.literal("hi"), Component.translatable("demo.key")).toString();
+  }
+
+  public static String mapped() {
+    return "" + Map.of(Component.literal("hi"), 1).get(Component.literal("hi"));
+  }
+
+  /** `Set.of` refuses two equal components (their hashes are equal too): `Set12`, then `SetN`. */
+  public static String duplicate() {
+    try {
+      return "" + Set.of(Component.literal("a"), Component.literal("a")).size();
+    } catch (IllegalArgumentException x) {
+      return x.getMessage();
+    }
+  }
+
+  public static String duplicateN() {
+    try {
+      return "" + Set.of(Component.literal("a"), Component.translatable("b"), Component.literal("a")).size();
+    } catch (IllegalArgumentException x) {
+      return x.getMessage();
+    }
+  }
+
   public static String hash() {
     return "" + Component.literal("hi").hashCode();
   }
