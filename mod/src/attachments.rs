@@ -339,7 +339,9 @@ mod tests {
     //! oracle run against NeoForge 26.3.
     use super::*;
     use crate::runtime::neoforge_attachments::SYNC_NOT_SENT;
-    use crate::runtime::neoforge_attachments::tests::{compound, fixture_jar_bytes, oracle};
+    use crate::runtime::neoforge_attachments::tests::{
+        compound, fixture_jar_bytes, oracle, original_player, player,
+    };
     use crate::runtime::{MethodRef, NativeError, Value};
     use mod_api::{AttachmentError, Attachments};
     use std::time::Duration;
@@ -393,10 +395,7 @@ mod tests {
                     descriptor,
                 },
                 None,
-                &[
-                    Value::Ref(Some(format!("game/player/{P:032x}"))),
-                    Value::Int(which),
-                ],
+                &[player(P), Value::Int(which)],
                 &mut self.host,
                 &ExecutionBudget::within(Duration::from_secs(20)),
             )
@@ -618,7 +617,7 @@ mod tests {
         let budget = ExecutionBudget::within(Duration::from_secs(20));
         run.jar
             .attachment_player_cloned(&mut run.host, &budget, P, true);
-        let on = |run: &mut Run, holder: String, name: &str| {
+        let on = |run: &mut Run, holder: Value, name: &str| {
             let descriptor = match name {
                 "has" => format!("({PLAYER}I)Z"),
                 _ => format!("({PLAYER}I)Ljava/lang/Object;"),
@@ -631,18 +630,15 @@ mod tests {
                         descriptor,
                     },
                     None,
-                    &[Value::Ref(Some(holder)), Value::Int(DATA)],
+                    &[holder, Value::Int(DATA)],
                     &mut run.host,
                     &budget,
                 )
                 .unwrap()
         };
-        let from_original = on(&mut run, format!("game/original-player/{P:032x}"), "get");
+        let from_original = on(&mut run, original_player(P), "get");
         assert_eq!(from_original, carried);
-        assert_eq!(
-            on(&mut run, format!("game/player/{P:032x}"), "has"),
-            Value::Int(0)
-        );
+        assert_eq!(on(&mut run, player(P), "has"), Value::Int(0));
         run.host.close_attachment_batch();
     }
 

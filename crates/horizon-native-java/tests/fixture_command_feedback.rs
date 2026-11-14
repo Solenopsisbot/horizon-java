@@ -310,12 +310,16 @@ fn facade_with(feedback: Option<bool>) -> Arc<EventFacade> {
                 name: "Ana".into(),
                 level: Some("minecraft:overworld".into()),
                 entity_id: Some(7),
+                session: 0,
+                life: 0,
             },
             FacadePlayer {
                 uuid: BOB,
                 name: "Bob".into(),
                 level: Some("minecraft:overworld".into()),
                 entity_id: Some(8),
+                session: 0,
+                life: 0,
             },
         ],
         ..EventFacade::default()
