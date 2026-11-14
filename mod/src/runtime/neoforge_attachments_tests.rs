@@ -165,8 +165,14 @@ fn text(value: &str) -> Value {
     Value::Ref(Some(value.to_owned()))
 }
 
-fn player(uuid: u128) -> Value {
-    text(&format!("game/player/{uuid:032x}"))
+/// The player `uuid` as the runtime hands it to a jar: a game handle (#156 P16b).
+pub(crate) fn player(uuid: u128) -> Value {
+    crate::runtime::game_object::server_value(format!("game/player/{uuid:032x}"))
+}
+
+/// A clone's original player `uuid`, as the runtime hands it to a jar.
+pub(crate) fn original_player(uuid: u128) -> Value {
+    crate::runtime::game_object::server_value(format!("game/original-player/{uuid:032x}"))
 }
 
 /// One stored value in the fake store.
@@ -1037,7 +1043,7 @@ fn death_keeps_only_copy_on_death_types_as_new_objects() {
 /// journaled to the store, and the view ends with the batch.
 #[test]
 fn a_clones_original_keeps_the_old_players_objects() {
-    let original = text(&format!("game/original-player/{P:032x}"));
+    let original = original_player(P);
     let on_original = |fixture: &mut Fixture, name: &str, which: i32| {
         let descriptor = match name {
             "has" => format!("({PLAYER}I)Z"),

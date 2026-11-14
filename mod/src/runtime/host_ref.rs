@@ -1829,9 +1829,11 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::runtime::game_object::declared_types,
         },
-        // One object per entity: P16b keys incarnations.
-        canonical: always_canonical,
-        methods: &crate::runtime::game_object::IDENTITY_METHODS,
+        // One key per entity object: a player's carries their session and
+        // life (`game_object::player_value`); an unlisted player's names no
+        // session, so no one object.
+        canonical: crate::runtime::game_object::entity_canonical,
+        methods: &crate::runtime::game_object::ENTITY_METHODS,
     },
     KindInfo {
         kind: HostKind::GameLevel,
