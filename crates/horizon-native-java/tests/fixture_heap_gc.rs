@@ -104,13 +104,16 @@ fn objects_nothing_reaches_are_collected_and_kept_ones_stay_identical() {
         read(&fixture, &mut host, "read", &returned),
         Ok("40returned".into())
     );
-    // Kept across later calls: retained, as an embedder holding them must.
-    let held = make(&fixture, &mut host, "makeHeld");
-    let list = make(&fixture, &mut host, "makeReturnedList");
-    let lambda = make(&fixture, &mut host, "makeReturnedLambda");
-    for kept in [&held, &list, &lambda] {
-        host.retain(kept);
-    }
+    // Kept across later calls: retained before the next call, as an
+    // embedder holding them must (a later call's store may collect).
+    let mut keep = |method: &str, host: &mut StdHost| {
+        let value = make(&fixture, host, method);
+        host.retain(&value);
+        value
+    };
+    let held = keep("makeHeld", &mut host);
+    let list = keep("makeReturnedList", &mut host);
+    let lambda = keep("makeReturnedLambda", &mut host);
     // Not retained: collected, and then never read as defaults.
     let dropped = make(&fixture, &mut host, "makeHeld");
     let builder = make(&fixture, &mut host, "makeBuilder");
