@@ -1,8 +1,10 @@
-//! The `Iterable`, `Collection` and `Iterator` default methods as JDK 25
-//! runs them. A default's calls on `this` are `invokeinterface`, as in the
-//! JDK's interface bodies.
+//! The `Iterable`, `Collection`, `Iterator` default methods and the
+//! collection interfaces' `spliterator()` defaults as JDK 25 runs them. A
+//! default's calls on `this` are `invokeinterface`, as in the JDK's
+//! interface bodies.
 
 use super::*;
+use crate::jdk_spliterators::{DISTINCT, ORDERED, SORTED, Split, sized_flags};
 
 /// The defaults this file implements: `(interface, name, descriptor)`.
 pub(super) const BODIES: &[(&str, &str, &str)] = &[
@@ -17,6 +19,11 @@ pub(super) const BODIES: &[(&str, &str, &str)] = &[
         "toArray",
         "(Ljava/util/function/IntFunction;)[Ljava/lang/Object;",
     ),
+    ("java/lang/Iterable", "spliterator", SPLITERATOR),
+    (COLLECTION, "spliterator", SPLITERATOR),
+    ("java/util/List", "spliterator", SPLITERATOR),
+    ("java/util/Set", "spliterator", SPLITERATOR),
+    ("java/util/SortedSet", "spliterator", SPLITERATOR),
     (COLLECTION, "stream", "()Ljava/util/stream/Stream;"),
     (COLLECTION, "parallelStream", "()Ljava/util/stream/Stream;"),
     (ITERATOR, "remove", "()V"),
@@ -27,6 +34,9 @@ pub(super) const BODIES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// `spliterator()`'s descriptor.
+const SPLITERATOR: &str = "()Ljava/util/Spliterator;";
+
 /// `Consumer.accept(Object)`.
 const ACCEPT: (&str, &str, &str) = (
     "java/util/function/Consumer",
@@ -35,25 +45,6 @@ const ACCEPT: (&str, &str, &str) = (
 );
 
 impl<H: Host> Runtime<'_, H> {
-    /// Whether the default `owner.name` runs here for `this`: not a stream of
-    /// a class with its own `spliterator()`.
-    pub(super) fn default_runs_here(&mut self, owner: &str, name: &str, this: &Value) -> bool {
-        // A class's own `spliterator()` override is not run here.
-        if owner == COLLECTION && name.ends_with("tream") {
-            let spliterator = MethodRef {
-                owner: COLLECTION.into(),
-                name: "spliterator".into(),
-                descriptor: "()Ljava/util/Spliterator;".into(),
-            };
-            return self
-                .jvm_selected_jar_body(&spliterator, 0xb9, Some(this))
-                .ok()
-                .flatten()
-                .is_none();
-        }
-        true
-    }
-
     /// A JDK interface's default method.
     pub(super) fn interface_default_body(
         &mut self,
@@ -111,33 +102,64 @@ impl<H: Host> Runtime<'_, H> {
                 )
             }
             (COLLECTION, "stream" | "parallelStream") => {
-                // A `RandomAccess` list's `List.spliterator` reads it by
-                // index (`list.rs`).
-                let random_access = crate::jar_object::object_class(this).is_some_and(|class| {
-                    self.class_is_instance(class, "java/util/List")
-                        && self.class_is_instance(class, "java/util/RandomAccess")
-                });
-                let stream = if random_access {
-                    let values = self.random_access_values(this)?;
-                    self.new_stream("java/util/List", name, values)
-                } else {
-                    // `StreamSupport.stream(spliterator(), false)`: the
-                    // collection's `IteratorSpliterator` asks for `iterator()`
-                    // and `size()` when the terminal operation starts, then
-                    // drains the iterator. The runtime's streams are eager, so
-                    // this traversal happens here, when the stream is made.
-                    let it = self.iterator_of(Site::Interface, COLLECTION, this)?;
-                    self.size_of(Site::Interface, COLLECTION, this)?;
-                    let mut values = Vec::new();
-                    while self.has_next(&it)? {
-                        values.push(self.next(&it)?);
-                    }
-                    self.new_stream("java/util/Collection", name, values)
-                };
-                if name == "parallelStream" {
-                    self.mark_parallel_stream(&stream);
+                // `StreamSupport.stream(spliterator(), parallel)`: the
+                // class's own `spliterator()` if it has one, else the
+                // interface default below; the elements are pulled when the
+                // terminal operation runs (`stream_pipeline.rs`).
+                let spliterator = self.call_virtual(
+                    Site::Interface,
+                    COLLECTION,
+                    "spliterator",
+                    SPLITERATOR,
+                    this,
+                    &[],
+                )?;
+                let parallel = name == "parallelStream";
+                self.stream_of_spliterator(&spliterator, parallel, COLLECTION, name)
+            }
+            // `Spliterators.spliteratorUnknownSize(iterator(), 0)`: the
+            // iterator is asked for now.
+            ("java/lang/Iterable", "spliterator") => {
+                let it = self.iterator_of(Site::Interface, "java/lang/Iterable", this)?;
+                Ok(self.new_split(Split::Iter {
+                    collection: None,
+                    it: Some(it),
+                    est: i64::MAX,
+                    flags: 0,
+                    sorted_set: None,
+                }))
+            }
+            (_, "spliterator") => {
+                // `List.spliterator()` of a `RandomAccess` list is
+                // `AbstractList.RandomAccessSpliterator`, which records an
+                // `AbstractList`'s `modCount` when made.
+                if owner == "java/util/List"
+                    && self.java_instance_of(this, "java/util/RandomAccess")?
+                {
+                    let mod_count = self.abstract_list_mod_count(this)?;
+                    return Ok(self.new_split(Split::RandomAccess {
+                        list: this.clone(),
+                        index: 0,
+                        fence: -1,
+                        mod_count,
+                    }));
                 }
-                Ok(stream)
+                // `Spliterators.spliterator(this, flags)` (an
+                // `IteratorSpliterator`): `iterator()` and `size()` are
+                // asked at the first traversal.
+                let flags = match owner {
+                    "java/util/List" => ORDERED,
+                    "java/util/Set" => DISTINCT,
+                    "java/util/SortedSet" => DISTINCT | SORTED | ORDERED,
+                    _ => 0,
+                };
+                Ok(self.new_split(Split::Iter {
+                    collection: Some(this.clone()),
+                    it: None,
+                    est: 0,
+                    flags: sized_flags(flags),
+                    sorted_set: (owner == "java/util/SortedSet").then(|| this.clone()),
+                }))
             }
             (ITERATOR, "remove") => Err(throw(
                 "java/lang/UnsupportedOperationException",

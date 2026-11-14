@@ -350,6 +350,15 @@ pub enum HostKind {
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
+    /// The `Sink` a stream push hands a jar spliterator as its `Consumer`:
+    /// key `<push>:<stage>` (`stream_pipeline.rs`).
+    StreamSink,
+    /// `Collector.of(...)`'s `Collectors.CollectorImpl`: key the runtime's
+    /// collector number (`stream_pipeline.rs`).
+    Collector,
+    /// A modelled JDK spliterator over jar code (`jdk_spliterators.rs`): key
+    /// `iter:<n>` or `ra:<n>`, which names its class.
+    Spliterator,
     /// A chat component (`MutableComponent`): key a serial per allocation, then its vanilla
     /// JSON, keys sorted
     /// (`host_component.rs`).
@@ -1378,6 +1387,32 @@ const KINDS: &[KindInfo] = &[
         // builder, two equal keys from two runs prove nothing.
         canonical: never_canonical,
         methods: &crate::runtime::stream_pipeline::STREAM_BUILDER,
+    },
+    KindInfo {
+        kind: HostKind::StreamSink,
+        tag: "ssnk",
+        // The JDK's sink is a stage's own class, which is not modelled: only
+        // its declared types are known; `getClass()` and a cast's message are
+        // counted.
+        class: ClassRule::Unknown {
+            declared: crate::runtime::stream_pipeline::sink_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Collector,
+        tag: "coll",
+        class: ClassRule::Fixed("java/util/stream/Collectors$CollectorImpl"),
+        canonical: never_canonical,
+        methods: &crate::runtime::stream_pipeline::COLLECTOR_IMPL,
+    },
+    KindInfo {
+        kind: HostKind::Spliterator,
+        tag: "splt",
+        class: ClassRule::FromKey(crate::runtime::jdk_spliterators::spliterator_class),
+        canonical: never_canonical,
+        methods: &crate::runtime::jdk_spliterators::JDK_SPLITERATOR,
     },
     KindInfo {
         kind: HostKind::Component,

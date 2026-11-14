@@ -1003,29 +1003,14 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    /// `Collection.stream()` of a `RandomAccess` list: `List.spliterator`'s
-    /// `RandomAccessSpliterator` reads `size()` once and then `get(i)` through
-    /// `List.get`, and checks an `AbstractList`'s `modCount` at the end.
-    pub(super) fn random_access_values(&mut self, this: &Value) -> Result<Vec<Value>, NativeError> {
-        let abstract_list = self.java_instance_of(this, ABSTRACT_LIST)?;
-        let expected = abstract_list.then(|| self.jdk_int_field(this, MOD_COUNT));
-        let size = self.size_of(Site::Interface, LIST, this)?;
-        let mut values = Vec::new();
-        for i in 0..size {
-            values.push(self.call_virtual(
-                Site::Interface,
-                LIST,
-                "get",
-                "(I)Ljava/lang/Object;",
-                this,
-                &[Value::Int(i)],
-            )?);
-        }
-        if let Some(expected) = expected
-            && self.jdk_int_field(this, MOD_COUNT) != expected
-        {
-            return Err(throw(CME, None));
-        }
-        Ok(values)
+    /// An `AbstractList`'s `modCount`, `None` for any other list
+    /// (`RandomAccessSpliterator`'s `alist`).
+    pub(crate) fn abstract_list_mod_count(
+        &mut self,
+        list: &Value,
+    ) -> Result<Option<i32>, NativeError> {
+        Ok(self
+            .java_instance_of(list, ABSTRACT_LIST)?
+            .then(|| self.jdk_int_field(list, MOD_COUNT)))
     }
 }
