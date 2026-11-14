@@ -36057,11 +36057,11 @@ mandatory = true
             name: "getModContainerById".into(),
             descriptor: "(Ljava/lang/String;)Ljava/util/Optional;".into(),
         };
-        assert_eq!(
-            host.invoke_instance(&container, &list, &[Value::Ref(Some("demo".into()))])
-                .unwrap(),
-            Value::Ref(Some("neoforge-mod-container/demo/1.2.3".into()))
-        );
+        // `Optional.ofNullable(indexedMods.get(id))`: the mod's one container.
+        let found = host
+            .invoke_instance(&container, &list, &[Value::Ref(Some("demo".into()))])
+            .unwrap();
+        assert_eq!(found, optional_wrap(host.neoforge_container("demo")));
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -36069,11 +36069,16 @@ mandatory = true
                     name: "getModId".into(),
                     descriptor: "()Ljava/lang/String;".into(),
                 },
-                &Value::Ref(Some("neoforge-mod-container/demo/1.2.3".into())),
+                &optional_payload(&found).unwrap(),
                 &[],
             )
             .unwrap(),
             Value::Ref(Some("demo".into()))
+        );
+        assert_eq!(
+            host.invoke_instance(&container, &list, &[Value::Ref(Some("missing".into()))])
+                .unwrap(),
+            empty_optional()
         );
         let mods = MethodRef {
             owner: "net/neoforged/fml/ModList".into(),
@@ -36121,10 +36126,8 @@ mandatory = true
                 &[Value::Ref(Some("legacy".into()))],
             )
             .unwrap();
-        assert_eq!(
-            container,
-            Value::Ref(Some("neoforge-mod-container/legacy/2.0".into()))
-        );
+        let container = optional_payload(&container).unwrap();
+        assert_eq!(container, host.neoforge_container("legacy"));
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {

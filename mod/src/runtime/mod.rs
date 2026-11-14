@@ -82,6 +82,7 @@ mod host_invoke;
 mod host_jdk;
 mod host_list_iterator;
 mod host_mixin;
+mod host_neoforge_loader;
 mod host_optional;
 mod host_path;
 mod host_ref;
@@ -194,6 +195,7 @@ pub use class_precedence::RunLoader;
 pub use declarations_content::{ATTACHMENT_REGISTRY, ContentBuilderEvent, ContentBuilderKind};
 pub use heap::{CallLogMark, JavaHeap};
 pub use host_events::posted_event;
+pub use host_neoforge_loader::neoforge_mod_container;
 pub(crate) use host_optional::{
     empty_optional, empty_optional_for, is_optional, optional_double, optional_double_value,
     optional_int, optional_int_value, optional_long, optional_long_value, optional_payload,
@@ -4638,7 +4640,7 @@ impl Host for StdHost {
     /// The command façade's markers (a source, a node, a builder) answer
     /// `instanceof` for their Brigadier and vanilla types.
     fn host_instance_of(&self, marker: &str, wanted: &str) -> bool {
-        self.brigadier_instance_of(marker, wanted) || self.mod_container_instance_of(marker, wanted)
+        self.brigadier_instance_of(marker, wanted)
     }
 
     /// Read back what the bounded `Throwable.<init>` surface recorded, so an
@@ -8956,21 +8958,25 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(Value::Ref(self.neoforge_mod_version(id).map(|version| {
-                    format!("neoforge-mod-container/{id}/{version}")
-                })))
+                // `Optional.ofNullable(indexedMods.get(id))`: the one container.
+                let present = self.neoforge_mod_version(id).is_some();
+                let id = id.clone();
+                Ok(optional_wrap(if present {
+                    self.neoforge_container(&id)
+                } else {
+                    Value::Ref(None)
+                }))
             }
             (
                 "net/neoforged/fml/ModList" | "net/minecraftforge/fml/ModList",
                 "getMods",
                 "()Ljava/util/List;",
             ) => {
+                // `sortedList`: each mod's `IModInfo` (not its container).
                 let values = self
                     .mods
-                    .iter()
-                    .map(|(id, version)| {
-                        Value::Ref(Some(format!("neoforge-mod-container/{id}/{version}")))
-                    })
+                    .keys()
+                    .map(|id| host_neoforge_loader::mod_info(id))
                     .collect::<Vec<_>>();
                 Ok(collection_value("list", &values))
             }
@@ -9127,11 +9133,6 @@ impl Host for StdHost {
                     &[path_value(&format!("/horizon/mods/{id}"))],
                 ))
             }
-            (
-                "net/neoforged/fml/ModContainer" | "net/minecraftforge/fml/ModContainer",
-                "getModId",
-                "()Ljava/lang/String;",
-            ) => Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1)))),
             // The metadata of a mod with no `fabric.mod.json` and no built-in
             // model (`fabric_mods.rs` answers the rest): its id, and the
             // version the run's mod list has for it.
@@ -10019,13 +10020,6 @@ fn canonical_uuid(text: &str) -> Result<String, NativeError> {
 fn fabric_entrypoint_part(value: Option<&String>, index: usize) -> Option<String> {
     let marker = value?.strip_prefix("fabric-entrypoint/")?;
     marker.split('/').nth(index - 1).map(str::to_owned)
-}
-
-fn metadata_part(value: Option<&String>, index: usize) -> String {
-    value
-        .and_then(|value| value.split('/').nth(index))
-        .unwrap_or("unknown")
-        .to_owned()
 }
 
 fn enum_name(value: &Value) -> &str {
@@ -36066,11 +36060,11 @@ mandatory = true
             name: "getModContainerById".into(),
             descriptor: "(Ljava/lang/String;)Ljava/util/Optional;".into(),
         };
-        assert_eq!(
-            host.invoke_instance(&container, &list, &[Value::Ref(Some("demo".into()))])
-                .unwrap(),
-            Value::Ref(Some("neoforge-mod-container/demo/1.2.3".into()))
-        );
+        // `Optional.ofNullable(indexedMods.get(id))`: the mod's one container.
+        let found = host
+            .invoke_instance(&container, &list, &[Value::Ref(Some("demo".into()))])
+            .unwrap();
+        assert_eq!(found, optional_wrap(host.neoforge_container("demo")));
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -36078,11 +36072,16 @@ mandatory = true
                     name: "getModId".into(),
                     descriptor: "()Ljava/lang/String;".into(),
                 },
-                &Value::Ref(Some("neoforge-mod-container/demo/1.2.3".into())),
+                &optional_payload(&found).unwrap(),
                 &[],
             )
             .unwrap(),
             Value::Ref(Some("demo".into()))
+        );
+        assert_eq!(
+            host.invoke_instance(&container, &list, &[Value::Ref(Some("missing".into()))])
+                .unwrap(),
+            empty_optional()
         );
         let mods = MethodRef {
             owner: "net/neoforged/fml/ModList".into(),
@@ -36130,10 +36129,8 @@ mandatory = true
                 &[Value::Ref(Some("legacy".into()))],
             )
             .unwrap();
-        assert_eq!(
-            container,
-            Value::Ref(Some("neoforge-mod-container/legacy/2.0".into()))
-        );
+        let container = optional_payload(&container).unwrap();
+        assert_eq!(container, host.neoforge_container("legacy"));
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
