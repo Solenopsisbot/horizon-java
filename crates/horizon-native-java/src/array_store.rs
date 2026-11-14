@@ -127,15 +127,19 @@ impl<H: Host> Runtime<'_, H> {
             return Some(true);
         }
         let text = match value {
-            Value::Host(handle) => return handle.instance_of(component, self),
+            Value::Host(handle) if !crate::jar_object::is_object_handle(handle) => {
+                return handle.instance_of(component, self);
+            }
             _ if component.starts_with('[') => return Some(false),
+            // An object: by its class's chain, below (`jar_object.rs`).
+            Value::Host(handle) => handle.key(),
             Value::Ref(Some(text)) => text.as_str(),
             Value::Boxed(boxed) => return Some(value_class_fits(boxed.class(), component)),
             other => return Some(value_class_fits(&class_of_value(other)?, component)),
         };
         // A store loop: the same jar object's class into the same component
         // as last time (only a held class's verdict is kept).
-        if let Some(class) = crate::jar_object::packaged_key_class(text) {
+        if let Some(class) = crate::jar_object::packaged_object_class(value) {
             if class == component {
                 return Some(true);
             }
@@ -146,7 +150,7 @@ impl<H: Host> Runtime<'_, H> {
                 return cached.fits;
             }
         }
-        if let Some(class) = self.marker_class(text) {
+        if let Some(class) = self.marker_class(value, text) {
             if class == component {
                 return Some(true);
             }
@@ -189,11 +193,13 @@ impl<H: Host> Runtime<'_, H> {
         if is_box(component) {
             return Some(false);
         }
+        // Only a `Ref` is text; an object is no `String`.
+        let string = matches!(value, Value::Ref(_)) && value_class::is_plain_string(text);
         if value_class_fits("java/lang/String", component) {
             // A `String` fits; any other text is undecided.
-            return value_class::is_plain_string(text).then_some(true);
+            return string.then_some(true);
         }
-        if value_class::is_plain_string(text) && !self.text_may_be_class(text) {
+        if string && !self.text_may_be_class(text) {
             return Some(false);
         }
         self.class(component)?;
@@ -203,11 +209,11 @@ impl<H: Host> Runtime<'_, H> {
     /// The class of a marker the runtime knows exactly: a jar object or a
     /// JDK object a jar constructed (`class#n`), or a host enum constant
     /// (`enum/<class>/<NAME>`, the class `getClass()` answers for it).
-    fn marker_class<'t>(&self, text: &'t str) -> Option<&'t str> {
+    fn marker_class<'t>(&self, value: &'t Value, text: &'t str) -> Option<&'t str> {
         if let Some(rest) = text.strip_prefix("enum/") {
             return rest.rsplit_once('/').map(|(class, _)| class);
         }
-        let class = crate::jar_object::packaged_key_class(text)?;
+        let class = crate::jar_object::packaged_object_class(value)?;
         (self.class(class).is_some() || class.starts_with("java/")).then_some(class)
     }
 
@@ -255,7 +261,7 @@ impl<H: Host> Runtime<'_, H> {
                 host_array::exact_class(value).map(str::to_owned)
             }
             Value::Host(handle) => handle.class().map(str::to_owned),
-            Value::Ref(Some(text)) => match self.marker_class(text) {
+            Value::Ref(Some(text)) => match self.marker_class(value, text) {
                 Some(class) => Some(class.to_owned()),
                 // A text is a `String` unless it may be a `Class`.
                 None if value_class::is_plain_string(text) && !self.text_may_be_class(text) => {

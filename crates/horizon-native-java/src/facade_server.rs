@@ -275,10 +275,7 @@ pub(crate) fn player_member(
         ("permissions", "()Lnet/minecraft/server/permissions/PermissionSet;") => {
             Some(match facts.permission_levels.get(&player) {
                 // The Brigadier façade's permission set answers its queries.
-                Some(&level) => Ok(crate::host_brigadier::permission(
-                    crate::host_brigadier::PERMISSION_SET,
-                    level,
-                )),
+                Some(level) => Ok(marker(format!("brigadier/permission-set/{level}"))),
                 None => refuse(r),
             })
         }
@@ -362,7 +359,7 @@ pub(crate) fn answer(
     if text == COMMANDS {
         return match (r.name.as_str(), descriptor) {
             ("getDispatcher", "()Lcom/mojang/brigadier/CommandDispatcher;") => {
-                Ok(crate::host_brigadier::dispatcher())
+                Ok(marker(crate::brigadier::DISPATCHER))
             }
             _ => refuse(r),
         };

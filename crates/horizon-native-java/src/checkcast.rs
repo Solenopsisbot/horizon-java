@@ -205,7 +205,10 @@ impl<H: Host> Runtime<'_, H> {
     /// class where the runtime knows it exactly. `None` when no handle is
     /// involved.
     pub(crate) fn host_cast(&self, value: &Value, target: &str) -> Option<HostCast> {
-        if let Value::Host(handle) = value {
+        // An object casts by its class's chain, as below (`jar_object.rs`).
+        if let Value::Host(handle) = value
+            && !crate::jar_object::is_object_handle(handle)
+        {
             return Some(match handle.instance_of(target, self) {
                 Some(true) => HostCast::Fits,
                 // The exception names the exact class: unknown, counted.
@@ -263,13 +266,14 @@ impl<H: Host> Runtime<'_, H> {
     /// whose JDK class (`List12` or `ListN`, `KeyValueHolder`) is not kept.
     pub(super) fn exact_class(&self, value: &Value) -> Option<String> {
         let marker = match value {
+            Value::Host(handle) if crate::jar_object::is_object_handle(handle) => handle.key(),
             Value::Ref(Some(marker)) => marker,
             Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {
                 return class_of_value(value);
             }
             _ => return None,
         };
-        if crate::value_class::is_plain_string(marker) {
+        if matches!(value, Value::Ref(_)) && crate::value_class::is_plain_string(marker) {
             return Some("java/lang/String".into());
         }
         // `class#n`: an object `new` built (a host model's own copies use
@@ -317,6 +321,8 @@ impl<H: Host> Runtime<'_, H> {
     pub(super) fn instance_of_is_guess(&self, value: &Value, target: &str) -> bool {
         let marker = match value {
             Value::Ref(Some(marker)) => marker.as_str(),
+            // An object: by its class's chain, below.
+            Value::Host(handle) if crate::jar_object::is_object_handle(handle) => handle.key(),
             // A host handle whose kind cannot tell (`host_ref.rs`).
             Value::Host(handle) => return handle.instance_of(target, self).is_none(),
             // `null` is never an instance; a box is a JDK object.
@@ -335,12 +341,12 @@ impl<H: Host> Runtime<'_, H> {
         // `String` is final and in `java.base`, so a text `instanceof String`
         // accepts is no jar, game or loader type. (`checkcast` still counts a
         // string cast to a jar type: a departure there, not here.)
-        if crate::value_class::is_plain_string(marker) {
+        if matches!(value, Value::Ref(_)) && crate::value_class::is_plain_string(marker) {
             return false;
         }
         // An object a library model built itself: the model knows its whole
         // type, so its `false` is an answer.
-        if crate::gson_tree::is_tree(marker) || crate::neoforge_loader::container_type_known(marker)
+        if crate::gson_tree::is_tree(value) || crate::neoforge_loader::container_type_known(marker)
         {
             return false;
         }
@@ -373,6 +379,8 @@ impl<H: Host> Runtime<'_, H> {
         target_is_interface: Option<bool>,
     ) -> (Verdict, Option<String>) {
         let marker = match value {
+            // An object answers by its class's chain, below.
+            Value::Host(handle) if crate::jar_object::is_object_handle(handle) => handle.key(),
             // A host handle answers by its kind's class (`host_ref.rs`).
             Value::Host(handle) => {
                 let verdict = match handle.instance_of(target, self) {

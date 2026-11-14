@@ -983,12 +983,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let mut parts = Vec::with_capacity(elements.len());
         for value in std::iter::once(separator).chain(&elements) {
             let text = match value {
-                Value::Ref(Some(marker)) if self.string_builders.contains_key(marker) => {
-                    self.string_builders[marker].clone()
+                value if self.builder_text(value).is_some() => {
+                    self.builder_text(value).cloned().unwrap_or_default()
                 }
-                Value::Ref(Some(_))
-                    if crate::jar_object::packaged_object_class(value).is_some() =>
-                {
+                value if crate::jar_object::packaged_object_class(value).is_some() => {
                     match self.runtime_value_of(value, "java/lang/String", "join")? {
                         Some(Value::Ref(Some(text))) => text,
                         Some(_) => "null".to_owned(),
@@ -1074,7 +1072,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let Some(marker) = expect_ref(receiver) else {
             return Ok(None);
         };
-        let text = match self.string_builders.get(marker) {
+        let text = match self.builder_text(receiver) {
             Some(text) => text.clone(),
             None if crate::jar_object::packaged_object_class(receiver).is_some() => {
                 return Ok(None);

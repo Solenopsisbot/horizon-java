@@ -386,9 +386,9 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Ok(equal);
             }
-            // Untyped (`Object`, an array element of unknown type): a jar
-            // object's marker is one per allocation and a host model's marker
-            // is no plain text; anything else may be a `String`.
+            // Untyped (`Object`, an array element of unknown type): a text
+            // spelled like an object's key and a host model's marker are no
+            // plain text; anything else may be a `String`.
             let typed = left == Ty::String || right == Ty::String;
             if !typed
                 && (crate::jar_object::packaged_key_class(text).is_some()

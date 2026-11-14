@@ -78,7 +78,13 @@ pub(crate) const TREE_MAP: &str = "com/google/gson/internal/LinkedTreeMap";
 
 /// `JsonNull.INSTANCE`. The serial is past any allocation the runtime's
 /// object counter can reach, so a `new JsonNull()` is never this marker.
+/// `JsonNull.INSTANCE`'s key: an allocation number no run reaches.
 const NULL_INSTANCE: &str = "com/google/gson/JsonNull#18446744073709551615";
+
+/// `JsonNull.INSTANCE`, the one object of its key.
+fn null_instance() -> Value {
+    crate::jar_object::stored(NULL_INSTANCE)
+}
 
 /// The fields Gson declares, keyed the way the interpreter keys `putfield`.
 const MEMBERS_FIELD: &str =
@@ -143,8 +149,8 @@ enum Kind {
 
 /// Whether `marker` is a tree object this model built, whose whole type
 /// (`SUPERTYPES`) it therefore knows.
-pub(crate) fn is_tree(marker: &str) -> bool {
-    kind_of(marker).is_some()
+pub(crate) fn is_tree(value: &Value) -> bool {
+    value_kind(value).is_some()
 }
 
 fn kind_of(marker: &str) -> Option<Kind> {
@@ -160,19 +166,20 @@ fn kind_of(marker: &str) -> Option<Kind> {
     })
 }
 
+/// The kind of a tree object, `None` for any other value (a `String`
+/// spelling one's key included).
 fn value_kind(value: &Value) -> Option<Kind> {
-    expect_ref(value).and_then(|marker| kind_of(marker))
+    crate::jar_object::object_key(value).and_then(kind_of)
 }
 
 /// `JsonNull.INSTANCE` for `getstatic`.
 pub(crate) fn static_field(r: &MethodRef) -> Option<Value> {
-    (r.owner == JSON_NULL && r.name == "INSTANCE")
-        .then(|| Value::Ref(Some(NULL_INSTANCE.to_owned())))
+    (r.owner == JSON_NULL && r.name == "INSTANCE").then(null_instance)
 }
 
 /// `marker instanceof wanted` for the modelled classes.
-pub(crate) fn instance_of(marker: &str, wanted: &str) -> bool {
-    let Some(class) = kind_of(marker).and_then(|_| crate::jar_object::key_class(marker)) else {
+pub(crate) fn instance_of(value: &Value, wanted: &str) -> bool {
+    let Some(class) = value_kind(value).and_then(|_| crate::jar_object::object_class(value)) else {
         return false;
     };
     class == wanted
@@ -861,8 +868,10 @@ impl<H: Host> Runtime<'_, H> {
             Value::Boxed(boxed @ (Boxed::Integer(_) | Boxed::Short(_) | Boxed::Byte(_))) => {
                 Num::Int(boxed.int())
             }
-            Value::Ref(Some(marker)) if value_kind(value) == Some(Kind::Lazy) => {
-                return self.lazy_text(marker).map(Num::Lazy);
+            value if value_kind(value) == Some(Kind::Lazy) => {
+                return self
+                    .lazy_text(crate::jar_object::object_key(value)?)
+                    .map(Num::Lazy);
             }
             _ => return None,
         })
@@ -920,7 +929,7 @@ impl<H: Host> Runtime<'_, H> {
     /// cannot hold as text (a lone surrogate).
     fn primitive_argument(&mut self, descriptor: &str, value: &Value) -> Option<Value> {
         if *value == Value::Ref(None) {
-            return Some(Value::Ref(Some(NULL_INSTANCE.to_owned())));
+            return Some(null_instance());
         }
         let prim = if descriptor.contains("Ljava/lang/String;)") {
             Prim::Str(expect_ref(value)?.clone())
@@ -958,7 +967,7 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("add", "(Ljava/lang/String;Lcom/google/gson/JsonElement;)V") => {
                 let value = match arg(1) {
-                    Value::Ref(None) => Value::Ref(Some(NULL_INSTANCE.to_owned())),
+                    Value::Ref(None) => null_instance(),
                     value => value,
                 };
                 self.tree_map_put(&members, &arg(0), value)?;
@@ -1157,7 +1166,7 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("add", "(Lcom/google/gson/JsonElement;)V") => {
                 let value = match arg(0) {
-                    Value::Ref(None) => Value::Ref(Some(NULL_INSTANCE.to_owned())),
+                    Value::Ref(None) => null_instance(),
                     value => value,
                 };
                 self.list_add(&elements, value)?;
@@ -1190,7 +1199,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Err(index_error(index, length));
                 }
                 let value = match arg(1) {
-                    Value::Ref(None) => Value::Ref(Some(NULL_INSTANCE.to_owned())),
+                    Value::Ref(None) => null_instance(),
                     value => value,
                 };
                 self.host.invoke_instance(
@@ -1479,7 +1488,7 @@ impl<H: Host> Runtime<'_, H> {
         let _ = (receiver, args);
         Ok(match (r.name.as_str(), r.descriptor.as_str()) {
             ("<init>", "()V") => Some(Value::Void),
-            ("deepCopy", _) => Some(Value::Ref(Some(NULL_INSTANCE.to_owned()))),
+            ("deepCopy", _) => Some(null_instance()),
             _ => None,
         })
     }
@@ -1798,7 +1807,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 Ok(copy)
             }
-            Some(Kind::Null) => Ok(Value::Ref(Some(NULL_INSTANCE.to_owned()))),
+            Some(Kind::Null) => Ok(null_instance()),
             _ => Ok(value.clone()),
         }
     }
@@ -1829,7 +1838,10 @@ impl<H: Host> Runtime<'_, H> {
                 writer.null_value();
                 return Ok(true);
             }
-            Value::Ref(Some(marker)) => marker.clone(),
+            // A tree object, by its key (`jar_object.rs`).
+            value if value_kind(value).is_some() => crate::jar_object::object_key(value)
+                .unwrap_or_default()
+                .to_owned(),
             _ => return Ok(false),
         };
         match kind_of(&marker) {

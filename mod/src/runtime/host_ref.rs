@@ -94,7 +94,9 @@ use crate::runtime::{NativeError, Value};
 #[derive(Clone)]
 pub struct HostRef {
     kind: HostKind,
-    key: Arc<str>,
+    /// A `String` (not `str`) so that a jar object's key reads back as the
+    /// `&String` the text readers take (`expect_ref`, [`Self::key_text`]).
+    key: Arc<String>,
     origin: u64,
 }
 
@@ -316,29 +318,12 @@ pub enum HostKind {
     AttachmentType,
     /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
     AttachmentBuilder,
-    /// The command surface (`host_brigadier.rs`): Brigadier's
-    /// `CommandDispatcher` a registration callback receives (no key).
-    BrigadierDispatcher,
-    /// The `CommandBuildContext` a registration callback receives (no key).
-    CommandBuildContext,
-    /// A running command's `CommandContext`: key the run's serial.
-    CommandContext,
-    /// A running command's `CommandSourceStack`: key the run's serial and
-    /// the source's index in it.
-    CommandSource,
-    /// A `CommandNode`: key its arena id, kind and name.
-    CommandNode,
-    /// A `LiteralArgumentBuilder`/`RequiredArgumentBuilder`: key its id and kind.
-    ArgumentBuilder,
-    /// An `ArgumentType` a factory made: key its arena id and the factory's
-    /// declared class.
-    ArgumentType,
-    /// A `Permission`, `PermissionCheck`, `PermissionSet` or `requires`
-    /// predicate: key what it is and its operator level.
-    CommandPermission,
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
+    /// An object `new` (or a model) allocated: key `class#n`
+    /// (`jar_object.rs`), one key per allocation.
+    JarObject,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1212,88 +1197,6 @@ const KINDS: &[KindInfo] = &[
         canonical: always_canonical,
         methods: &crate::runtime::host_attachment::BUILDER_METHODS,
     },
-    // The command surface (`host_brigadier.rs`). An exact `getClass()` would
-    // need a class side for brigadier's classes (#174's `ClassSide`): until
-    // one is added, `getClass()` is counted.
-    KindInfo {
-        kind: HostKind::BrigadierDispatcher,
-        tag: "brd",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::dispatcher_types,
-        },
-        // A reload makes another dispatcher.
-        canonical: never_canonical,
-        methods: &crate::runtime::host_brigadier::DISPATCHER_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::CommandBuildContext,
-        tag: "brbc",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::build_context_types,
-        },
-        canonical: never_canonical,
-        methods: &crate::runtime::host_brigadier::IDENTITY_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::CommandContext,
-        tag: "brcc",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::context_types,
-        },
-        // One per run of a command, whose serial the key holds.
-        canonical: always_canonical,
-        methods: &crate::runtime::host_brigadier::CONTEXT_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::CommandSource,
-        tag: "brsrc",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::source_types,
-        },
-        // One per run of a command, whose serial the key holds.
-        canonical: always_canonical,
-        methods: &crate::runtime::host_brigadier::IDENTITY_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::CommandNode,
-        tag: "brnode",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::node_types,
-        },
-        // The arena never reuses an id.
-        canonical: always_canonical,
-        methods: &crate::runtime::host_brigadier::NODE_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::ArgumentBuilder,
-        tag: "brbld",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::builder_types,
-        },
-        // Builder ids only grow.
-        canonical: always_canonical,
-        methods: &crate::runtime::host_brigadier::BUILDER_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::ArgumentType,
-        tag: "brarg",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::argument_type_types,
-        },
-        // The arena never reuses an id.
-        canonical: always_canonical,
-        methods: &crate::runtime::host_brigadier::ARGUMENT_TYPE_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::CommandPermission,
-        tag: "brperm",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_brigadier::permission_types,
-        },
-        // Several constants and objects share a level.
-        canonical: never_canonical,
-        methods: &crate::runtime::host_brigadier::STATE_METHODS,
-    },
     KindInfo {
         kind: HostKind::StreamBuilder,
         tag: "sbld",
@@ -1302,6 +1205,14 @@ const KINDS: &[KindInfo] = &[
         // builder, two equal keys from two runs prove nothing.
         canonical: never_canonical,
         methods: &crate::runtime::stream_pipeline::STREAM_BUILDER,
+    },
+    KindInfo {
+        kind: HostKind::JarObject,
+        tag: "obj",
+        class: ClassRule::FromKey(crate::runtime::jar_object::class_of_key),
+        // `Runtime::new_object` numbers every allocation once.
+        canonical: always_canonical,
+        methods: &crate::runtime::jar_object::JAR_OBJECT,
     },
 ];
 
@@ -1389,10 +1300,10 @@ impl HostKind {
 impl HostRef {
     /// A handle with `key` as it is (a number, a name). A key that holds
     /// values is built with [`Self::of_values`].
-    pub(crate) fn new(kind: HostKind, key: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn new(kind: HostKind, key: impl Into<String>) -> Self {
         Self {
             kind,
-            key: key.into(),
+            key: Arc::new(key.into()),
             origin: NEXT_ORIGIN.fetch_add(1, AtomicOrdering::Relaxed),
         }
     }
@@ -1426,6 +1337,11 @@ impl HostRef {
     }
 
     pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// [`Self::key`] as the `&String` a text reader takes.
+    pub(crate) fn key_text(&self) -> &String {
         &self.key
     }
 

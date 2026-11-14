@@ -254,7 +254,7 @@ impl<H: Host> Runtime<'_, H> {
             return;
         };
         let after = self
-            .collection_elements(&Value::Ref(Some(marker.to_owned())))
+            .collection_elements(&crate::runtime::jar_object::stored_value(marker))
             .unwrap_or_default();
         let next = step(layout, name, needle, before, &after);
         self.host.store_deque_layout(marker, next);

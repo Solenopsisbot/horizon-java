@@ -97,8 +97,13 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A handle is what its kind's row says (`host_ref.rs`): an array is
         // an `Object[]` by JLS array subtyping, not by a class chain.
+        // An object's "yes" is its class's chain; any other answer goes on
+        // to the paths below.
         if let Value::Host(handle) = value {
-            return handle.instance_of(class, self) == Some(true);
+            let row = handle.instance_of(class, self) == Some(true);
+            if row || !crate::jar_object::is_object_handle(handle) {
+                return row;
+            }
         }
         if let Some(own) = class_of_value(value)
             && (own == class || self.class_is_instance(&own, class))

@@ -226,7 +226,8 @@ impl<H: Host> Runtime<'_, H> {
 
     fn encode_node(&mut self, marker: &str, value: &Value) -> Coded<Nbt> {
         match self.codec_node(marker) {
-            Some(CodecNode::CompoundTag) => match expect_ref(value) {
+            // Only a tag object: a `String` spelling one's key is no tag.
+            Some(CodecNode::CompoundTag) => match crate::jar_object::object_key(value) {
                 Some(tag) if self.nbt_kind(tag) == Some("compound") => match self.nbt_read(tag) {
                     Ok(tree) => Coded::Ok(tree),
                     Err(why) => Coded::Unmodelled(why),

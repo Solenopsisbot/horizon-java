@@ -2382,8 +2382,8 @@ fn fabric_arguments(shape: Shape, firing: &EventFiring) -> Result<Vec<Value>, Na
                 "INTEGRATED"
             };
             vec![
-                crate::host_brigadier::dispatcher(),
-                crate::host_brigadier::build_context(),
+                marker(crate::brigadier::DISPATCHER.into()),
+                marker(crate::brigadier::BUILD_CONTEXT.into()),
                 marker(format!(
                     "enum/net/minecraft/commands/Commands$CommandSelection/{selection}"
                 )),

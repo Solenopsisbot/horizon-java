@@ -65,7 +65,7 @@ impl<H: Host> Runtime<'_, H> {
             Value::Void => return Arg::Opaque,
             Value::Ref(Some(marker)) => marker,
         };
-        if let Some(text) = self.string_builders.get(marker) {
+        if let Some(text) = self.builder_text(value) {
             return Arg::Str(text.clone());
         }
         if value_class::is_plain_string(marker) {
