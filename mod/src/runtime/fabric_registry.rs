@@ -33,11 +33,25 @@ pub(crate) fn builder(registry: Value) -> Value {
     Value::Host(HostRef::of_values(HostKind::RegistryBuilder, &[registry]))
 }
 
-/// The registry a builder handle will answer; `None` for anything else.
-fn built(receiver: &Value) -> Option<Value> {
+/// `from(registry)` for a `MappedRegistry` the jar built itself, whose
+/// object the host cannot hand back: the builder answers the `Registry`
+/// handle for its id instead, a stand-in `buildAndRegister()` counts (#182
+/// P4: Java answers the very object, `getfield registry; areturn` @69–72, so
+/// `== mine` would be silently `false`).
+pub(crate) fn stand_in_builder(registry: Value) -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::RegistryBuilder,
+        &[registry, Value::Int(1)],
+    ))
+}
+
+/// The registry a builder handle will answer, and whether it stands in for
+/// a jar's own object; `None` for anything else.
+fn built(receiver: &Value) -> Option<(Value, bool)> {
     match receiver {
         Value::Host(handle) if handle.kind() == HostKind::RegistryBuilder => {
-            handle.values()?.into_iter().next()
+            let mut values = handle.values()?.into_iter();
+            Some((values.next()?, values.next().is_some()))
         }
         _ => None,
     }
@@ -89,13 +103,26 @@ pub(crate) fn instance_call(
     }
     // A builder only the runtime made: anything else (a String spelled like
     // the old text) is counted.
-    let Some(registry) = built(receiver) else {
+    let Some((registry, stand_in)) = built(receiver) else {
         return Some(host.unknown_host_call(r));
     };
     match r.name.as_str() {
         // Fluent setters answer the builder itself.
         _ if r.descriptor.ends_with(&format!(")L{BUILDER};")) => Some(Ok(receiver.clone())),
-        "buildAndRegister" => Some(Ok(registry)),
+        "buildAndRegister" => {
+            // A registry the jar built holds only what the jar registers
+            // into it: its walk is exact (`registry_contents.rs`). A vanilla
+            // one handed to `from` holds the game's entries too.
+            if let Some(id) = crate::runtime::host_registry::registry_id(&registry)
+                && !crate::runtime::vanilla_registries::is_built_in(id)
+            {
+                host.jar_registries.insert(id.to_owned());
+            }
+            if stand_in && let Err(error) = host.unknown_host_call(r) {
+                return Some(Err(error));
+            }
+            Some(Ok(registry))
+        }
         _ => None,
     }
 }

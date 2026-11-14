@@ -280,6 +280,22 @@ impl StdHost {
         crate::jar_object::collection(marker)
     }
 
+    /// `Collections.unmodifiable{List,Set,Map}(source)` (`kind` `list`, `set`
+    /// or `map`): a new view reading `source` live. `None` when `source` is no
+    /// object.
+    pub(crate) fn unmodifiable_view(&mut self, kind: &str, source_value: &Value) -> Option<Value> {
+        let source = expect_ref(source_value)?.clone();
+        let source_class = crate::jar_object::object_class(source_value);
+        let marker = format!(
+            "{}#immutable{}",
+            view_class(kind, source_class),
+            self.unmodifiable_collections.len()
+        );
+        self.unmodifiable_collections
+            .insert(marker.clone(), Some(source));
+        Some(crate::jar_object::collection(marker))
+    }
+
     /// What the factory `owner.name` answers for `values`: the class Java
     /// makes ([`made_class`]), and for an empty one a factory shares
     /// ([`shared_empty`]) that one object, made once.
@@ -463,17 +479,7 @@ impl StdHost {
                     "unmodifiableMap" => "map",
                     _ => return None,
                 };
-                let source_value = args.first()?;
-                let source = expect_ref(source_value)?.clone();
-                let source_class = crate::jar_object::object_class(source_value);
-                let marker = format!(
-                    "{}#immutable{}",
-                    view_class(kind, source_class),
-                    self.unmodifiable_collections.len()
-                );
-                self.unmodifiable_collections
-                    .insert(marker.clone(), Some(source));
-                return Some(Ok(crate::jar_object::collection(marker)));
+                return self.unmodifiable_view(kind, args.first()?).map(Ok);
             }
             _ => return None,
         };

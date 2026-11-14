@@ -208,6 +208,11 @@ impl StdHost {
         for held in self.holders.values() {
             value(held, out);
         }
+        // Each register's `getEntries()` view and its set (`host_registry.rs`).
+        for (view, set) in self.register_views.values() {
+            value(view, out);
+            value(set, out);
+        }
         for (key, held) in &self.capability_values {
             out.push(key);
             value(held, out);

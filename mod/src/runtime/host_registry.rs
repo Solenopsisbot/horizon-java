@@ -523,6 +523,50 @@ impl crate::runtime::StdHost {
             .collect()
     }
 
+    /// `DeferredRegister.getEntries()`. NeoForge 26.3.0.101 answers its
+    /// `entriesView` field (`getfield entriesView; areturn`), which the
+    /// constructor makes once as `Collections.unmodifiableSet(entries.keySet())`
+    /// over the register's `LinkedHashMap` of holders: one object per register,
+    /// an `UnmodifiableSet` whose mutators throw, in registration order, and
+    /// live, so a `register` after `getEntries` shows in the view already
+    /// handed out ([`Self::add_register_entry`]). Here the view reads a
+    /// `LinkedHashSet` of the holders, which the jar never sees: what the view
+    /// answers is the key set's (#182 P2).
+    pub(crate) fn register_entries(&mut self, register: &str) -> Value {
+        if let Some((view, _)) = self.register_views.get(register) {
+            return view.clone();
+        }
+        let source = self.empty_collection("set");
+        let holders = self.register_holders(register);
+        if let Some(values) =
+            crate::runtime::expect_ref(&source).and_then(|marker| self.mutable_collections.get_mut(marker))
+        {
+            *values = holders;
+        }
+        let view = self
+            .unmodifiable_view("set", &source)
+            .expect("a new set is an object");
+        self.register_views
+            .insert(register.to_owned(), (view.clone(), source));
+        view
+    }
+
+    /// A `register` call's holder joins the set its register's view reads,
+    /// once a view exists (before, [`Self::register_entries`] reads every row).
+    pub(crate) fn add_register_entry(&mut self, register: &str, holder: &Value) {
+        let Some(marker) = self
+            .register_views
+            .get(register)
+            .and_then(|(_, source)| crate::runtime::expect_ref(source))
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(values) = self.mutable_collections.get_mut(&marker) {
+            values.push(holder.clone());
+        }
+    }
+
     /// The row a holder (or, with `registered`, a registered value) names.
     fn holder_row(&self, value: &Value) -> Option<&HolderRow> {
         let serial = holder_serial(value).or_else(|| registered_serial(value))?;

@@ -9,9 +9,9 @@
 //! the registered values in registration order — the fixture's registry is the
 //! game classes stubbed out (compiled, left out of the jar), so the host is
 //! what answers `iterator()`. The game's own registry entries are not
-//! materialised (no objects exist for them), which is why the empty case is
-//! also pinned: a registry with no host-recorded entry iterates zero times
-//! instead of failing.
+//! materialised (no objects exist for them): a vanilla registry with no
+//! host-recorded entry iterates zero times instead of failing, and every walk
+//! of it is counted, because the game's entries are missing (#182 P3).
 
 use horizon_native_java::{NativeJar, StdHost, Value};
 use std::{
@@ -193,9 +193,9 @@ impl Fixture {
         fixture
     }
 
-    fn text(&self, method: &str) -> String {
+    fn text(&self, method: &str) -> (String, Vec<(String, usize)>) {
         let mut host = self.jar.seed_host(StdHost::new());
-        match self
+        let text = match self
             .jar
             .invoke_method_with_args(
                 "demo/Probe",
@@ -209,12 +209,20 @@ impl Fixture {
         {
             Value::Ref(Some(text)) => text,
             other => panic!("{method} did not return a string: {other:?}"),
-        }
+        };
+        (text, host.unknown_host_calls())
     }
 }
 
 #[test]
 fn a_registry_iterates_the_values_registered_through_the_host() {
     let fixture = Fixture::build("registered");
-    assert_eq!(fixture.text("registered"), "0:first,second");
+    let (text, unknown) = fixture.text("registered");
+    assert_eq!(text, "0:first,second");
+    let walks: usize = unknown
+        .iter()
+        .filter(|(call, _)| call.ends_with("#iterator()Ljava/util/Iterator;"))
+        .map(|(_, count)| count)
+        .sum();
+    assert_eq!(walks, 2, "{unknown:?}");
 }
