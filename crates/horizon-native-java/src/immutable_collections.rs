@@ -85,6 +85,24 @@ impl<H: Host> Runtime<'_, H> {
                 Equality::Identity | Equality::Platform
             );
             if !pure && !identity {
+                // A handle: its row's `equals` against every slot. Equal
+                // handles hash alike, so Java's probe from the key's slot
+                // meets the equal one before an empty slot, and the same
+                // object (its origin, kept in the slot) is proved equal. A
+                // chat component is not: it changes in place, and its slot
+                // keeps the hash it had when the set was made (#193).
+                if let Value::Host(handle) = key
+                    && handle.kind() != crate::host_ref::HostKind::Component
+                {
+                    for (slot, stored) in table.slots.iter().enumerate() {
+                        let Some(stored) = stored else { continue };
+                        if handle.equals(stored, &mut object_methods::RuntimeNested::new(self))?
+                            == Some(true)
+                        {
+                            return Ok(Probe::Found(slot));
+                        }
+                    }
+                }
                 return Ok(Probe::Unknown);
             }
             for (slot, stored) in table.slots.iter().enumerate() {
