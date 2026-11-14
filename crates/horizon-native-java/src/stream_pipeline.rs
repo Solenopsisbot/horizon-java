@@ -2042,6 +2042,13 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         if [supplier, accumulator, characteristics].contains(&&Value::Ref(None)) {
             return Err(npe());
         }
+        // `EnumSet.of(characteristic, ...)`: a `null` one throws.
+        if self
+            .array(characteristics)
+            .is_ok_and(|values| values.contains(&Value::Ref(None)))
+        {
+            return Err(npe());
+        }
         let identity = self.array(characteristics).is_ok_and(|values| {
             values
                 .iter()
