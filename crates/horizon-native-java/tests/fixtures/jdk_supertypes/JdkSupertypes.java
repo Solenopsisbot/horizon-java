@@ -28,6 +28,12 @@ public final class JdkSupertypes {
     "java.util.ImmutableCollections$ListN", "java.util.Collections$UnmodifiableRandomAccessList",
     "java.util.ImmutableCollections$SetN", "java.util.Collections$UnmodifiableSet",
     "java.util.ImmutableCollections$MapN", "java.util.Collections$UnmodifiableMap",
+    // the classes the host's collections are made as (#156 P14c)
+    "java.util.ImmutableCollections$List12", "java.util.ImmutableCollections$Set12",
+    "java.util.ImmutableCollections$Map1", "java.util.Collections$UnmodifiableList",
+    "java.util.Collections$EmptyList", "java.util.Collections$EmptySet", "java.util.Collections$EmptyMap",
+    "java.util.Collections$SingletonList", "java.util.Collections$SingletonSet",
+    "java.util.Collections$SingletonMap",
     // host_ref's closed classes
     "java.lang.Object", "java.lang.String", "java.lang.Class", "java.lang.Record", "java.lang.Enum",
     "java.lang.Number", "java.util.Optional", "java.util.OptionalInt", "java.util.OptionalLong",

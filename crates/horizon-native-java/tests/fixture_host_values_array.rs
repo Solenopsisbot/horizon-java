@@ -218,7 +218,7 @@ public final class ArrayValues {
     return st(new String[1], r).startsWith("ASE:demo.ArrayValues$$Lambda") + "";
   }
 
-  /** F2: a host collection's exact class (List12) is not kept: a misfit, its name unknown. */
+  /** F2: a host collection's exact class (List12): a misfit, named exactly (#156 P14c). */
   public static String storeListIntoIntegers() {
     return st(new Integer[1], List.of(1));
   }
@@ -450,6 +450,13 @@ const EXACT: &[(&str, &str)] = &[
     // handle of class `java/lang/Thread` (#156 P2b), so the store throws
     // exactly (it was counted while the thread was text).
     ("storeUnknown", "ArrayStoreException:java.lang.Thread"),
+    // `List.of(1)` into an `Integer[]`: the list is an object of Java's own
+    // class, `List12` (#156 P14c), so the store throws exactly (it was
+    // counted while the class was not kept).
+    (
+        "storeListIntoIntegers",
+        "ASE:java.util.ImmutableCollections$List12",
+    ),
 ];
 
 /// The methods whose answer the runtime does not have: Java 25's answer, and
@@ -597,12 +604,6 @@ const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
         "storeLambdaIntoStrings",
         "true",
         &[("[Ljava/lang/String;#<aastore>(Ljava/lang/Object;)V", 1)],
-    ),
-    // `List.of(1)` into an `Integer[]`: a misfit, but the runtime does not keep its class (`List12`).
-    (
-        "storeListIntoIntegers",
-        "ASE:java.util.ImmutableCollections$List12",
-        &[("[Ljava/lang/Integer;#<aastore>(Ljava/lang/Object;)V", 1)],
     ),
 ];
 

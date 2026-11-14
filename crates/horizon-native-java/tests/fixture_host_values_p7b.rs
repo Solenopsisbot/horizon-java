@@ -451,17 +451,15 @@ const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
     // source: Java throws `ClassCastException` at the cast. The runtime's
     // cast to a game or library class keeps passing text (a stricter cast
     // broke jars whose host values are plain-looking text), so each use is
-    // refused and counted, never taken for that object.
+    // refused and counted, never taken for that object. The cast to the JDK's
+    // `Predicate` throws Java's exception (#156 P14c: a plain `String` cast to
+    // a JDK type), so `requires` is never reached.
     (
         "used",
         "cceccecceccecce",
         &[
             (
                 "com/mojang/brigadier/CommandDispatcher#register(Lcom/mojang/brigadier/builder/LiteralArgumentBuilder;)Lcom/mojang/brigadier/tree/LiteralCommandNode;",
-                1,
-            ),
-            (
-                "com/mojang/brigadier/builder/LiteralArgumentBuilder#requires(Ljava/util/function/Predicate;)Lcom/mojang/brigadier/builder/ArgumentBuilder;",
                 1,
             ),
             (
