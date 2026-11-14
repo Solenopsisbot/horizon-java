@@ -188,6 +188,8 @@ impl<H: Host> Runtime<'_, H> {
         }
         for (index, key) in keys.iter().enumerate() {
             if table.contains(key) {
+                // The list's own value: the object the node stands for.
+                table.refresh(&entries[index * step]);
                 continue;
             }
             // Added by a path that did not run its `hashCode`: a pure key's
@@ -199,7 +201,7 @@ impl<H: Host> Runtime<'_, H> {
             } else {
                 None
             };
-            table.insert(key.clone(), hash);
+            table.insert(entry, hash);
         }
         if table.linked || table.order_unknown() {
             return Ok(());
@@ -282,10 +284,10 @@ impl<H: Host> Runtime<'_, H> {
                 // equals the one that component had when it was added, which
                 // no answer here can show. Counted among components.
                 if handle.kind() == crate::host_ref::HostKind::Component {
-                    let components = table.order().iter().any(|stored| {
-                        parse_collection_value(stored)
-                            .is_ok_and(|value| crate::host_component::is_component(&value))
-                    });
+                    let components = table
+                        .keys()
+                        .iter()
+                        .any(crate::host_component::is_component);
                     return Ok(if components {
                         Lookup::Unknown
                     } else {
@@ -293,8 +295,9 @@ impl<H: Host> Runtime<'_, H> {
                     });
                 }
                 let mut unknown = false;
-                for stored in table.order() {
-                    let stored = parse_collection_value(&stored)?;
+                // The stored handles themselves: the same object added
+                // twice is proved the same (`p.key == key`).
+                for stored in table.keys() {
                     if !matches!(&stored, Value::Host(other) if other.kind() == handle.kind()) {
                         continue;
                     }
@@ -318,9 +321,9 @@ impl<H: Host> Runtime<'_, H> {
         if table.lookups_unknown() && !self.pure_equality(key) {
             return Ok(Lookup::Unknown);
         }
-        for candidate in table.candidates(hash) {
-            let stored = parse_collection_value(&candidate)?;
-            // `p.key == key`: identity, which equal handle keys do not prove.
+        for stored in table.candidates(hash) {
+            // `p.key == key`: identity, which the stored handle's origin
+            // proves and equal handle keys alone do not.
             if object_methods::identical(&stored, key) {
                 return Ok(Lookup::Found(stored));
             }
@@ -874,7 +877,7 @@ impl<H: Host> Runtime<'_, H> {
             Lookup::Absent => {
                 entries.extend([key.clone(), value]);
                 self.host.replace_mutable_collection(receiver, entries);
-                table.insert(collection_item_marker(key), hash);
+                table.insert(key, hash);
                 Ok(Some(Value::Ref(None)))
             }
         }
@@ -896,7 +899,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut entries = self.collection_elements(receiver)?;
                 entries.push(element.clone());
                 self.host.replace_mutable_collection(receiver, entries);
-                table.insert(collection_item_marker(element), hash);
+                table.insert(element, hash);
                 Ok(Some(true))
             }
         }

@@ -33,8 +33,18 @@
 //! the order of a table holding a key whose hash no run can reproduce (an
 //! identity hash): such a key is kept in [`HashTable::unplaced`], counted in
 //! the size but in no bin.
+//!
+//! Each node keeps the key's [`Value`] itself, not only its item marker: a
+//! handle's origin says which object it is, so `p.key == key` (the same
+//! handle added twice) and a stored handle's own `equals` answer exactly. A
+//! node is still found by its marker (the host's list holds one entry per
+//! marker), and its stored hash is the one it was inserted with, so a key
+//! whose hash changed after it was put (a chat component appended to) is not
+//! in its new bin, as in the JDK.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+
+use crate::{Value, collection_item_marker};
 
 /// `HashMap.DEFAULT_INITIAL_CAPACITY`.
 const DEFAULT_CAPACITY: usize = 16;
@@ -65,17 +75,28 @@ pub(crate) fn capacity_for(mappings: usize) -> i64 {
     (mappings as f64 / f64::from(0.75_f32)).ceil() as i64
 }
 
-/// One table's state. Keys are the host's item markers; each node keeps the
-/// spread hash it was inserted with, as a `HashMap.Node` does.
+/// A `HashMap.Node`: the key, its item marker (how the host's list names
+/// it), and the spread hash it was inserted with.
+#[derive(Clone, Debug, PartialEq)]
+struct Node {
+    marker: String,
+    key: Value,
+    hash: i32,
+}
+
+/// One table's state. Nodes are named by the host's item markers and keep
+/// their key's value and the spread hash it was inserted with, as a
+/// `HashMap.Node` does.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HashTable {
     /// The JDK's `table`, bin by bin; empty until the first insertion.
-    bins: Vec<Vec<(String, i32)>>,
+    bins: Vec<Vec<Node>>,
     /// The JDK's `threshold` (the initial capacity before allocation).
     threshold: i64,
     load_factor: f32,
-    /// Keys whose hash is an identity hash: in the size, in no bin.
-    pub(crate) unplaced: BTreeSet<String>,
+    /// Keys whose hash is an identity hash, by marker: in the size, in no
+    /// bin.
+    pub(crate) unplaced: BTreeMap<String, Value>,
     /// A bin became a tree, whose order this does not model.
     pub(crate) treeified: bool,
     /// Iterates in insertion order (`LinkedHashMap`/`LinkedHashSet`), which
@@ -96,7 +117,7 @@ impl HashTable {
             bins: Vec::new(),
             threshold: initial_capacity.map_or(0, |cap| i64::from(table_size_for(cap.into()))),
             load_factor,
-            unplaced: BTreeSet::new(),
+            unplaced: BTreeMap::new(),
             treeified: false,
             linked: false,
             access_order: false,
@@ -128,13 +149,14 @@ impl HashTable {
         !self.bins.is_empty()
     }
 
-    pub(crate) fn contains(&self, key: &str) -> bool {
-        self.unplaced.contains(key) || self.bins.iter().flatten().any(|(k, _)| k == key)
+    /// Whether a node is named `marker`.
+    pub(crate) fn contains(&self, marker: &str) -> bool {
+        self.unplaced.contains_key(marker) || self.bins.iter().flatten().any(|n| n.marker == marker)
     }
 
     /// The keys a lookup with `hash` compares, in bin order: the bin's nodes
-    /// whose stored hash equals `spread(hash)`.
-    pub(crate) fn candidates(&self, hash: i32) -> Vec<String> {
+    /// whose stored hash equals `spread(hash)`, as they were put.
+    pub(crate) fn candidates(&self, hash: i32) -> Vec<Value> {
         if self.bins.is_empty() {
             return Vec::new();
         }
@@ -142,28 +164,52 @@ impl HashTable {
         let bin = spread as u32 as usize & (self.bins.len() - 1);
         self.bins[bin]
             .iter()
-            .filter(|(_, stored)| *stored == spread)
-            .map(|(key, _)| key.clone())
+            .filter(|node| node.hash == spread)
+            .map(|node| node.key.clone())
             .collect()
     }
 
-    /// The stored (spread) hash of `key`, when it is in a bin.
-    pub(crate) fn stored_hash(&self, key: &str) -> Option<i32> {
+    /// The stored (spread) hash of the node `marker`, when it is in a bin.
+    pub(crate) fn stored_hash(&self, marker: &str) -> Option<i32> {
         self.bins
             .iter()
             .flatten()
-            .find(|(k, _)| k == key)
-            .map(|(_, hash)| *hash)
+            .find(|node| node.marker == marker)
+            .map(|node| node.hash)
     }
 
-    /// The keys in iteration order (bin by bin), unplaced keys last.
+    /// The nodes' markers in iteration order (bin by bin), unplaced keys last.
     pub(crate) fn order(&self) -> Vec<String> {
         self.bins
             .iter()
             .flatten()
-            .map(|(key, _)| key.clone())
-            .chain(self.unplaced.iter().cloned())
+            .map(|node| node.marker.clone())
+            .chain(self.unplaced.keys().cloned())
             .collect()
+    }
+
+    /// The stored keys, in the order of [`Self::order`].
+    pub(crate) fn keys(&self) -> Vec<Value> {
+        self.bins
+            .iter()
+            .flatten()
+            .map(|node| node.key.clone())
+            .chain(self.unplaced.values().cloned())
+            .collect()
+    }
+
+    /// Point the node named like `key` at `key` itself: the host's list holds
+    /// the object a node stands for (a path that rebuilt the list, or a
+    /// literal read again, may hand back a fresh value for it).
+    pub(crate) fn refresh(&mut self, key: &Value) {
+        let marker = collection_item_marker(key);
+        if let Some(stored) = self.unplaced.get_mut(&marker) {
+            *stored = key.clone();
+            return;
+        }
+        if let Some(node) = self.bins.iter_mut().flatten().find(|n| n.marker == marker) {
+            node.key = key.clone();
+        }
     }
 
     /// `HashMap.resize()`.
@@ -199,9 +245,9 @@ impl HashTable {
         let mut bins = vec![Vec::new(); new_cap];
         for (index, bin) in std::mem::take(&mut self.bins).into_iter().enumerate() {
             // Low and high halves, each keeping the bin's order.
-            for (key, hash) in bin {
-                let high = hash as u32 as usize & old_cap != 0;
-                bins[index + if high { old_cap } else { 0 }].push((key, hash));
+            for node in bin {
+                let high = node.hash as u32 as usize & old_cap != 0;
+                bins[index + if high { old_cap } else { 0 }].push(node);
             }
         }
         self.bins = bins;
@@ -251,7 +297,8 @@ impl HashTable {
     /// `putVal`'s insertion of `key`, whose `hashCode()` is `hash` (`None`:
     /// an identity hash): allocate, append to the bin's tail, treeify a bin
     /// that already held 8 nodes, resize past the threshold.
-    pub(crate) fn insert(&mut self, key: String, hash: Option<i32>) {
+    pub(crate) fn insert(&mut self, key: &Value, hash: Option<i32>) {
+        let marker = collection_item_marker(key);
         let size = self.len() as i64;
         if self.bins.is_empty() {
             self.resize();
@@ -260,12 +307,16 @@ impl HashTable {
             let spread = spread(hash);
             let bin = spread as u32 as usize & (self.bins.len() - 1);
             let held = self.bins[bin].len();
-            self.bins[bin].push((key, spread));
+            self.bins[bin].push(Node {
+                marker,
+                key: key.clone(),
+                hash: spread,
+            });
             if held >= TREEIFY_THRESHOLD {
                 self.treeify_bin();
             }
         } else {
-            self.unplaced.insert(key);
+            self.unplaced.insert(marker, key.clone());
         }
         if size + 1 > self.threshold {
             self.resize();
@@ -275,7 +326,8 @@ impl HashTable {
     /// `computeIfAbsent`/`compute`/`merge`'s insertion (after
     /// [`Self::begin_compute`]): the bin's head, treeifying a bin that
     /// already held 7 nodes, and no resize afterwards.
-    pub(crate) fn insert_at_head(&mut self, key: String, hash: Option<i32>) {
+    pub(crate) fn insert_at_head(&mut self, key: &Value, hash: Option<i32>) {
+        let marker = collection_item_marker(key);
         if self.bins.is_empty() {
             self.resize();
         }
@@ -283,22 +335,29 @@ impl HashTable {
             let spread = spread(hash);
             let bin = spread as u32 as usize & (self.bins.len() - 1);
             let held = self.bins[bin].len();
-            self.bins[bin].insert(0, (key, spread));
+            self.bins[bin].insert(
+                0,
+                Node {
+                    marker,
+                    key: key.clone(),
+                    hash: spread,
+                },
+            );
             if held >= TREEIFY_THRESHOLD - 1 {
                 self.treeify_bin();
             }
         } else {
-            self.unplaced.insert(key);
+            self.unplaced.insert(marker, key.clone());
         }
     }
 
-    /// Unlink `key`.
-    pub(crate) fn remove(&mut self, key: &str) {
-        if self.unplaced.remove(key) {
+    /// Unlink the node `marker`.
+    pub(crate) fn remove(&mut self, marker: &str) {
+        if self.unplaced.remove(marker).is_some() {
             return;
         }
         for bin in &mut self.bins {
-            if let Some(index) = bin.iter().position(|(k, _)| k == key) {
+            if let Some(index) = bin.iter().position(|n| n.marker == marker) {
                 bin.remove(index);
                 return;
             }
@@ -322,7 +381,7 @@ mod tests {
     fn table_of(keys: &[&str]) -> HashTable {
         let mut table = HashTable::new(None, 0.75);
         for key in keys {
-            table.insert((*key).to_owned(), Some(java_string_hash(key)));
+            table.insert(&Value::Ref(Some((*key).into())), Some(java_string_hash(key)));
         }
         table
     }
@@ -332,7 +391,8 @@ mod tests {
     #[test]
     fn a_hash_set_of_strings_iterates_in_bucket_order() {
         let table = table_of(&["pear", "b", "apple", "a"]);
-        assert_eq!(table.order(), ["apple", "a", "pear", "b"]);
+        let order = ["apple", "a", "pear", "b"].map(|key| Value::Ref(Some(key.into())));
+        assert_eq!(table.keys(), order);
     }
 
     /// `tableSizeFor` and the threshold `new HashMap<>(n)` starts with.
@@ -346,7 +406,7 @@ mod tests {
         // `new HashMap<>(0)`: the first put allocates one bin with threshold
         // `(int) (1 * 0.75f) = 0`, so it resizes to two at once.
         let mut table = HashTable::new(Some(0), 0.75);
-        table.insert("a".into(), Some(1));
+        table.insert(&Value::Int(1), Some(1));
         assert_eq!(table.bins.len(), 2);
         assert_eq!(table.threshold, 1);
     }
