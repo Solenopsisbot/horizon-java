@@ -127,6 +127,10 @@ pub(crate) fn type_value(node: &GenericType) -> Value {
 pub(crate) fn type_node(value: &Value) -> Option<GenericType> {
     match value {
         Value::Ref(Some(name)) => Some(GenericType::Class(name.clone())),
+        // A `Class` is a `Type` (`host_class.rs`).
+        Value::Host(handle) if handle.kind() == HostKind::Class => {
+            Some(GenericType::Class(handle.key().to_owned()))
+        }
         Value::Host(handle) if handle.kind() == HostKind::ReflectType => {
             node_of_values(&handle.values()?)
         }

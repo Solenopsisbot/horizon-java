@@ -144,7 +144,7 @@ impl<H: Host> Runtime<'_, H> {
         // A class is its class marker (#156 P13 will make it a handle): the
         // same answer the `instanceof` opcode gives (`class_marker_like`).
         if class == "java/lang/Class"
-            && crate::runtime::class_marker_like(marker, self.classes, &self.linked)
+            && crate::runtime::host_class::is_class(value, self.classes, &self.linked)
         {
             return true;
         }
