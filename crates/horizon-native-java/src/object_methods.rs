@@ -918,6 +918,11 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
     }
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        // A `Class`'s row asks here (`host_class.rs`): the runtime holds the
+        // class file that says whether it is an interface.
+        if let Some(name) = crate::host_class::handle_name(value) {
+            return Ok(self.runtime.class_object_text(name));
+        }
         if let Value::Host(handle) = value
             && !crate::jar_object::is_object_handle(handle)
         {

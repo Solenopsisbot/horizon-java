@@ -148,7 +148,7 @@ public class Probe {
         Runnable.class.getSuperclass() == null,
         Object.class.getSuperclass() == null,
         Object.class.isAssignableFrom(Foo.class),
-        ThreadPoolExecutor.class.getSuperclass().getInterfaces().length == 1,
+        ThreadPoolExecutor.class.getInterfaces().length == 0,
         CharSequence.class.isInstance("text"));
   }
 

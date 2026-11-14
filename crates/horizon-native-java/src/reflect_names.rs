@@ -31,6 +31,21 @@ impl ClassFile {
     /// anonymous one, `None` when the class is not nested (or the table is
     /// unreadable).
     pub(super) fn nested_simple_name(&self) -> Option<Option<String>> {
+        self.own_inner_class_row().map(|(simple, _)| simple)
+    }
+
+    /// The access flags this class's own `InnerClasses` entry declares
+    /// (`static`, `private`, ... of a member class), which JDK 25's
+    /// `Class.getModifiers()` answers for a nested class in place of the
+    /// class file's own flags. `None` when the class is not nested.
+    pub(super) fn nested_access_flags(&self) -> Option<u16> {
+        self.own_inner_class_row().map(|(_, flags)| flags)
+    }
+
+    /// This class's own `InnerClasses` entry: its simple name (`None` for an
+    /// anonymous class) and its flags. `None` when the class is not nested
+    /// (or the table is unreadable).
+    fn own_inner_class_row(&self) -> Option<(Option<String>, u16)> {
         let mut r = Reader::new(&self.raw);
         if r.u4().ok()? != 0xCAFE_BABE {
             return None;
@@ -64,13 +79,14 @@ impl ClassFile {
                 let inner = table.u2().ok()?;
                 let _outer = table.u2().ok()?;
                 let simple = table.u2().ok()?;
-                let _flags = table.u2().ok()?;
+                let flags = table.u2().ok()?;
                 if inner == this {
-                    return Some(if simple == 0 {
+                    let simple = if simple == 0 {
                         None
                     } else {
                         Some(utf8(&pool, simple).ok()?)
-                    });
+                    };
+                    return Some((simple, flags));
                 }
             }
         }
@@ -232,6 +248,12 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         }
         let class = reflection_class_name(receiver, r)?.replace('.', "/");
+        if class.starts_with('[') {
+            return match self.array_simple_name(&class) {
+                Some(simple) => Ok(Some(Value::Ref(Some(simple)))),
+                None => self.host.unknown_operand_call(r).map(Some),
+            };
+        }
         Ok(self
             .class(&class)
             .and_then(ClassFile::nested_simple_name)
