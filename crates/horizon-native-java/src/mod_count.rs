@@ -301,9 +301,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn element_count(&self, value: &Value) -> usize {
-        self.host
-            .mutable_collection_values(value)
-            .map_or(0, |values| values.len())
+        self.host.collection_len(value).unwrap_or(0)
     }
 
     /// Before a call: whether it may move a tracked collection's `modCount`
@@ -452,7 +450,7 @@ impl<H: Host> Runtime<'_, H> {
             self.write_back_sub_list(&token.marker, structural);
         }
         if let (Some((from, to)), Some(view)) = (token.creates, expect_ref(value))
-            && self.host.mutable_collection_values(value).is_some()
+            && self.host.holds_collection(value)
         {
             self.host.store_sub_list_link(
                 view,
