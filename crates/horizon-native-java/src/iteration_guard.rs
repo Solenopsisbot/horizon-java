@@ -189,7 +189,11 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver.filter(|_| matches!(opcode, 0xb6 | 0xb9)) else {
             return Ok(None);
         };
-        let Some(marker) = expect_ref(receiver).cloned() else {
+        // A collection by its key, or an iterator handle by its table key (`host_iterator.rs`).
+        let Some(marker) = expect_ref(receiver)
+            .or_else(|| crate::host_iterator::marker(receiver))
+            .cloned()
+        else {
             return Ok(None);
         };
         match (r.name.as_str(), r.descriptor.as_str()) {
@@ -208,7 +212,7 @@ impl<H: Host> Runtime<'_, H> {
                     .flatten()
                     .map(|layout| (layout.head(), structure.len()));
                 let iterator = self.host.invoke_instance(r, receiver, args)?;
-                if let Some(iterator) = expect_ref(&iterator) {
+                if let Some(iterator) = crate::host_iterator::marker(&iterator) {
                     self.host.store_iterator_guard(
                         iterator,
                         IteratorGuard {
@@ -566,7 +570,7 @@ impl<H: Host> Runtime<'_, H> {
         iterator: &Value,
         action: &Value,
     ) -> Result<Option<Value>, NativeError> {
-        let Some(marker) = expect_ref(iterator).cloned() else {
+        let Some(marker) = crate::host_iterator::marker(iterator).cloned() else {
             return Ok(None);
         };
         let Some(mut guard) = self.host.iterator_guard(&marker) else {

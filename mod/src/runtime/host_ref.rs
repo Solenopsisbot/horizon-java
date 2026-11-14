@@ -440,6 +440,14 @@ pub enum HostKind {
     Duration,
     /// `java.net.URI`: key its text (`host_jdk_value.rs`).
     Uri,
+    /// A collection's `iterator()`: key `iterator/<n>`, the host's table key, or
+    /// `iterator/empty` for `Collections.emptyIterator()` (`host_iterator.rs`).
+    Iterator,
+    /// An `Enumeration` (`ClassLoader.getResources`, `Collections.enumeration`,
+    /// `Vector.elements()`): key `enumeration/<n>` or `enumeration/empty`.
+    Enumeration,
+    /// A list's `listIterator()`: key `list-iterator/<n>`.
+    ListIterator,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1792,6 +1800,35 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("java/net/URI"),
         canonical: never_canonical,
         methods: &crate::runtime::host_jdk_value::URI_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Iterator,
+        tag: "itr",
+        // The collection's own iterator class (`ArrayList$Itr`...), not named here.
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_iterator::iterator_types,
+        },
+        // A per-allocation key, or the one empty iterator.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_iterator::ITERATOR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Enumeration,
+        tag: "enm",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_iterator::enumeration_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::runtime::host_iterator::ITERATOR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ListIterator,
+        tag: "litr",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_iterator::list_iterator_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::runtime::host_iterator::ITERATOR_METHODS,
     },
 ];
 

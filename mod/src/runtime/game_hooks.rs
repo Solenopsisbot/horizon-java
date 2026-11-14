@@ -1001,6 +1001,26 @@ fn is_fabric_event_invoker(value: &Value) -> bool {
 }
 
 impl<H: Host> Host for GameHookHost<'_, H> {
+    fn empty_iterator(&mut self) -> Value {
+        self.inner.empty_iterator()
+    }
+
+    fn empty_enumeration(&mut self) -> Value {
+        self.inner.empty_enumeration()
+    }
+
+    fn new_enumeration(&mut self, over: crate::runtime::host_iterator::EnumerationOver) -> Value {
+        self.inner.new_enumeration(over)
+    }
+
+    fn enumeration_over(&self, marker: &str) -> Option<crate::runtime::host_iterator::EnumerationOver> {
+        self.inner.enumeration_over(marker)
+    }
+
+    fn store_enumeration(&mut self, marker: &str, over: crate::runtime::host_iterator::EnumerationOver) {
+        self.inner.store_enumeration(marker, over);
+    }
+
     fn constructed_uuid(&self, value: &Value) -> Option<(i64, i64)> {
         self.inner.constructed_uuid(value)
     }
