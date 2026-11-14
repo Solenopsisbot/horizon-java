@@ -1,7 +1,7 @@
 //! Fabric Loader's and Fabric API's library singletons as host handles (#156
 //! P6c): the loader itself, its `MappingResolver`, the `EnvType` constants,
-//! the entrypoint containers and the entrypoint instances they hold, the
-//! four `PayloadTypeRegistry`s and the `ResourceLoader`s. Their behaviour
+//! the entrypoint containers, the four `PayloadTypeRegistry`s and the
+//! `ResourceLoader`s. Their behaviour
 //! stays in `lib.rs` and `jdk_model.rs`; this module is their keys and rows.
 //!
 //! These were text a jar `String` could spell: `fabric-loader`,
@@ -20,14 +20,15 @@
 //! * **`EnvType`**: a final enum of `CLIENT`, `SERVER`, no constant bodies:
 //!   one canonical key per constant; `toString` its name, `compareTo` the
 //!   ordinals' difference, and its `instanceof` exact.
-//! * **entrypoint container**: `getEntrypointContainers` builds a *new*
-//!   `EntrypointContainerImpl` per entry on every call: not canonical (key
-//!   the kind, class and provider; two calls' containers are counted).
-//! * **entrypoint instance**: what `getEntrypoint()`/`getEntrypoints` hand
-//!   out, an object of the jar's own entrypoint class, which
-//!   `Entry.getOrCreate(type)` caches per requested type: the host keys it by
-//!   class and provider without the type, so it is not canonical either.
-//!   Its class is the jar's class: `instanceof` reads the jar's hierarchy.
+//! * **entrypoint container**: `getEntrypointContainers(key, type)` builds a
+//!   *new* `EntrypointContainerImpl` per entry on every call (in a new
+//!   `ArrayList`): not canonical, keyed by the kind, class, provider and the
+//!   requested type, which its lazy `getEntrypoint()` checks.
+//! * **entrypoint instance**: no kind of its own. `Entry.getOrCreate(type)`
+//!   caches one instance per requested type, and the loader's own
+//!   `invokeEntrypoints` made the one for the kind's initializer interface:
+//!   that one is the object the runtime constructed and ran, so the host
+//!   answers the runtime's own object (`lib.rs`), and counts any other type.
 //! * **payload type registry**: `PayloadTypeRegistry.clientboundPlay()` and
 //!   its three siblings answer `PayloadTypeRegistryImpl`'s four static
 //!   constants: canonical, keyed by direction.
@@ -38,15 +39,16 @@
 //! identity `equals`, identity hash and `Object.toString` counted (the host
 //! used to print `ResourceLoader[SERVER_DATA]`, which no class prints). Every
 //! class but `EnvType` is an implementation the host does not hold:
-//! [`ClassRule::Unknown`], so `getClass()` is counted. Jar text (a class
+//! [`ClassRule::Unknown`], so `getClass()` is counted. `EnvType`'s class is
+//! exact (`ClassRule::FromKey`), with its own class side: superclass
+//! `java.lang.Enum`, not an interface, its supertypes. Jar text (a class
 //! name, a mod id) enters keys only through [`HostRef::of_values`].
 //!
 //! [`ClassRule::Unknown`]: crate::host_ref::ClassRule
 
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
-
-use crate::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, Nested, instance_of_class};
+use crate::host_ref::{
+    ClassHierarchy, ClassSide, HostKind, HostRef, Methods, Nested, instance_of_class,
+};
 use crate::{NativeError, Value};
 
 const ENV_TYPE: &str = "net/fabricmc/api/EnvType";
@@ -126,30 +128,64 @@ pub(crate) fn enum_values(owner: &str) -> Option<Vec<Value>> {
     (owner == ENV_TYPE).then(|| ENV_TYPES.iter().filter_map(|name| env_type(name)).collect())
 }
 
-/// The entrypoint container for entry `class` (internal name) of kind
-/// `kind`, provided by mod `provider`.
-pub(crate) fn entrypoint_container(kind: &str, class: &str, provider: &str) -> Value {
+/// One entrypoint container handle's facts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContainerParts {
+    pub(crate) kind: String,
+    /// The entry as `fabric.mod.json` names it.
+    pub(crate) class: String,
+    pub(crate) provider: String,
+    /// The type `getEntrypointContainers` was asked for (internal name).
+    pub(crate) requested: Option<String>,
+}
+
+/// The entrypoint container for entry `class` of kind `kind`, provided by
+/// mod `provider`, from a call that asked for `requested`.
+pub(crate) fn entrypoint_container(parts: &ContainerParts) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::FabricEntrypointContainer,
-        &[text(kind), text(class), text(provider)],
+        &[
+            text(&parts.kind),
+            text(&parts.class),
+            text(&parts.provider),
+            Value::Ref(parts.requested.clone()),
+        ],
     ))
 }
 
-/// A container handle's kind, class and provider.
-pub(crate) fn entrypoint_container_parts(value: &Value) -> Option<(String, String, String)> {
-    match texts(value, HostKind::FabricEntrypointContainer)?.as_slice() {
-        [kind, class, provider] => Some((kind.clone(), class.clone(), provider.clone())),
+/// A container handle's facts.
+pub(crate) fn entrypoint_container_parts(value: &Value) -> Option<ContainerParts> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::FabricEntrypointContainer => {
+            match handle.values()?.as_slice() {
+                [
+                    Value::Ref(Some(kind)),
+                    Value::Ref(Some(class)),
+                    Value::Ref(Some(provider)),
+                    Value::Ref(requested),
+                ] => Some(ContainerParts {
+                    kind: kind.clone(),
+                    class: class.clone(),
+                    provider: provider.clone(),
+                    requested: requested.clone(),
+                }),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
 
-/// The entrypoint instance of `class` (internal name) that mod `provider`
-/// declared.
-pub(crate) fn entrypoint_instance(class: &str, provider: &str) -> Value {
-    Value::Host(HostRef::of_values(
-        HostKind::FabricEntrypointInstance,
-        &[text(class), text(provider)],
-    ))
+/// The interface Fabric Loader runs entrypoint `kind` with
+/// (`invokeEntrypoints(kind, type, …)`): the type whose cached instance is
+/// the one the runtime constructed and ran.
+pub(crate) fn invocation_type(kind: &str) -> Option<&'static str> {
+    match kind {
+        "main" => Some("net/fabricmc/api/ModInitializer"),
+        "client" => Some("net/fabricmc/api/ClientModInitializer"),
+        "server" => Some("net/fabricmc/api/DedicatedServerModInitializer"),
+        _ => None,
+    }
 }
 
 /// The `PayloadTypeRegistry` of `direction` (`playToClient`, ...).
@@ -219,36 +255,6 @@ pub(crate) fn resource_loader_types(_: &str) -> &'static [&'static str] {
     &["net/fabricmc/fabric/api/resource/v1/ResourceLoader"]
 }
 
-/// [`crate::host_ref::ClassRule::Unknown`]'s declared types of an
-/// entrypoint instance: its own class (the jar's, from the key, as
-/// `fabric.mod.json` names it: a binary name), interned once per class (a
-/// bounded set: the entrypoints the run declared). A `Class::member`
-/// reference's instance is a generated proxy: no declared class.
-pub(crate) fn entrypoint_instance_types(key: &str) -> &'static [&'static str] {
-    static CLASSES: OnceLock<Mutex<HashSet<&'static [&'static str]>>> = OnceLock::new();
-    let handle = Value::Host(HostRef::new(HostKind::FabricEntrypointInstance, key));
-    let Some(class) = texts(&handle, HostKind::FabricEntrypointInstance)
-        .and_then(|parts| parts.into_iter().next())
-    else {
-        return &[];
-    };
-    if class.contains("::") {
-        return &[];
-    }
-    let class = class.replace('.', "/");
-    let mut classes = CLASSES
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(known) = classes.iter().find(|known| known[0] == class) {
-        return known;
-    }
-    let interned: &'static str = Box::leak(class.into_boxed_str());
-    let types: &'static [&'static str] = Box::leak(Box::new([interned]));
-    classes.insert(types);
-    types
-}
-
 /// `Object.equals`/`Enum.equals`: identity, as far as it is known.
 fn identity_equals(
     handle: &HostRef,
@@ -296,6 +302,24 @@ fn env_type_instance_of(_: &HostRef, wanted: &str, _: &dyn ClassHierarchy) -> Op
     Some(wanted == "java/lang/Object" || env_type_types("").contains(&wanted))
 }
 
+/// [`crate::host_ref::ClassRule::FromKey`] of an `EnvType`: always `EnvType`.
+pub(crate) fn env_type_class(_: &str) -> &str {
+    ENV_TYPE
+}
+
+/// `EnvType`'s class side: a final enum class whose superclass is
+/// `java.lang.Enum` and whose supertypes are `Enum`'s.
+pub(crate) const ENV_TYPE_CLASS_SIDE: ClassSide = ClassSide {
+    owns: |class| class == ENV_TYPE,
+    instance_of: |class, wanted, _| {
+        (class == ENV_TYPE)
+            .then(|| wanted == "java/lang/Object" || env_type_types("").contains(&wanted))
+    },
+    superclass: |class| (class == ENV_TYPE).then(|| "java/lang/Enum".to_owned()),
+    is_interface: |class| (class == ENV_TYPE).then_some(false),
+    classes: || vec![ENV_TYPE.to_owned()],
+};
+
 /// `Enum`: `toString` the name, `compareTo` the ordinals' difference,
 /// identity `equals`, an identity `hashCode` (counted).
 pub(crate) const ENV_TYPE_METHODS: Methods = Methods {
@@ -333,29 +357,21 @@ mod tests {
         let mut seen = std::collections::BTreeMap::new();
         for (index, class) in texts.iter().enumerate() {
             let provider = &texts[(index * 7 + 3) % texts.len()];
-            let container = entrypoint_container("main", class, provider);
-            assert_eq!(
-                entrypoint_container_parts(&container),
-                Some(("main".into(), class.clone(), provider.clone()))
-            );
+            let parts = ContainerParts {
+                kind: "main".into(),
+                class: class.clone(),
+                provider: provider.clone(),
+                requested: (index % 2 == 0).then(|| provider.clone()),
+            };
+            let container = entrypoint_container(&parts);
+            assert_eq!(entrypoint_container_parts(&container), Some(parts.clone()));
             assert_eq!(
                 payload_types_direction(&payload_types(class)),
                 Some(class.clone())
             );
-            let Value::Host(handle) = entrypoint_instance(class, provider) else {
-                unreachable!()
-            };
-            let expected = class.replace('.', "/");
-            let types = entrypoint_instance_types(handle.key());
-            if class.contains("::") {
-                assert!(types.is_empty());
-            } else {
-                assert_eq!(types, [expected.as_str()]);
-            }
             let Value::Host(handle) = container else {
                 unreachable!()
             };
-            let parts = (class.clone(), provider.clone());
             if let Some(other) = seen.insert(handle.key().to_owned(), parts.clone()) {
                 assert_eq!(other, parts);
             }

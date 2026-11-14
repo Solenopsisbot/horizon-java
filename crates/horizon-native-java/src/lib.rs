@@ -2488,6 +2488,11 @@ pub trait Host {
     /// no declaration table ignores it.
     fn note_content_builder(&mut self, _event: ContentBuilderEvent) {}
 
+    /// The runtime constructed the entrypoint instance of `class` (internal
+    /// name) and runs its method on it: the object a loader's own
+    /// `getEntrypoints` answers for that entry (`host_fabric_runtime.rs`).
+    fn note_entrypoint_constructed(&mut self, _class: &str) {}
+
     /// Sibling-jar classes this host lets the executing jar link against.
     ///
     /// `None` keeps single-jar behavior exactly as before: a symbol the
@@ -2806,6 +2811,9 @@ pub struct StdHost {
     /// Entries are seeded by the loaded jar, so this query never scans a host
     /// classpath or invents providers.
     fabric_entrypoint_containers: Vec<FabricEntrypointContainer>,
+    /// The entrypoint classes (internal names) the runtime constructed: their
+    /// instances are the run's own entrypoint objects.
+    constructed_entrypoints: BTreeSet<String>,
     /// Identifiers retained by `CustomPacketPayload.Type` values created by
     /// the bounded networking façade.
     packet_types: BTreeMap<String, String>,
@@ -2998,6 +3006,7 @@ impl StdHost {
             incoming_payloads: Vec::new(),
             payload_bytes: BTreeMap::new(),
             fabric_entrypoint_containers: Vec::new(),
+            constructed_entrypoints: BTreeSet::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
             deferred_registers: BTreeMap::new(),
@@ -3146,6 +3155,41 @@ impl StdHost {
     /// path answer `get(2)` with `IndexOutOfBoundsException: Index 2 out of
     /// bounds for length 2`. A jar's own `new ArrayList()` was never limited,
     /// and the execution budget bounds how many either kind a run can make.
+    /// A new `ArrayList` holding `values`: its own object, compared by
+    /// content (`List.equals`), never by its text.
+    fn fresh_list(&mut self, values: Vec<Value>) -> Value {
+        let list = self.empty_collection("list");
+        if let Some(marker) = expect_ref(&list) {
+            self.mutable_collections.insert(marker.clone(), values);
+        }
+        list
+    }
+
+    /// The object Fabric's `getEntrypoints(kind, requested)` and a
+    /// container's `getEntrypoint()` answer for the entry `class` (as
+    /// `fabric.mod.json` names it): `Entry.getOrCreate(requested)` caches one
+    /// instance per requested type, and the loader's own `invokeEntrypoints`
+    /// made the one for the kind's initializer interface, which is the
+    /// object the runtime constructed and ran (`this` in its
+    /// `onInitialize*`). Any other type (a fresh instance, or Fabric's
+    /// `EntrypointException` when the class is not one), a `Class::member`
+    /// entry (a proxy), or an entry the runtime has not constructed: `None`,
+    /// counted by the caller.
+    fn fabric_entrypoint_object(
+        &self,
+        kind: &str,
+        class: &str,
+        requested: Option<&str>,
+    ) -> Option<Value> {
+        if class.contains("::") || requested.is_none() {
+            return None;
+        }
+        let internal = class.replace('.', "/");
+        (requested == host_fabric_runtime::invocation_type(kind)
+            && self.constructed_entrypoints.contains(&internal))
+        .then(|| Value::Ref(Some(internal)))
+    }
+
     fn empty_collection(&mut self, kind: &str) -> Value {
         let class = match kind {
             "map" => "java/util/LinkedHashMap",
@@ -4374,6 +4418,10 @@ impl Host for StdHost {
             return Ok(value);
         }
         self.get_static(r)
+    }
+
+    fn note_entrypoint_constructed(&mut self, class: &str) {
+        self.constructed_entrypoints.insert(class.to_owned());
     }
 
     fn note_content_builder(&mut self, event: ContentBuilderEvent) {
@@ -9064,27 +9112,45 @@ impl Host for StdHost {
                 "(Ljava/lang/String;)Ljava/util/List;"
                 | "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;",
             ) => {
-                // `getEntrypointContainers`: a new container per entry;
-                // `getEntrypoints`: the entries' instances themselves.
-                let kind = expect_string(Self::argument(r, args, 0)?);
-                let containers = r.name == "getEntrypointContainers";
-                let values = self
+                // `EntrypointStorage`: no entries is the shared
+                // `Collections.emptyList()`; otherwise every call builds a new
+                // `ArrayList`. `getEntrypointContainers` holds a new container
+                // per entry (whose lazy `getEntrypoint` checks the type);
+                // `getEntrypoints` creates each instance eagerly for the type.
+                let kind = expect_string(Self::argument(r, args, 0)?).to_owned();
+                let requested = args.get(1).and_then(expect_ref).cloned();
+                let entries = self
                     .fabric_entrypoint_containers
                     .iter()
                     .filter(|entry| entry.kind == kind)
-                    .map(|entry| {
-                        if containers {
-                            host_fabric_runtime::entrypoint_container(
-                                &entry.kind,
-                                &entry.class,
-                                &entry.provider,
-                            )
-                        } else {
-                            host_fabric_runtime::entrypoint_instance(&entry.class, &entry.provider)
-                        }
-                    })
+                    .cloned()
                     .collect::<Vec<_>>();
-                Ok(collection_value("list", &values))
+                if entries.is_empty() {
+                    return Ok(collection_value("list", &[]));
+                }
+                let mut values = Vec::new();
+                for entry in entries {
+                    if r.name == "getEntrypointContainers" {
+                        values.push(host_fabric_runtime::entrypoint_container(
+                            &host_fabric_runtime::ContainerParts {
+                                kind: entry.kind,
+                                class: entry.class,
+                                provider: entry.provider,
+                                requested: requested.clone(),
+                            },
+                        ));
+                    } else {
+                        match self.fabric_entrypoint_object(
+                            &kind,
+                            &entry.class,
+                            requested.as_deref(),
+                        ) {
+                            Some(object) => values.push(object),
+                            None => return self.unknown_host_call(r),
+                        }
+                    }
+                }
+                Ok(self.fresh_list(values))
             }
             ("net/fabricmc/loader/api/FabricLoader", "getGameDir", "()Ljava/nio/file/Path;") => {
                 Ok(path_value("/horizon/game"))
@@ -9138,25 +9204,35 @@ impl Host for StdHost {
                 "()Ljava/lang/Class;",
             ) => Ok(Value::Ref(
                 host_fabric_runtime::entrypoint_container_parts(receiver)
-                    .map(|(_, class, _)| class.replace('/', ".")),
+                    .map(|parts| parts.class.replace('/', ".")),
             )),
             (
                 "net/fabricmc/loader/api/EntrypointContainer"
                 | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getEntrypoint",
                 "()Ljava/lang/Object;",
-            ) => Ok(host_fabric_runtime::entrypoint_container_parts(receiver)
-                .map_or(Value::Ref(None), |(_, class, provider)| {
-                    host_fabric_runtime::entrypoint_instance(&class, &provider)
-                })),
+            ) => {
+                let object =
+                    host_fabric_runtime::entrypoint_container_parts(receiver).and_then(|parts| {
+                        self.fabric_entrypoint_object(
+                            &parts.kind,
+                            &parts.class,
+                            parts.requested.as_deref(),
+                        )
+                    });
+                match object {
+                    Some(object) => Ok(object),
+                    None => self.unknown_host_call(r),
+                }
+            }
             (
                 "net/fabricmc/loader/api/EntrypointContainer"
                 | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getProvider",
                 "()Lnet/fabricmc/loader/api/ModContainer;",
             ) => Ok(host_fabric_runtime::entrypoint_container_parts(receiver)
-                .map_or(Value::Ref(None), |(_, _, provider)| {
-                    self.fabric_container(&provider)
+                .map_or(Value::Ref(None), |parts| {
+                    self.fabric_container(&parts.provider)
                 })),
             // A container's own metadata, origin and root.
             (
@@ -16369,6 +16445,7 @@ impl NativeJar {
                     neoforge_imc::set_active(runtime.host, previous.as_deref());
                 }
                 constructed?;
+                runtime.host.note_entrypoint_constructed(&class_name);
             }
             if method != "<init>" {
                 // The loader constructs the entrypoint instance and then calls
