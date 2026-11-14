@@ -480,13 +480,6 @@ fn resolve_sibling(r: &MethodRef, receiver: &Value, args: &[Value]) -> Option<Va
 /// bounded runtime refuses rather than spinning on.
 pub(crate) const MAX_SPLITERATOR_ELEMENTS: usize = 4096;
 
-/// Prefix of a `Collectors.toMap` collector marker: the key and value
-/// functions (and the optional merge function) as escaped capture markers.
-const TO_MAP_COLLECTOR_PREFIX: &str = "collector/to-map/";
-
-/// The leading operand that marks a `to-map` collector as Guava's.
-const GUAVA_COLLECTOR_FLAG: &str = "@guava";
-
 /// A `Collectors.toMap` collection in progress: its functions and what it
 /// has collected so far. The stream push feeds it one element at a time
 /// (`stream_pipeline.rs`), so the key and value functions run interleaved
@@ -510,22 +503,13 @@ pub(crate) struct ToMap {
 }
 
 impl ToMap {
-    /// The state for a `collector/to-map/` marker, `None` for any other.
-    pub(crate) fn begin(collector: &str) -> Result<Option<Self>, NativeError> {
-        let Some(payload) = collector.strip_prefix(TO_MAP_COLLECTOR_PREFIX) else {
+    /// The state for a built-in `toMap` collector (`host_collector.rs`), `None` for any other.
+    pub(crate) fn begin(collector: &Value) -> Result<Option<Self>, NativeError> {
+        let Some(crate::runtime::host_collector::Builtin::ToMap { guava, functions }) =
+            crate::runtime::host_collector::builtin(collector)
+        else {
             return Ok(None);
         };
-        let mut markers = super::split_capture_markers(payload)?;
-        let guava = markers
-            .first()
-            .is_some_and(|marker| marker == GUAVA_COLLECTOR_FLAG);
-        if guava {
-            markers.remove(0);
-        }
-        let functions = markers
-            .into_iter()
-            .map(|marker| super::parse_collection_value(&marker))
-            .collect::<Result<Vec<_>, _>>()?;
         let (key_fn, value_fn, merge_fn, supplier) = match functions.as_slice() {
             [key, value] => (key.clone(), value.clone(), None, None),
             [key, value, merge] => (key.clone(), value.clone(), Some(merge.clone()), None),
@@ -562,7 +546,7 @@ impl ToMap {
     }
 }
 
-/// The `Collectors.toMap` overloads the host answers with a collector marker.
+/// The `Collectors.toMap` overloads the host answers with a collector handle.
 pub(crate) fn to_map_collector(r: &MethodRef, args: &[Value]) -> Option<Value> {
     // Guava's immutable-map collectors (`ImmutableMap.toImmutableMap`,
     // `Maps.toImmutableEnumMap`, WorldEdit's platform table) collect the same
@@ -591,18 +575,13 @@ pub(crate) fn to_map_collector(r: &MethodRef, args: &[Value]) -> Option<Value> {
         }
         _ => return None,
     };
-    let mut parts = args
-        .iter()
-        .take(functions)
-        .map(super::value_marker)
-        .collect::<Vec<_>>();
-    if guava {
-        parts.insert(0, GUAVA_COLLECTOR_FLAG.to_owned());
-    }
-    let parts = parts.join(",");
-    Some(Value::Ref(Some(format!(
-        "{TO_MAP_COLLECTOR_PREFIX}{parts}"
-    ))))
+    // A new `CollectorImpl` per call, holding the functions (`host_collector.rs`).
+    Some(crate::runtime::host_collector::collector(
+        crate::runtime::host_collector::Builtin::ToMap {
+            guava,
+            functions: args.iter().take(functions).cloned().collect(),
+        },
+    ))
 }
 
 impl crate::runtime::StdHost {
@@ -1208,7 +1187,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     /// [`ToMap::finish`].
     pub(crate) fn collect_to_map(
         &mut self,
-        collector: &str,
+        collector: &Value,
         values: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         let Some(mut state) = self.begin_to_map(collector)? else {
@@ -1222,7 +1201,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
 
     /// [`ToMap::begin`], and for `Collectors.toMap` the `HashMap::new` its
     /// supplier runs before the first element.
-    pub(crate) fn begin_to_map(&mut self, collector: &str) -> Result<Option<ToMap>, NativeError> {
+    pub(crate) fn begin_to_map(&mut self, collector: &Value) -> Result<Option<ToMap>, NativeError> {
         let Some(mut state) = ToMap::begin(collector)? else {
             return Ok(None);
         };

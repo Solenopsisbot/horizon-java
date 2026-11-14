@@ -153,6 +153,10 @@ impl StdHost {
             Value::Host(_) if crate::jar_object::is_object(value) => {
                 crate::expect_ref(value).ok_or_else(npe)?
             }
+            // A host iterator, by its table key (`host_iterator.rs`).
+            Value::Host(_) if crate::host_iterator::marker(value).is_some() => {
+                crate::host_iterator::marker(value).ok_or_else(npe)?
+            }
             // A host handle (a `ServiceLoader`, ...) is an `Iterable` whose
             // elements only the runtime knows: counted.
             _ => return Ok(None),

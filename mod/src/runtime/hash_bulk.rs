@@ -802,6 +802,36 @@ impl<H: Host> Runtime<'_, H> {
         result.map(|()| set)
     }
 
+    /// The elements of `values` once each, the first of equal ones, in encounter order: what
+    /// Guava's `ImmutableSet.Builder` keeps (its own hash table, `equals`/`hashCode`). An
+    /// element whose `equals` or `hashCode` can't be answered is kept and the collect counted,
+    /// as [`Self::hash_set_collect`] does.
+    pub(crate) fn distinct_in_order(
+        &mut self,
+        values: &[Value],
+    ) -> Result<Vec<Value>, NativeError> {
+        let mut table = HashTable::new(None, 0.75);
+        let mut kept = Vec::new();
+        for value in values {
+            let hash = self.java_hash(value)?;
+            match self.table_lookup(&table, value, hash)? {
+                Lookup::Found(_) => {}
+                Lookup::Absent => {
+                    table.insert(value, hash);
+                    kept.push(value.clone());
+                }
+                Lookup::Unknown => {
+                    self.host.unknown_operand_call(&stream_member(
+                        "collect",
+                        "(Ljava/util/stream/Collector;)Ljava/lang/Object;",
+                    ))?;
+                    kept.push(value.clone());
+                }
+            }
+        }
+        Ok(kept)
+    }
+
     /// The `HashMap` `Collectors.toMap(key, value[, merge])`'s supplier
     /// makes before the first element.
     pub(crate) fn new_collector_hash_map(&mut self) -> Result<Value, NativeError> {

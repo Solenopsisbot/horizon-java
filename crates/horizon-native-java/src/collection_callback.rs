@@ -149,7 +149,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(it) = receiver else {
             return Ok(None);
         };
-        let Some(marker) = crate::expect_ref(it).cloned() else {
+        let Some(marker) = crate::host_iterator::marker(it).cloned() else {
             return Ok(None);
         };
         let Some((start, len, source)) = self.host.host_iterator(&marker) else {
