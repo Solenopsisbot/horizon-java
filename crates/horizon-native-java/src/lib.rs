@@ -8774,7 +8774,10 @@ impl Host for StdHost {
                 "java/lang/String",
                 "toLowerCase" | "toUpperCase",
                 "(Ljava/util/Locale;)Ljava/lang/String;",
-            ) if args.first().is_some_and(|locale| self.tailored_case_locale(locale)) => {
+            ) if args
+                .first()
+                .is_some_and(|locale| self.tailored_case_locale(locale)) =>
+            {
                 self.unknown_host_call(r)
             }
             ("java/lang/String", "toLowerCase", "(Ljava/util/Locale;)Ljava/lang/String;") => {

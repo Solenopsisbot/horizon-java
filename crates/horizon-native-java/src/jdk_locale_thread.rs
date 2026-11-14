@@ -80,7 +80,9 @@ impl StdHost {
             .map(|(language, _)| language)
             .or_else(|| {
                 let marker = expect_ref(locale)?;
-                self.locales.get(marker).map(|(language, _)| language.as_str())
+                self.locales
+                    .get(marker)
+                    .map(|(language, _)| language.as_str())
             });
         matches!(language, Some("tr" | "az" | "lt"))
     }
