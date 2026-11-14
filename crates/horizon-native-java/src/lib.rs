@@ -71,6 +71,7 @@ mod host_config;
 mod host_entry;
 mod host_events;
 mod host_executors;
+mod host_fabric_loader;
 mod host_game_event;
 mod host_guava;
 mod host_ids;
@@ -8925,16 +8926,10 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Int(0)),
                 };
-                // The loader itself and the game are always loaded; a jar's
-                // platform probe asks for them before it asks for anything the
-                // metadata could name.
-                // Horizon's Fabric API façade stands in for the `fabric-api`
-                // jar wherever it answers a Fabric jar's calls.
-                let fabric_api =
-                    id == "fabric-api" && !self.fabric_entrypoint_containers.is_empty();
-                Ok(Value::Int(
-                    (self.mods.contains_key(id) || is_always_loaded_mod(id) || fabric_api) as i32,
-                ))
+                // `modMap.containsKey(id)`: what `getModContainer` finds and
+                // `getAllMods` lists, including the loader, the game and the
+                // Fabric API modules Horizon's façade stands in for.
+                Ok(Value::Int(self.fabric_mod_present(id) as i32))
             }
             (
                 "net/neoforged/fml/ModList" | "net/minecraftforge/fml/ModList",
@@ -8985,13 +8980,16 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(optional_wrap(Value::Ref(match self.mods.get(id) {
-                    Some(version) => Some(format!("mod-container/{id}/{version}")),
-                    // The loader and the game are present in every runtime
-                    // even though no jar declares them as a dependency.
-                    None if is_always_loaded_mod(id) => Some(format!("mod-container/{id}/unknown")),
-                    None => None,
-                })))
+                // Present exactly when `getAllMods` lists it (or the run
+                // knows it otherwise: `fabric_mod_present`), as the same
+                // container (`host_fabric_loader.rs`).
+                let present = self.fabric_mod_present(id);
+                let id = id.clone();
+                Ok(optional_wrap(if present {
+                    self.fabric_container(&id)
+                } else {
+                    Value::Ref(None)
+                }))
             }
             (
                 "net/fabricmc/loader/api/ModContainer",
@@ -9090,34 +9088,28 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/EntrypointContainer",
                 "getProvider",
                 "()Lnet/fabricmc/loader/api/ModContainer;",
-            ) => Ok(Value::Ref(
-                fabric_entrypoint_part(expect_ref(receiver), 3).map(|provider| {
-                    let version = self
-                        .mods
-                        .get(&provider)
-                        .map(String::as_str)
-                        .unwrap_or("unknown");
-                    format!("mod-container/{provider}/{version}")
-                }),
-            )),
+            ) => Ok(fabric_entrypoint_part(expect_ref(receiver), 3)
+                .map_or(Value::Ref(None), |provider| {
+                    self.fabric_container(&provider)
+                })),
+            // A container's own metadata, origin and root.
             (
                 "net/fabricmc/loader/api/ModContainer",
                 "getMetadata",
                 "()Lnet/fabricmc/loader/api/metadata/ModMetadata;",
-            ) => Ok(Value::Ref(Some(
-                expect_ref(receiver)
-                    .cloned()
-                    .unwrap_or_else(|| "mod-container/unknown/unknown".into())
-                    .replacen("mod-container/", "metadata/", 1),
-            ))),
+            ) if host_fabric_loader::container_id(receiver).is_some() => {
+                Ok(host_fabric_loader::metadata(
+                    &host_fabric_loader::container_id(receiver).unwrap_or_default(),
+                ))
+            }
             (
                 "net/fabricmc/loader/api/ModContainer",
                 "getOrigin",
                 "()Lnet/fabricmc/loader/api/metadata/ModOrigin;",
-            ) => {
+            ) if host_fabric_loader::container_id(receiver).is_some() => {
                 // Fabric Loader's own origin for a jar container is a `PATH`
                 // origin over the container's root (`mod_origin.rs`).
-                let id = metadata_part(expect_ref(receiver), 1);
+                let id = host_fabric_loader::container_id(receiver).unwrap_or_default();
                 Ok(mod_origin::origin_value(&id))
             }
             (
@@ -9125,8 +9117,8 @@ impl Host for StdHost {
                 "getRootPaths",
                 // Fabric Loader declares `List<Path> getRootPaths()`.
                 "()Ljava/util/List;" | "()Ljava/util/Collection;",
-            ) => {
-                let id = metadata_part(expect_ref(receiver), 1);
+            ) if host_fabric_loader::container_id(receiver).is_some() => {
+                let id = host_fabric_loader::container_id(receiver).unwrap_or_default();
                 Ok(collection_value(
                     "list",
                     &[path_value(&format!("/horizon/mods/{id}"))],
@@ -9137,16 +9129,28 @@ impl Host for StdHost {
                 "getModId",
                 "()Ljava/lang/String;",
             ) => Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1)))),
-            ("net/fabricmc/loader/api/metadata/ModMetadata", "getId", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1))))
+            // The metadata of a mod with no `fabric.mod.json` and no built-in
+            // model (`fabric_mods.rs` answers the rest): its id, and the
+            // version the run's mod list has for it.
+            (
+                "net/fabricmc/loader/api/metadata/ModMetadata",
+                "getId" | "getName",
+                "()Ljava/lang/String;",
+            ) if host_fabric_loader::metadata_id(receiver).is_some() => {
+                Ok(Value::Ref(host_fabric_loader::metadata_id(receiver)))
             }
             (
                 "net/fabricmc/loader/api/metadata/ModMetadata",
                 "getVersion",
                 "()Lnet/fabricmc/loader/api/Version;",
-            ) => Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 2)))),
-            ("net/fabricmc/loader/api/metadata/ModMetadata", "getName", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1))))
+            ) if host_fabric_loader::metadata_id(receiver).is_some() => {
+                let id = host_fabric_loader::metadata_id(receiver).unwrap_or_default();
+                Ok(Value::Ref(Some(
+                    self.mods
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".into()),
+                )))
             }
             ("net/fabricmc/loader/api/metadata/ModMetadata", "getType", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some("release".into())))
@@ -31879,7 +31883,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&container, &loader, &[Value::Ref(Some("demo".into()))])
                 .unwrap(),
-            optional_wrap(Value::Ref(Some("mod-container/demo/1.2.3".into())))
+            optional_wrap(host_fabric_loader::container("demo", Some("1.2.3")))
         );
     }
 
@@ -35738,7 +35742,7 @@ mandatory = true
         // `Optional<ModContainer>`.
         assert_eq!(
             container_value,
-            optional_wrap(Value::Ref(Some("mod-container/demo/1.2.3".into())))
+            optional_wrap(host_fabric_loader::container("demo", Some("1.2.3")))
         );
         // Fabric declares `Collection<ModContainer> getAllMods()`. A mod only
         // seeded with `with_mod` is a loaded id, not a Fabric jar with its own
@@ -35763,7 +35767,7 @@ mandatory = true
             .unwrap();
         assert_eq!(
             first,
-            Value::Ref(Some("mod-container/fabric-api/0.165.0+26.3".into()))
+            host_fabric_loader::container("fabric-api", Some("0.165.0+26.3"))
         );
         let present = MethodRef {
             owner: "java/util/Optional".into(),
@@ -35799,7 +35803,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&metadata, &container_value, &[])
                 .unwrap(),
-            Value::Ref(Some("metadata/demo/1.2.3".into()))
+            host_fabric_loader::metadata("demo")
         );
         let root_paths = MethodRef {
             owner: "net/fabricmc/loader/api/ModContainer".into(),
@@ -35841,7 +35845,7 @@ mandatory = true
             descriptor: "()Ljava/lang/String;".into(),
         };
         assert_eq!(
-            host.invoke_instance(&name, &Value::Ref(Some("metadata/demo/1.2.3".into())), &[])
+            host.invoke_instance(&name, &host_fabric_loader::metadata("demo"), &[])
                 .unwrap(),
             Value::Ref(Some("demo".into()))
         );
@@ -35851,12 +35855,8 @@ mandatory = true
             descriptor: "()Ljava/lang/String;".into(),
         };
         assert_eq!(
-            host.invoke_instance(
-                &metadata_type,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
-            .unwrap(),
+            host.invoke_instance(&metadata_type, &host_fabric_loader::metadata("demo"), &[],)
+                .unwrap(),
             Value::Ref(Some("release".into()))
         );
         let provides = MethodRef {
@@ -35865,11 +35865,7 @@ mandatory = true
             descriptor: "()Ljava/util/Collection;".into(),
         };
         let provides_value = host
-            .invoke_instance(
-                &provides,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
+            .invoke_instance(&provides, &host_fabric_loader::metadata("demo"), &[])
             .unwrap();
         assert_eq!(
             host.invoke_instance(
@@ -35892,7 +35888,7 @@ mandatory = true
                         name: method_name.into(),
                         descriptor: "()Ljava/util/Collection;".into(),
                     },
-                    &Value::Ref(Some("metadata/demo/1.2.3".into())),
+                    &host_fabric_loader::metadata("demo"),
                     &[],
                 )
                 .unwrap();
@@ -35918,7 +35914,7 @@ mandatory = true
                     name: "getIconPath".into(),
                     descriptor: "(I)Ljava/util/Optional;".into(),
                 },
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
+                &host_fabric_loader::metadata("demo"),
                 &[Value::Int(64)],
             )
             .unwrap();
@@ -35929,11 +35925,7 @@ mandatory = true
             descriptor: "()Ljava/util/Map;".into(),
         };
         let dependencies_value = host
-            .invoke_instance(
-                &dependencies,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
+            .invoke_instance(&dependencies, &host_fabric_loader::metadata("demo"), &[])
             .unwrap();
         assert_eq!(
             host.invoke_instance(
@@ -35954,11 +35946,7 @@ mandatory = true
             descriptor: "()Lnet/fabricmc/loader/api/Version;".into(),
         };
         let version_value = host
-            .invoke_instance(
-                &version,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
+            .invoke_instance(&version, &host_fabric_loader::metadata("demo"), &[])
             .unwrap();
         let friendly = MethodRef {
             owner: "net/fabricmc/loader/api/Version".into(),
@@ -37771,7 +37759,7 @@ mandatory = true
             br#"{"id":"demo","version":"1.0","custom":{"commit":"abcdef0123456789","ci":true}}"#
                 .to_vec(),
         );
-        let metadata = Value::Ref(Some("metadata/demo/1.0".into()));
+        let metadata = host_fabric_loader::metadata("demo");
         let get = MethodRef {
             owner: "net/fabricmc/loader/api/metadata/ModMetadata".into(),
             name: "getCustomValue".into(),
@@ -41324,7 +41312,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Ref(Some("mod-container/demo/1.2.3".into()))
+            host_fabric_loader::container("demo", Some("1.2.3"))
         );
         let client = host
             .invoke_instance(&entries, &loader, &[Value::Ref(Some("client".into()))])
