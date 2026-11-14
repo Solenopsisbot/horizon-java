@@ -43,7 +43,13 @@ fn host_answered_collections_are_objects() {
     let fixture =
         javac_fixture::Fixture::build("host-collections-d1", &[("demo/Probe.java", PROBE)]);
     let mut failures = Vec::new();
-    for method in ["mapViews", "emptyViews", "system", "properties"] {
+    for method in [
+        "mapViews",
+        "emptyViews",
+        "system",
+        "properties",
+        "objectProperty",
+    ] {
         let mut host = fixture.jar.seed_host(horizon_native_java::StdHost::new());
         let answer = fixture.jar.invoke_method_with_args(
             "demo/Probe",

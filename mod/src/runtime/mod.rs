@@ -3452,9 +3452,16 @@ impl StdHost {
             .get(&cache)
             .and_then(|marker| self.mutable_collections.get(marker))
         {
+            // `Properties.getProperty`: the value only when it is a `String`
+            // (`oval instanceof String ? (String) oval : null`); any object put
+            // under the key, a host collection's handle included, is `null`
+            // (#233's re-check: its key text came back as the value).
             Some(values) => values.as_chunks::<2>().0.iter().find_map(|pair| {
                 matches!(&pair[0], Value::Ref(Some(name)) if name == key)
-                    .then(|| expect_ref(&pair[1]).cloned())
+                    .then(|| match &pair[1] {
+                        Value::Ref(Some(text)) => Some(text.clone()),
+                        _ => None,
+                    })
                     .flatten()
             }),
             None => self.properties.get(key).cloned(),

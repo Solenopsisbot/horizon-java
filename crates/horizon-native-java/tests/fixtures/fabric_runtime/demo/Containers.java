@@ -9,8 +9,9 @@ import net.fabricmc.loader.api.ModContainer;
 /**
  * Two mods' containers keep their own collections (#233 review B1): Fabric Loader 0.19.5's
  * `ModContainerImpl.getRootPaths` returns the container's own `roots` field, and `V1ModMetadata`'s
- * getters return the fields `V1ModMetadataParser` filled with a new `ArrayList` per field per mod, so
- * each is the same object on every call, never another mod's, and keeps what is added to it.
+ * getters return its own fields, so each is the same object on every call, never another mod's.
+ * Those collections are unmodifiable in Fabric (`unmodifiableCollection`, a `singletonList`), which
+ * the host doesn't model yet (#238), so no probe writes to them.
  */
 public final class Containers {
     static String b(boolean v) {
@@ -32,12 +33,11 @@ public final class Containers {
             + b(ra == a.getRootPaths()) + b(rb == c.getRootPaths()) + ra.size() + rb.size();
     }
 
-    /** Metadata collections: one per mod per getter, and what is added to one stays in it, only there. */
+    /** Metadata collections: one per mod per getter, the same on every call. */
     public static String metadata() {
         ModContainer a = mod("moda");
         ModContainer c = mod("modb");
         Collection<String> license = a.getMetadata().getLicense();
-        license.add("MIT");
         return b((Object) a.getMetadata().getAuthors() == c.getMetadata().getAuthors())
             + b(a.getMetadata().getAuthors() == a.getMetadata().getAuthors())
             + b(license == c.getMetadata().getLicense()) + b(license == a.getMetadata().getLicense())

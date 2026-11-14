@@ -104,16 +104,15 @@ fn run_with_output(test: &str, method: &str) -> (String, Vec<(String, usize)>, S
 /// What `demo.Containers` answers on Fabric Loader 0.19.5, read from its
 /// bytecode (`javap -c`, #233 review), since a container can't run outside a
 /// loader: `ModContainerImpl.getRootPaths` returns the container's own
-/// `roots` field, and `V1ModMetadata.getAuthors`/`getLicense` return the
-/// fields `V1ModMetadataParser` filled with a new `ArrayList` per field per
-/// mod (plain `getfield`s). So each is one object per container or metadata,
-/// never another mod's, and keeps what is added to it.
-const CONTAINERS_ORACLE: &[(&str, &str)] = &[("roots", "TFFTT11"), ("metadata", "FTFT[MIT][]")];
+/// `roots` field, and `V1ModMetadata.getAuthors`/`getLicense` return its own
+/// fields (plain `getfield`s). So each is one object per container or
+/// metadata, never another mod's. (Fabric wraps them unmodifiable, which the
+/// host doesn't model yet, #238: no probe writes to them.)
+const CONTAINERS_ORACLE: &[(&str, &str)] = &[("roots", "TFFTT11"), ("metadata", "FTFT[][]")];
 
 /// Two mods' containers and metadata keep their own collections: `a`'s root
 /// paths are still `a`'s after `b`'s are read, each getter answers the same
-/// object on every call and a different one per mod, and an `add` to one
-/// mod's license stays there (#233 review B1: the cache keyed every handle
+/// object on every call and a different one per mod (#233 review B1: the cache keyed every handle
 /// under its empty text, so all containers shared one list, overwritten on
 /// each call). Nothing is counted.
 #[test]

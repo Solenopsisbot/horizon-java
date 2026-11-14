@@ -82,10 +82,25 @@ public final class Probe {
             + System.getProperty("d1.none", "dflt") + "," + b(Boolean.getBoolean("d1.flag"));
     }
 
+    /**
+     * `System.getProperty` answers a value only when it is a `String` (`Properties.getProperty`:
+     * `oval instanceof String ? (String) oval : null`): an object put under the key is `null`, and the
+     * default form falls back to its default (#233's re-check B1).
+     */
+    public static String objectProperty() {
+        Properties p = System.getProperties();
+        p.put("d1.obj", new java.util.ArrayList<>());
+        p.put("d1.num", 7);
+        return System.getProperty("d1.obj") + "," + System.getProperty("d1.obj", "dflt") + ","
+            + System.getProperty("d1.num") + "," + b(Boolean.getBoolean("d1.obj")) + ","
+            + b(p.get("d1.obj") instanceof java.util.ArrayList);
+    }
+
     public static void main(String[] args) {
         System.out.println("mapViews=" + mapViews());
         System.out.println("emptyViews=" + emptyViews());
         System.out.println("system=" + system());
         System.out.println("properties=" + properties());
+        System.out.println("objectProperty=" + objectProperty());
     }
 }
