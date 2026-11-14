@@ -312,9 +312,7 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Value, NativeError> {
         const INVOKE: &str =
             "(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;";
-        let class = expect_ref(handler)
-            .and_then(|marker| marker.split_once('#'))
-            .map(|(class, _)| class.to_owned());
+        let class = crate::jar_object::object_class(handler).map(str::to_owned);
         if let Some(class) = class
             && let Some((owner, true)) = self.member_owner(&class, "invoke", INVOKE)
         {

@@ -1327,9 +1327,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 // A virtual handle selects the receiver's override, as
                 // `invokevirtual` would; a special one runs `owner`'s body.
-                let receiver_class = expect_ref(receiver)
-                    .and_then(|marker| marker.split_once('#'))
-                    .map(|(class, _)| class.to_owned());
+                let receiver_class = crate::runtime::jar_object::object_class(receiver).map(str::to_owned);
                 let resolved = match (kind, receiver_class) {
                     (Kind::Virtual, Some(class)) => {
                         match self.member_owner(&class, name, descriptor) {

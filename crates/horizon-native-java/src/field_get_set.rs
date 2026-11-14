@@ -243,11 +243,8 @@ fn class_get_name(descriptor: &str) -> String {
 /// The class of an object `new` made of a JDK class `jdk_supertypes` lists
 /// (`java/util/ArrayList#3`).
 fn jdk_object_class(marker: &str) -> Option<&str> {
-    let (class, number) = marker.split_once('#')?;
-    (!number.is_empty()
-        && number.bytes().all(|byte| byte.is_ascii_digit())
-        && jdk_supertypes::is_listed(class))
-    .then_some(class)
+    let class = crate::jar_object::key_class(marker)?;
+    jdk_supertypes::is_listed(class).then_some(class)
 }
 
 fn thrown(class: &str, message: String) -> NativeError {
@@ -809,7 +806,7 @@ impl<H: Host> Runtime<'_, H> {
                 None => self.constant_value_of(field)?,
             }
         } else {
-            let Some(object) = expect_ref(object) else {
+            let Some(object) = crate::jar_object::instance_key(object) else {
                 return Ok(None);
             };
             self.fields
@@ -832,7 +829,7 @@ impl<H: Host> Runtime<'_, H> {
     fn store(&mut self, field: &Target<'_>, object: &Value, value: Value) {
         if field.is_static() {
             self.static_fields.insert(field.static_key(), value);
-        } else if let Some(object) = expect_ref(object) {
+        } else if let Some(object) = crate::jar_object::instance_key(object) {
             self.fields
                 .insert(format!("{object}|{}", field.static_key()), value);
         }

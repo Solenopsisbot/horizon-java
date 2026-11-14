@@ -465,7 +465,7 @@ impl<H: Host> Runtime<'_, H> {
     /// every other value (host markers, strings, boxes, objects of host or
     /// library-modelled classes, subclasses of concrete JDK or game classes).
     pub(crate) fn stateless_jar_object(&self, value: &Value) -> Option<String> {
-        let class = jvm_dispatch::constructed_object_class(expect_ref(value)?)?;
+        let class = crate::jar_object::object_class(value)?;
         if self.host.models_class(class) || jvm_dispatch::library_modelled(class) {
             return None;
         }
@@ -606,8 +606,7 @@ impl<H: Host> Runtime<'_, H> {
 
     /// Whether a jar object's class implements `java.util.Map.Entry`.
     fn jar_map_entry(&self, value: &Value) -> bool {
-        expect_ref(value)
-            .and_then(|marker| jvm_dispatch::constructed_object_class(marker))
+        crate::jar_object::object_class(value)
             .is_some_and(|class| self.class_is_instance(class, "java/util/Map$Entry"))
     }
 
@@ -620,9 +619,7 @@ impl<H: Host> Runtime<'_, H> {
         base: &str,
     ) -> Vec<&'static str> {
         let mut out = Vec::new();
-        let Some(class) =
-            expect_ref(receiver).and_then(|marker| jvm_dispatch::constructed_object_class(marker))
-        else {
+        let Some(class) = crate::jar_object::object_class(receiver) else {
             return out;
         };
         let mut queue = vec![class.to_owned()];
@@ -661,7 +658,7 @@ impl<H: Host> Runtime<'_, H> {
     /// (`extends ArrayList`, `extends LinkedHashMap`): that JDK class, and the
     /// names of the methods the jar chain declares (its overrides).
     fn concrete_subclass_hooks(&self, value: &Value) -> Option<(String, Vec<String>)> {
-        let class = jvm_dispatch::constructed_object_class(expect_ref(value)?)?;
+        let class = crate::jar_object::object_class(value)?;
         if self.host.models_class(class) || jvm_dispatch::library_modelled(class) {
             return None;
         }

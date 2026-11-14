@@ -391,7 +391,7 @@ impl<H: Host> Runtime<'_, H> {
             // is no plain text; anything else may be a `String`.
             let typed = left == Ty::String || right == Ty::String;
             if !typed
-                && (jar_text::object_marker_class(text).is_some()
+                && (crate::runtime::jar_object::packaged_key_class(text).is_some()
                     || !value_class::is_plain_string(text))
             {
                 return Ok(equal);

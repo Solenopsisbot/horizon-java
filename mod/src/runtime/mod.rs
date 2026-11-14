@@ -71,6 +71,7 @@ mod hook_shapes;
 mod host_array;
 mod host_attachment;
 mod host_brigadier;
+mod host_config;
 mod host_entry;
 mod host_events;
 mod host_executors;
@@ -80,6 +81,7 @@ mod host_ids;
 mod host_invoke;
 mod host_jdk;
 mod host_list_iterator;
+mod host_mixin;
 mod host_optional;
 mod host_path;
 mod host_ref;
@@ -90,6 +92,7 @@ mod host_watch;
 mod immutable_collections;
 mod iteration_guard;
 mod jar_compare;
+mod jar_object;
 mod jar_operands;
 mod jar_text;
 mod jar_throwables;
@@ -6157,7 +6160,8 @@ impl Host for StdHost {
             return Ok(value);
         }
         if is_throwable_owner(&r.owner) {
-            let marker = expect_ref(receiver)
+            let marker = jar_object::instance_key(receiver)
+                .map(str::to_owned)
                 .ok_or_else(|| NativeError::Metadata("malformed Throwable marker".into()))?;
             if r.name == "<init>" {
                 // The cause is the `Throwable` parameter, whatever class the
@@ -6172,16 +6176,17 @@ impl Host for StdHost {
                     .filter(|value| **value != Value::Ref(None))
                     .cloned();
                 let message = if r.descriptor == "(Ljava/lang/Throwable;)V" {
-                    cause.as_ref().and_then(expect_ref).map(|cause| {
-                        let class = cause
-                            .split_once('#')
-                            .map_or(cause.as_str(), |(class, _)| class);
-                        let name = class.replace('/', ".");
-                        match self.throwable_messages.get(cause).cloned().flatten() {
-                            Some(message) => format!("{name}: {message}"),
-                            None => name,
-                        }
-                    })
+                    cause
+                        .as_ref()
+                        .and_then(jar_object::instance_key)
+                        .map(|cause| {
+                            let class = jar_object::marker_class_or_text(cause);
+                            let name = class.replace('/', ".");
+                            match self.throwable_messages.get(cause).cloned().flatten() {
+                                Some(message) => format!("{name}: {message}"),
+                                None => name,
+                            }
+                        })
                 } else {
                     args.first().and_then(|value| match value {
                         Value::Ref(Some(text))
@@ -6202,14 +6207,14 @@ impl Host for StdHost {
                 ("getMessage", "()Ljava/lang/String;") => {
                     return Ok(self
                         .throwable_messages
-                        .get(marker)
+                        .get(&marker)
                         .and_then(|message| message.clone())
                         .map_or(Value::Ref(None), |message| Value::Ref(Some(message))));
                 }
                 ("getCause", "()Ljava/lang/Throwable;") => {
                     return Ok(self
                         .throwable_causes
-                        .get(marker)
+                        .get(&marker)
                         .cloned()
                         .flatten()
                         .unwrap_or(Value::Ref(None)));
@@ -6220,12 +6225,10 @@ impl Host for StdHost {
                     return Ok(receiver.clone());
                 }
                 ("toString", "()Ljava/lang/String;") => {
-                    let class = marker
-                        .split_once('#')
-                        .map_or(marker.as_str(), |(class, _)| class);
+                    let class = jar_object::marker_class_or_text(&marker);
                     // `getClass().getName()`: the binary name, package included.
                     let class = class.replace('/', ".");
-                    let Some(Some(message)) = self.throwable_messages.get(marker) else {
+                    let Some(Some(message)) = self.throwable_messages.get(&marker) else {
                         return Ok(Value::Ref(Some(class)));
                     };
                     return Ok(Value::Ref(Some(format!("{class}: {message}"))));
@@ -8472,8 +8475,7 @@ impl Host for StdHost {
             // model prints is an identity hash or a body the host does not
             // have, so it is counted, never answered with its marker (#69).
             ("java/lang/Object", "toString", "()Ljava/lang/String;")
-                if expect_ref(receiver)
-                    .is_some_and(|marker| jar_text::object_marker_class(marker).is_some()) =>
+                if crate::runtime::jar_object::packaged_object_class(receiver).is_some() =>
             {
                 // `Object`'s own model is this arm: asking it would recurse.
                 let modelled = expect_ref(receiver)
@@ -8509,8 +8511,7 @@ impl Host for StdHost {
             // A jar constant the runtime has no name for (`class#n`): its
             // marker's tail is not its name.
             ("java/lang/Enum", "name" | "toString", "()Ljava/lang/String;")
-                if expect_ref(receiver)
-                    .is_some_and(|marker| jar_text::object_marker_class(marker).is_some()) =>
+                if crate::runtime::jar_object::packaged_object_class(receiver).is_some() =>
             {
                 self.unknown_host_call(r)
             }
@@ -9406,8 +9407,7 @@ impl Host for StdHost {
             // text is not its marker, so even `toString` is counted here.
             ("java/lang/StringBuilder" | "java/lang/StringBuffer", name, _)
                 if name != "<init>"
-                    && expect_ref(receiver)
-                        .and_then(|marker| jar_text::object_marker_class(marker))
+                    && crate::runtime::jar_object::packaged_object_class(receiver)
                         .is_some_and(|class| class == r.owner) =>
             {
                 self.unknown_host_call(r)
@@ -10346,9 +10346,7 @@ fn is_throwable_owner(owner: &str) -> bool {
 }
 
 fn is_throwable_marker(marker: &str) -> bool {
-    marker
-        .split_once('#')
-        .is_some_and(|(owner, _)| is_throwable_owner(owner))
+    jar_object::marker_class(marker).is_some_and(is_throwable_owner)
 }
 
 /// The superclass of the JDK throwable types a mod catch block can name.
@@ -10379,6 +10377,9 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         "net/minecraft/IdentifierException" | "net/minecraft/ResourceLocationException" => {
             "java/lang/RuntimeException"
         }
+        // Mixin's, which a `cancel()` on a callback info that is not
+        // cancellable throws (sponge-mixin 0.17.5, `host_mixin.rs`).
+        host_mixin::CANCELLATION_EXCEPTION => "java/lang/RuntimeException",
         "java/lang/NumberFormatException"
         | "java/nio/charset/UnsupportedCharsetException"
         | "java/nio/charset/IllegalCharsetNameException" => "java/lang/IllegalArgumentException",
@@ -10463,12 +10464,10 @@ fn exception_is_subtype(
 /// marker whose owner is not a Throwable, keeps the opcode's own type rather
 /// than inventing a Java class or panicking.
 fn thrown_class(value: &Value) -> String {
-    let Some(marker) = expect_ref(value) else {
+    let Some(marker) = jar_object::instance_key(value) else {
         return "java/lang/Throwable".to_owned();
     };
-    let class = marker
-        .split_once('#')
-        .map_or(marker.as_str(), |(class, _)| class);
+    let class = jar_object::marker_class_or_text(marker);
     if is_throwable_owner(class) {
         class.to_owned()
     } else {
@@ -10481,7 +10480,7 @@ fn thrown_class(value: &Value) -> String {
 /// Only markers the host itself built through the bounded `Throwable`
 /// constructors are consulted; a non-Throwable value carries no message.
 fn thrown_message<H: Host>(value: &Value, host: &H) -> Option<String> {
-    let marker = expect_ref(value)?;
+    let marker = jar_object::instance_key(value)?;
     if !is_throwable_marker(marker) {
         return None;
     }
@@ -11085,9 +11084,7 @@ fn thrown_from_supplied(value: Value) -> NativeError {
             frame: None,
         },
         Value::Ref(Some(marker)) => {
-            let class = marker
-                .split_once('#')
-                .map_or(marker.as_str(), |(class, _)| class);
+            let class = jar_object::marker_class_or_text(marker);
             if class == "java/lang/Throwable"
                 || jdk_exception_superclass(class).is_some()
                 || class.starts_with("java/")
@@ -11581,7 +11578,7 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
         Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
             // An object no model prints (a jar object, an identity hash)
             // is counted; the element keeps its marker in the text.
-            if jar_text::object_marker_class(marker).is_some() {
+            if crate::runtime::jar_object::packaged_object_class(value).is_some() {
                 let _ = host.unknown_host_call(&jar_text::object_to_string());
             }
             marker.clone()
@@ -11591,7 +11588,7 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
 }
 
 fn instance_field_key(receiver: &Value, field: &MethodRef) -> Option<String> {
-    expect_ref(receiver).map(|receiver| {
+    jar_object::instance_key(receiver).map(|receiver| {
         format!(
             "{receiver}|{}#{}{}",
             field.owner, field.name, field.descriptor
@@ -16712,7 +16709,11 @@ impl NativeJar {
                 .is_some_and(|arg| is_callback_info_descriptor(arg))
             && callback_args[..target_args.len()] == target_args[..]
         {
-            callback_values.push(Value::Ref(Some(callback_info_marker(&plan.target))));
+            callback_values.push(host_mixin::callback_info(
+                &callback_info_marker(&plan.target),
+                &plan.callback,
+                plan.cancellable,
+            ));
         } else {
             return Err(NativeError::Metadata(format!(
                 "native Mixin callback {}#{}{} must mirror target arguments and may add one trailing CallbackInfo",
@@ -16920,10 +16921,18 @@ impl NativeJar {
             && callback_args.last().is_some_and(|arg| arg == info)
             && callback_args[..target_args.len()] == target_args[..]
         {
-            values.push(Value::Ref(Some(callback_info_marker(&entry.target))));
+            values.push(host_mixin::callback_info(
+                &callback_info_marker(&entry.target),
+                &entry.callback,
+                entry.cancellable,
+            ));
         } else if callback_args.len() == 1 && callback_args[0] == info && !target_args.is_empty() {
             // Mixin's simple callback: the info alone, none of the arguments.
-            values = vec![Value::Ref(Some(callback_info_marker(&entry.target)))];
+            values = vec![host_mixin::callback_info(
+                &callback_info_marker(&entry.target),
+                &entry.callback,
+                entry.cancellable,
+            )];
         } else if callback_args != target_args {
             return Err(NativeError::Metadata(format!(
                 "native game hook callback {}#{}{} must mirror {}'s arguments and may add one trailing CallbackInfo or CallbackInfoReturnable",
@@ -17150,7 +17159,11 @@ impl NativeJar {
                     .is_some_and(|arg| is_callback_info_descriptor(arg))
                 && callback_args[..target_args.len()] == target_args[..]
             {
-                callback_values.push(Value::Ref(Some(callback_info_marker(&plan.target))));
+                callback_values.push(host_mixin::callback_info(
+                    &callback_info_marker(&plan.target),
+                    &plan.callback,
+                    plan.cancellable,
+                ));
             } else {
                 return Err(NativeError::Metadata(format!(
                     "native Mixin callback {}#{}{} must mirror target arguments and may add one trailing CallbackInfo",
@@ -17308,7 +17321,11 @@ impl NativeJar {
                     .is_some_and(|arg| is_callback_info_descriptor(arg))
                 && callback_args[..target_args.len()] == target_args[..]
             {
-                callback_values.push(Value::Ref(Some(callback_info_marker(&plan.target))));
+                callback_values.push(host_mixin::callback_info(
+                    &callback_info_marker(&plan.target),
+                    &plan.callback,
+                    plan.cancellable,
+                ));
             } else {
                 return Err(NativeError::Metadata(format!(
                     "native Mixin callback {}#{}{} must mirror target arguments and may add one trailing CallbackInfo",
@@ -19162,30 +19179,42 @@ impl<H: Host> Runtime<'_, H> {
         if !is_callback_info_class(&r.owner) {
             return Ok(None);
         }
-        let owned = callback_info_receiver(receiver)?;
-        if !is_interpreter_callback_info(owned) {
+        let Some(value) = receiver else {
+            return Ok(None);
+        };
+        let Some(owned) = host_mixin::callback_info_key_of(value) else {
             // A woven class constructs the synthetic `CallbackInfo` itself, so
             // its own `cancelled` field is authoritative and the call runs
             // against the class.  Nothing here is table state, which is also
             // why a hot woven target does not spend the injection-point bound.
             return Ok(None);
-        }
+        };
         match (r.name.as_str(), r.descriptor.as_str()) {
+            // `setReturnValue` calls `cancel()` first: on a callback info
+            // that is not cancellable both throw Mixin's
+            // `CancellationException`, and the target's result stays.
+            ("cancel", "()V") | ("setReturnValue", "(Ljava/lang/Object;)V")
+                if host_mixin::callback_info_cancellable(value)
+                    .is_some_and(|(cancellable, _)| !cancellable) =>
+            {
+                let (_, name) = host_mixin::callback_info_cancellable(value).unwrap_or_default();
+                Err(host_mixin::not_cancellable(&name))
+            }
             ("cancel", "()V") => {
-                self.callback_infos.cancel(owned)?;
+                self.callback_infos.cancel(&owned)?;
                 Ok(Some(Value::Void))
             }
             ("isCancelled", "()Z") => {
-                let cancelled = self.callback_infos.flag(owned)?;
+                let cancelled = self.callback_infos.flag(&owned)?;
                 Ok(Some(Value::Int(i32::from(cancelled))))
             }
             ("setReturnValue", "(Ljava/lang/Object;)V") => {
                 self.callback_infos
-                    .set_return(owned, args.first().cloned().unwrap_or(Value::Ref(None)))?;
+                    .set_return(&owned, args.first().cloned().unwrap_or(Value::Ref(None)))?;
                 Ok(Some(Value::Void))
             }
             ("getReturnValue", "()Ljava/lang/Object;") => {
-                self.callback_infos.current(owned).map(Some)
+                self.callback_infos.current(&owned).map(Some)
             }
             _ => Ok(None),
         }
@@ -19541,6 +19570,7 @@ impl<H: Host> Runtime<'_, H> {
         expected_return: &str,
         base_args: &[Value],
         marker: &str,
+        cancellable: bool,
     ) -> Result<(bool, Vec<Value>), NativeError> {
         let callback_class = self.class(&callback.owner).ok_or_else(|| {
             NativeError::MissingMethod(format!(
@@ -19572,7 +19602,7 @@ impl<H: Host> Runtime<'_, H> {
                     .is_some_and(|arg| is_callback_info_descriptor(arg))
                 && callback_args[..base_descriptors.len()] == base_descriptors[..]
             {
-                values.push(Value::Ref(Some(marker.to_owned())));
+                values.push(host_mixin::callback_info(marker, callback, cancellable));
             } else {
                 return Err(NativeError::Metadata(format!(
                     "native Mixin anchor callback {}#{}{} must mirror the anchored operation's arguments and may add one trailing CallbackInfo",
@@ -19636,6 +19666,7 @@ impl<H: Host> Runtime<'_, H> {
                 &expected_return,
                 &call_args,
                 marker,
+                entry.cancellable,
             )?;
             let receiver = (!is_static).then(|| {
                 entry
@@ -20461,10 +20492,7 @@ impl<H: Host> Runtime<'_, H> {
 
     /// Whether `name` is `wanted` or a subclass (or implementor) of it.
     fn class_is_instance(&self, name: &str, wanted: &str) -> bool {
-        let mut current = name
-            .split_once('#')
-            .map_or(name, |(class, _)| class)
-            .to_owned();
+        let mut current = jar_object::marker_class_or_text(name).to_owned();
         for _ in 0..MAX_SUPERCLASS_WALK {
             if current == wanted {
                 return true;
@@ -21309,12 +21337,13 @@ impl<H: Host> Runtime<'_, H> {
             } else {
                 // An instance field lives under the receiver's marker, so the
                 // object `get`/`set` names must be one this invocation owns.
-                let target = expect_ref(StdHost::argument(r, args, 0)?).ok_or_else(|| {
-                    NativeError::Metadata(format!(
-                        "java/lang/reflect/Field.{0} needs an instance for {class}#{name}",
-                        r.name
-                    ))
-                })?;
+                let target =
+                    jar_object::instance_key(StdHost::argument(r, args, 0)?).ok_or_else(|| {
+                        NativeError::Metadata(format!(
+                            "java/lang/reflect/Field.{0} needs an instance for {class}#{name}",
+                            r.name
+                        ))
+                    })?;
                 format!("{target}|{class}#{name}{descriptor}")
             };
             return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
@@ -21709,8 +21738,8 @@ impl<H: Host> Runtime<'_, H> {
     /// The path of a `java.io.File` object, as `UnixFileSystem.normalize`
     /// kept it.
     pub(crate) fn file_path(&self, value: &Value) -> Option<&str> {
-        let marker = expect_ref(value)?;
-        (jar_text::object_marker_class(marker) == Some("java/io/File"))
+        let marker = crate::runtime::jar_object::object_key(value)?;
+        (crate::runtime::jar_object::packaged_key_class(marker) == Some("java/io/File"))
             .then(|| self.io_paths.get(marker).map(String::as_str))
             .flatten()
     }
@@ -23210,8 +23239,7 @@ impl<H: Host> Runtime<'_, H> {
         // overridden (nestmates reach one with `invokevirtual`).
         if matches!(opcode, 0xb6 | 0xb9)
             && symbolic.is_some_and(|method| method.access & 0x0002 == 0 && method.code.is_some())
-            && let Some(marker) = receiver.and_then(expect_ref)
-            && let Some((class, _)) = marker.split_once('#')
+            && let Some(class) = receiver.and_then(jar_object::value_marker_class)
             && class != r.owner
             && self.class_is_instance(class, &r.owner)
             && let Some((owner, true)) = self.member_owner(class, &r.name, &r.descriptor)
@@ -23234,7 +23262,11 @@ impl<H: Host> Runtime<'_, H> {
     /// `new` markers are `class#<n>`; a provider or bridge marker may already
     /// be a bare internal class name.
     fn receiver_class<'v>(&self, value: &'v Value) -> Option<&'v str> {
+        if let Some(class) = jar_object::object_class(value) {
+            return Some(class);
+        }
         let marker = expect_ref(value)?;
+        // A host model's own object (`java/util/ArrayList#neutral3`).
         if let Some((class, _)) = marker.split_once('#') {
             return Some(class);
         }
@@ -26206,39 +26238,21 @@ fn is_callback_info_class(owner: &str) -> bool {
     matches!(owner, CALLBACK_INFO_CLASS | CALLBACK_INFO_RETURNABLE_CLASS)
 }
 
-/// The marker naming the `CallbackInfo` one injection point hands to its
-/// callbacks.
+/// The callback-info table key of a target.
 ///
-/// Mixin creates one of these per injection point, so every callback on a
-/// target shares this identity: a `cancel()` in an earlier callback is visible
-/// to a later one and stops the target body.
+/// The runtime keeps the cancel and return state per target under this key:
+/// a `cancel()` in an earlier callback stops the target body, as Mixin's
+/// check after that injector does. The objects are Mixin's, one per
+/// `@Inject` (`CallbackInjector.callbackInfoVar`): each callback's handle
+/// names its injector, so two injectors' handles are two objects
+/// (`host_mixin::callback_info`). Mixin makes a `CallbackInfoReturnable` for
+/// a target with a result.
 fn callback_info_marker(target: &MethodRef) -> String {
-    format!("mixin/callback-info/{}#{}", target.owner, target.name)
-}
-
-/// The marker prefix of the `CallbackInfo` objects the interpreter opens per
-/// injection point.
-///
-/// A marker with this prefix is table state the interpreter owns; any other
-/// `CallbackInfo` receiver was constructed by woven bytecode, whose synthetic
-/// class keeps the `cancelled` field itself.
-const INTERPRETER_CALLBACK_INFO_PREFIX: &str = "mixin/callback-info/";
-
-fn is_interpreter_callback_info(marker: &str) -> bool {
-    marker.starts_with(INTERPRETER_CALLBACK_INFO_PREFIX)
-}
-
-/// The marker a `CallbackInfo` call acts on: the receiver value the plan passed
-/// as its trailing argument.
-fn callback_info_receiver(receiver: Option<&Value>) -> Result<&str, NativeError> {
-    receiver
-        .and_then(expect_ref)
-        .map(String::as_str)
-        .ok_or_else(|| {
-            NativeError::Metadata(
-                "native Mixin CallbackInfo call has no runtime-owned marker receiver".into(),
-            )
-        })
+    let returns = target
+        .descriptor
+        .rsplit_once(')')
+        .is_some_and(|(_, result)| result != "V");
+    host_mixin::callback_info_key(&target.owner, &target.name, returns)
 }
 
 fn neutral_args(desc: &str) -> Vec<Value> {
@@ -42399,18 +42413,15 @@ mandatory = true
             descriptor: "()I".into(),
         };
 
-        // The callback calls cancel() either way, but a non-cancellable plan
-        // ignores the flag and the call runs.
+        // The callback calls cancel() either way. On a plan that is not
+        // cancellable Mixin's `cancel()` throws `CancellationException`
+        // (`host_mixin::not_cancellable`): the woven method fails before the
+        // call, which never reaches the host.
         let plan = invoke_plan(site.clone(), false);
         let mut host = ValueHost { calls: 0 };
-        let report = jar
-            .execute_mixin_at_invoke(std::slice::from_ref(&plan), None, &[], &mut host)
-            .unwrap();
-        assert_eq!(report.target_result, Value::Int(42));
-        assert_eq!(host.calls, 1, "the call reaches the host");
-        assert!(!report.cancelled);
-        assert_eq!(report.matched_invoke_sites, 1);
-        assert_eq!(report.callback_results, vec![Value::Void]);
+        let failed = jar.execute_mixin_at_invoke(std::slice::from_ref(&plan), None, &[], &mut host);
+        assert!(failed.is_err(), "{failed:?}");
+        assert_eq!(host.calls, 0, "the call never reaches the host");
 
         // Cancellable: the call is suppressed and the descriptor's default
         // (0) takes its place, so the woven method answers 0.

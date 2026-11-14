@@ -25,7 +25,6 @@
 //! `toString` is bytecode this module does not run).
 
 use super::*;
-use crate::jvm_dispatch::constructed_object_class;
 
 const PAIR: &str = "org/apache/commons/lang3/tuple/Pair";
 const IMMUTABLE_PAIR: &str = "org/apache/commons/lang3/tuple/ImmutablePair";
@@ -126,9 +125,7 @@ impl<H: Host> Runtime<'_, H> {
             ("toString", "()Ljava/lang/String;") => {
                 let mut parts = Vec::with_capacity(2);
                 for part in [&left, &right] {
-                    if expect_ref(part)
-                        .is_some_and(|marker| constructed_object_class(marker).is_some())
-                    {
+                    if crate::jar_object::object_class(part).is_some() {
                         return self.host.unknown_operand_call(r).map(Some);
                     }
                     parts.push(match part {

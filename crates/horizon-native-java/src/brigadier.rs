@@ -702,6 +702,9 @@ impl BrigadierState {
         {
             return kind.clone();
         }
+        if let Some(class) = crate::jar_object::object_class(value) {
+            return ArgumentKind::Unmodelled(class.to_owned());
+        }
         let text = expect_string(value);
         ArgumentKind::Unmodelled(match text.split_once('#') {
             Some((class, _)) => class.to_owned(),
@@ -2034,9 +2037,14 @@ impl NativeJar {
         host: &mut StdHost,
         budget: &ExecutionBudget,
     ) -> Result<Value, NativeError> {
-        let text = expect_ref(callback)
-            .ok_or_else(|| NativeError::Metadata(format!("a null {method} callback was called")))?;
-        if text.starts_with("@indy:") {
+        if *callback == Value::Ref(None) {
+            return Err(NativeError::Metadata(format!(
+                "a null {method} callback was called"
+            )));
+        }
+        if let Some(text) = expect_ref(callback)
+            && text.starts_with("@indy:")
+        {
             let parsed = parse_callback_marker(text)?;
             let (target, mut captures) =
                 self.command_callback_target(parsed.target, parsed.captures);
@@ -2072,7 +2080,7 @@ impl NativeJar {
             }
             return self.invoke_persistent(&target, receiver, &captures, host, budget);
         }
-        if let Some((class, _)) = text.split_once('#')
+        if let Some(class) = crate::jar_object::object_class(callback)
             && self.classes.contains_key(class)
         {
             let mut current = class.to_owned();
@@ -2098,7 +2106,8 @@ impl NativeJar {
             }
         }
         Err(NativeError::Metadata(format!(
-            "{method} callback {text} is not a lambda or object of this jar"
+            "{method} callback {} is not a lambda or object of this jar",
+            crate::describe_value(callback)
         )))
     }
 

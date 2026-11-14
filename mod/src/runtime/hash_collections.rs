@@ -128,7 +128,7 @@ impl<H: Host> Runtime<'_, H> {
         let mut class = class.to_owned();
         let mut kind = table_kind_of(&class);
         if kind.is_none() {
-            jvm_dispatch::constructed_object_class(marker)?;
+            crate::runtime::jar_object::key_class(marker)?;
             for _ in 0..MAX_SUPERCLASS_WALK {
                 match self.class(&class) {
                     Some(file) => class = file.super_name.clone(),
