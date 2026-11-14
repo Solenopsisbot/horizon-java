@@ -434,6 +434,12 @@ pub enum HostKind {
     RegexPattern,
     /// NeoForge's `ArtifactVersion`: key its text.
     ArtifactVersion,
+    /// `java.util.UUID`: key its canonical text (`host_jdk_value.rs`).
+    Uuid,
+    /// `java.time.Duration`: key its nanoseconds (`host_jdk_value.rs`).
+    Duration,
+    /// `java.net.URI`: key its text (`host_jdk_value.rs`).
+    Uri,
 }
 
 /// How a kind's Java class follows from its key.
@@ -495,6 +501,13 @@ pub(crate) trait Nested {
     /// `host_component.rs`); `None` where this context cannot read the
     /// host's table (the caller counts).
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
+    /// The `(msb, lsb)` of a jar's `new UUID(msb, lsb)` object
+    /// (`host_jdk_value.rs`); `None` where this context cannot read the
+    /// host's table or the object is no constructed UUID (the caller counts).
+    fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
         let _ = value;
         None
     }
@@ -1756,6 +1769,29 @@ const KINDS: &[KindInfo] = &[
         // A mod's version object; another with the same text may be another object.
         canonical: never_canonical,
         methods: &crate::host_jdk_constant::ARTIFACT_VERSION_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Uuid,
+        tag: "uuid",
+        class: ClassRule::Fixed("java/util/UUID"),
+        // Each `fromString`/`randomUUID` is a new object.
+        canonical: never_canonical,
+        methods: &crate::host_jdk_value::UUID_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Duration,
+        tag: "dur",
+        class: ClassRule::Fixed("java/time/Duration"),
+        // Every zero duration is `Duration.ZERO`.
+        canonical: crate::host_jdk_value::duration_canonical,
+        methods: &crate::host_jdk_value::DURATION_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Uri,
+        tag: "uri",
+        class: ClassRule::Fixed("java/net/URI"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk_value::URI_METHODS,
     },
 ];
 

@@ -87,6 +87,7 @@ mod host_ids;
 mod host_invoke;
 mod host_jdk;
 mod host_jdk_constant;
+mod host_jdk_value;
 mod host_list_iterator;
 mod host_mixin;
 mod host_neoforge_loader;
@@ -2317,6 +2318,12 @@ pub trait Host {
         None
     }
 
+    /// The `(msb, lsb)` of a `new UUID(msb, lsb)` object this host saw
+    /// constructed (`host_jdk_value.rs`), `None` for any other value.
+    fn constructed_uuid(&self, _value: &Value) -> Option<(i64, i64)> {
+        None
+    }
+
     /// The current elements of a mutable collection marker, when the host
     /// keeps one. Interpreter helpers that need a collection's contents run
     /// through the generic `Host` boundary, so the table is exposed here
@@ -2980,6 +2987,9 @@ pub struct StdHost {
     /// keyed by its object marker. The static constants (`Locale.US`) need no
     /// row: their marker already spells the pair.
     locales: BTreeMap<String, (String, String)>,
+    /// The two halves of every `new UUID(msb, lsb)` a jar constructed, keyed
+    /// by its object key (`host_jdk_value.rs`).
+    constructed_uuids: BTreeMap<String, (i64, i64)>,
     /// The server levels this invocation has heard about, in the order the
     /// firings named them ([`events::StdHost::note_firing_levels`]).
     levels: Vec<events::FacadeLevel>,
@@ -3137,6 +3147,7 @@ impl StdHost {
             view_copies: BTreeMap::new(),
             view_kinds: BTreeMap::new(),
             locales: BTreeMap::new(),
+            constructed_uuids: BTreeMap::new(),
             levels: Vec::new(),
             references: BTreeMap::new(),
             iterators: BTreeMap::new(),
@@ -4302,48 +4313,49 @@ impl StdHost {
             )
         };
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
-            ("toNanos", "()J") => saturating_long(nanos),
-            ("toMillis", "()J") => saturating_long(nanos / 1_000_000),
-            ("toSeconds", "()J") => saturating_long(nanos / 1_000_000_000),
-            ("toMinutes", "()J") => saturating_long(nanos / 60_000_000_000),
-            ("toHours", "()J") => saturating_long(nanos / 3_600_000_000_000),
-            ("toDays", "()J") => saturating_long(nanos / 86_400_000_000_000),
-            ("getSeconds", "()J") => saturating_long(duration_seconds_nanos(nanos).0),
+            // `toNanos`/`toMillis` throw past a `long` (`multiplyExact`/`addExact`), the
+            // millis truncated toward zero; `toSeconds` is `getSeconds` (the floor), and
+            // `toMinutes`/`toHours`/`toDays` divide those seconds, truncating.
+            ("toNanos", "()J") => long_or_overflow(nanos)?,
+            ("toMillis", "()J") => long_or_overflow(nanos / 1_000_000)?,
+            ("toSeconds" | "getSeconds", "()J") => {
+                Value::Long(duration_seconds_nanos(nanos).0 as i64)
+            }
+            ("toMinutes", "()J") => Value::Long(duration_seconds_nanos(nanos).0 as i64 / 60),
+            ("toHours", "()J") => Value::Long(duration_seconds_nanos(nanos).0 as i64 / 3_600),
+            ("toDays", "()J") => Value::Long(duration_seconds_nanos(nanos).0 as i64 / 86_400),
             ("getNano", "()I") => Value::Int(duration_seconds_nanos(nanos).1 as i32),
             ("isNegative", "()Z") => Value::Int(i32::from(nanos < 0)),
             ("isZero", "()Z") => Value::Int(i32::from(nanos == 0)),
-            ("negated", "()Ljava/time/Duration;") => duration_value(-nanos),
-            ("abs", "()Ljava/time/Duration;") => duration_value(nanos.abs()),
+            // `negated`/`abs` are `multipliedBy(-1)`: past the range, its BigDecimal
+            // `create` throws "Exceeds capacity of Duration: <nanos>".
+            ("negated", "()Ljava/time/Duration;") => duration_in_range(-nanos, EXCEEDS_CAPACITY)?,
+            ("abs", "()Ljava/time/Duration;") => duration_in_range(nanos.abs(), EXCEEDS_CAPACITY)?,
             ("plus", "(Ljava/time/Duration;)Ljava/time/Duration;") => {
-                duration_value(nanos + other()?)
+                duration_in_range(nanos + other()?, LONG_OVERFLOW)?
             }
             ("minus", "(Ljava/time/Duration;)Ljava/time/Duration;") => {
-                duration_value(nanos - other()?)
+                duration_in_range(nanos - other()?, LONG_OVERFLOW)?
             }
-            ("multipliedBy", "(J)Ljava/time/Duration;") => duration_value(
-                nanos.saturating_mul(i128::from(expect_long(r, Self::argument(r, args, 0)?)?)),
-            ),
+            ("multipliedBy", "(J)Ljava/time/Duration;") => {
+                let factor = i128::from(expect_long(r, Self::argument(r, args, 0)?)?);
+                // Past an `i128` the nanos are far past the range, but the message
+                // spells them: counted.
+                let Some(product) = nanos.checked_mul(factor) else {
+                    return Ok(None);
+                };
+                duration_in_range(product, EXCEEDS_CAPACITY)?
+            }
             ("dividedBy", "(J)Ljava/time/Duration;") => {
                 let divisor = expect_long(r, Self::argument(r, args, 0)?)?;
                 if divisor == 0 {
-                    return Err(NativeError::UncaughtException {
-                        class: "java/lang/ArithmeticException".into(),
-                        message: Some("/ by zero".into()),
-                        frame: None,
-                    });
+                    return Err(arithmetic("Cannot divide by zero".into()));
                 }
-                duration_value(nanos / i128::from(divisor))
+                // `BigDecimal.divide(.., RoundingMode.DOWN)`: toward zero.
+                duration_in_range(nanos / i128::from(divisor), EXCEEDS_CAPACITY)?
             }
-            ("compareTo", "(Ljava/time/Duration;)I") => Value::Int(match nanos.cmp(&other()?) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            }),
-            ("equals", "(Ljava/lang/Object;)Z") => Value::Int(i32::from(
-                duration_nanos(Self::argument(r, args, 0)?) == Some(nanos),
-            )),
-            ("hashCode", "()I") => Value::Int(stable_hash(&format!("duration/{nanos}"))),
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(duration_text(nanos))),
+            // `equals`/`hashCode`/`compareTo`/`toString` are the kind's row
+            // (`host_jdk_value.rs`).
             _ => return Ok(None),
         }))
     }
@@ -4400,34 +4412,39 @@ impl StdHost {
     ///
     /// `URI.create` keeps the text in the marker (`uri/<text>`), so the
     /// accessors split that text rather than needing a live URI object.
+    /// `java.net.URI`'s accessors from its components (`host_jdk_value::uri_parts`). The
+    /// decoded getters answer only where the component holds no escape (decoding is not
+    /// modelled), `toASCIIString` only for ASCII text; anything else is counted.
     fn uri_call(&self, r: &MethodRef, receiver: &Value) -> Option<Value> {
         if r.owner != "java/net/URI" {
             return None;
         }
-        let text = expect_ref(receiver)?.strip_prefix("uri/")?;
-        let (scheme, rest) = text.split_once("://").unwrap_or(("", text));
-        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-        let host = authority
-            .rsplit_once('@')
-            .map_or(authority, |(_, host)| host);
-        let host = host.split_once(':').map_or(host, |(host, _)| host);
+        let text = host_jdk_value::uri_text(receiver)?;
+        let parts = host_jdk_value::uri_parts(text)?;
+        let text_value = |text: Option<&str>| Value::Ref(text.map(str::to_owned));
+        // A decoded getter: the raw text when it has no escape to decode.
+        let decoded = |raw: Option<&str>| match raw {
+            Some(raw) if raw.contains('%') => None,
+            raw => Some(text_value(raw)),
+        };
         Some(match (r.name.as_str(), r.descriptor.as_str()) {
-            ("toString", "()Ljava/lang/String;") | ("toASCIIString", "()Ljava/lang/String;") => {
-                Value::Ref(Some(text.to_owned()))
-            }
-            ("getScheme", "()Ljava/lang/String;") if !scheme.is_empty() => {
-                Value::Ref(Some(scheme.to_owned()))
-            }
-            ("getHost", "()Ljava/lang/String;") if !host.is_empty() => {
-                Value::Ref(Some(host.to_owned()))
-            }
-            ("getAuthority", "()Ljava/lang/String;") if !authority.is_empty() => {
-                Value::Ref(Some(authority.to_owned()))
-            }
-            ("getPath", "()Ljava/lang/String;") if !path.is_empty() => {
-                Value::Ref(Some(format!("/{path}")))
-            }
-            ("isAbsolute", "()Z") => Value::Int(i32::from(!scheme.is_empty())),
+            ("toString", "()Ljava/lang/String;") => text_value(Some(text)),
+            ("toASCIIString", "()Ljava/lang/String;") if text.is_ascii() => text_value(Some(text)),
+            ("getScheme", "()Ljava/lang/String;") => text_value(parts.scheme),
+            ("getHost", "()Ljava/lang/String;") => text_value(parts.host),
+            ("getPort", "()I") => Value::Int(parts.port),
+            ("getRawAuthority", "()Ljava/lang/String;") => text_value(parts.authority),
+            ("getRawUserInfo", "()Ljava/lang/String;") => text_value(parts.user_info),
+            ("getRawPath", "()Ljava/lang/String;") => text_value(parts.path),
+            ("getRawQuery", "()Ljava/lang/String;") => text_value(parts.query),
+            ("getRawFragment", "()Ljava/lang/String;") => text_value(parts.fragment),
+            ("getAuthority", "()Ljava/lang/String;") => decoded(parts.authority)?,
+            ("getUserInfo", "()Ljava/lang/String;") => decoded(parts.user_info)?,
+            ("getPath", "()Ljava/lang/String;") => decoded(parts.path)?,
+            ("getQuery", "()Ljava/lang/String;") => decoded(parts.query)?,
+            ("getFragment", "()Ljava/lang/String;") => decoded(parts.fragment)?,
+            ("isAbsolute", "()Z") => Value::Int(i32::from(parts.scheme.is_some())),
+            ("isOpaque", "()Z") => Value::Int(i32::from(parts.opaque)),
             _ => return None,
         })
     }
@@ -4901,6 +4918,12 @@ impl Host for StdHost {
 
     fn modelled_to_string(&mut self, value: &Value) -> Option<String> {
         crate::java_tostring::modelled(self, value)
+    }
+
+    fn constructed_uuid(&self, value: &Value) -> Option<(i64, i64)> {
+        self.constructed_uuids
+            .get(jar_object::object_key(value)?)
+            .copied()
     }
 
     // No host marker answers `instanceof` any more: the command surface
@@ -6128,11 +6151,14 @@ impl Host for StdHost {
             // `URI.create`/`URI.parse` keep the text in the marker: a mod's
             // null-check on the result must not see null just because the
             // loader it came from is not modelled.
+            // Text `URI` refuses (its message names the component) or this model does
+            // not parse exactly is counted (`host_jdk_value::uri_parts`).
             ("java/net/URI", "create" | "parse", "(Ljava/lang/String;)Ljava/net/URI;") => {
-                Ok(Value::Ref(Some(format!(
-                    "uri/{}",
-                    expect_string(Self::argument(r, args, 0)?)
-                ))))
+                let text = expect_string(Self::argument(r, args, 0)?);
+                if host_jdk_value::uri_parts(text).is_none() {
+                    return self.unknown_host_call(r);
+                }
+                Ok(host_jdk_value::uri(text))
             }
             ("java/lang/System", "getProperty", "(Ljava/lang/String;)Ljava/lang/String;") => {
                 let key = match Self::argument(r, args, 0)? {
@@ -6297,28 +6323,29 @@ impl Host for StdHost {
             // `Duration` factories: configs and timeouts read across the
             // loader surface construct them during `<clinit>`, so a null here
             // makes a mod's own null-check throw before it does anything.
-            ("java/time/Duration", "ofNanos", "(J)Ljava/time/Duration;") => Ok(duration_value(
-                i128::from(expect_long(r, Self::argument(r, args, 0)?)?),
-            )),
-            ("java/time/Duration", "ofMillis", "(J)Ljava/time/Duration;") => Ok(duration_value(
-                i128::from(expect_long(r, Self::argument(r, args, 0)?)?) * 1_000_000,
-            )),
-            ("java/time/Duration", "ofSeconds", "(J)Ljava/time/Duration;") => Ok(duration_value(
-                i128::from(expect_long(r, Self::argument(r, args, 0)?)?) * 1_000_000_000,
-            )),
-            ("java/time/Duration", "ofSeconds", "(JJ)Ljava/time/Duration;") => Ok(duration_value(
+            // `Duration`'s seconds are a `long`: a factory past that range throws
+            // `multiplyExact`'s/`addExact`'s "long overflow" (`ofMillis`/`ofNanos` cannot).
+            (
+                "java/time/Duration",
+                "ofNanos" | "ofMillis" | "ofSeconds" | "ofMinutes" | "ofHours" | "ofDays",
+                "(J)Ljava/time/Duration;",
+            ) => {
+                let unit: i128 = match r.name.as_str() {
+                    "ofNanos" => 1,
+                    "ofMillis" => 1_000_000,
+                    "ofSeconds" => 1_000_000_000,
+                    "ofMinutes" => 60_000_000_000,
+                    "ofHours" => 3_600_000_000_000,
+                    _ => 86_400_000_000_000,
+                };
+                let amount = i128::from(expect_long(r, Self::argument(r, args, 0)?)?);
+                duration_in_range(amount * unit, LONG_OVERFLOW)
+            }
+            ("java/time/Duration", "ofSeconds", "(JJ)Ljava/time/Duration;") => duration_in_range(
                 i128::from(expect_long(r, Self::argument(r, args, 0)?)?) * 1_000_000_000
                     + i128::from(expect_long(r, Self::argument(r, args, 1)?)?),
-            )),
-            ("java/time/Duration", "ofMinutes", "(J)Ljava/time/Duration;") => Ok(duration_value(
-                i128::from(expect_long(r, Self::argument(r, args, 0)?)?) * 60_000_000_000,
-            )),
-            ("java/time/Duration", "ofHours", "(J)Ljava/time/Duration;") => Ok(duration_value(
-                i128::from(expect_long(r, Self::argument(r, args, 0)?)?) * 3_600_000_000_000,
-            )),
-            ("java/time/Duration", "ofDays", "(J)Ljava/time/Duration;") => Ok(duration_value(
-                i128::from(expect_long(r, Self::argument(r, args, 0)?)?) * 86_400_000_000_000,
-            )),
+                LONG_OVERFLOW,
+            ),
             // A Fabric API singleton answers `getInstance()` with itself. The
             // bounded host keeps that handle opaque: its client registries are
             // not live game state, but a null would make every mod that gates
@@ -6358,6 +6385,22 @@ impl Host for StdHost {
             ) || r.name == "compareTo" && object_methods::is_compare_to(&r.descriptor))
         {
             return self.host_object_method(r, receiver, args);
+        }
+        // `new UUID(msb, lsb)` and a UUID's fields (`host_jdk_value.rs`).
+        if let Some(answer) = self.uuid_member(r, receiver, args) {
+            return answer;
+        }
+        // A jar's `new URI(text)` is a JDK object no model reads: building it from text
+        // `URI` accepts has no effect to answer, and every member is counted, never its
+        // key (`host_jdk_value.rs`; `URI.create` is the modelled handle).
+        if r.owner == "java/net/URI" && jar_object::object_class(receiver) == Some("java/net/URI") {
+            if let ("<init>", "(Ljava/lang/String;)V", [Value::Ref(Some(text))]) =
+                (r.name.as_str(), r.descriptor.as_str(), args)
+                && host_jdk_value::uri_parts(text).is_some()
+            {
+                return Ok(Value::Void);
+            }
+            return self.unknown_host_call(r);
         }
         if let Some(value) = self.guava_text(r, Some(receiver), args) {
             return value;
@@ -8921,21 +8964,6 @@ impl Host for StdHost {
                     None => self.unknown_host_call(r),
                 }
             }
-            ("java/util/UUID", "toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
-                uuid_text(receiver)
-                    .ok_or_else(|| NativeError::Metadata("malformed UUID marker".into()))?
-                    .to_owned(),
-            ))),
-            ("java/util/UUID", "equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(
-                (uuid_text(receiver).is_some()
-                    && uuid_text(Self::argument(r, args, 0)?)
-                        .is_some_and(|other| uuid_text(receiver) == Some(other)))
-                    as i32,
-            )),
-            ("java/util/UUID", "hashCode", "()I") => Ok(Value::Int(stable_hash(
-                uuid_text(receiver)
-                    .ok_or_else(|| NativeError::Metadata("malformed UUID marker".into()))?,
-            ))),
             // A handle's `toString`/`hashCode`/`equals` are its kind's row in the
             // kind table (`host_ref.rs`), whatever class the call names.
             // A host `null` typed as an optional reads as the empty one.
@@ -9598,7 +9626,6 @@ impl Host for StdHost {
                 "()Ljava/lang/String;",
             ) => {
                 let value = expect_string(receiver);
-                let value = value.strip_prefix("version/").unwrap_or(value);
                 Ok(Value::Ref(Some(
                     value.rsplit('/').next().unwrap_or(value).to_owned(),
                 )))
@@ -10327,11 +10354,11 @@ fn is_event_bus_owner(owner: &str) -> bool {
 /// `ArithmeticException`, which is the same bounded compromise the host makes
 /// for other fixed-width conversions.
 fn duration_value(nanos: i128) -> Value {
-    Value::Ref(Some(format!("duration/{nanos}")))
+    host_jdk_value::duration(nanos)
 }
 
 fn duration_nanos(value: &Value) -> Option<i128> {
-    expect_ref(value)?.strip_prefix("duration/")?.parse().ok()
+    host_jdk_value::duration_nanos(value)
 }
 
 fn duration_seconds_nanos(nanos: i128) -> (i128, i128) {
@@ -10339,33 +10366,90 @@ fn duration_seconds_nanos(nanos: i128) -> (i128, i128) {
     (seconds, nanos.rem_euclid(1_000_000_000))
 }
 
-/// `java.time.Duration#toString` for the marker's exact value: hours, minutes
-/// and seconds with the fractional part only when it is non-zero.
-fn duration_text(nanos: i128) -> String {
-    if nanos == 0 {
-        return "PT0S".to_owned();
+/// `Duration.toString()` (Java 25): `PT` and the hours, minutes and seconds of the duration's
+/// seconds (one less for a negative duration with nanos), the nanos as a fraction with trailing
+/// zeros dropped, so `ofSeconds(-1, 500_000_000)` is `PT-0.5S`.
+fn duration_text(total: i128) -> String {
+    let seconds = total.div_euclid(1_000_000_000) as i64;
+    let nanos = total.rem_euclid(1_000_000_000) as i64;
+    if seconds == 0 && nanos == 0 {
+        return "PT0S".into();
     }
-    let sign = if nanos < 0 { "-" } else { "" };
-    let (seconds, fraction) = duration_seconds_nanos(nanos.abs());
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let seconds = seconds % 60;
-    let mut text = format!("{sign}PT");
+    let effective = if seconds < 0 && nanos > 0 {
+        seconds + 1
+    } else {
+        seconds
+    };
+    let hours = effective / 3600;
+    let minutes = (effective % 3600) / 60;
+    let secs = effective % 60;
+    let mut text = String::from("PT");
     if hours != 0 {
         text.push_str(&format!("{hours}H"));
     }
     if minutes != 0 {
         text.push_str(&format!("{minutes}M"));
     }
-    if seconds != 0 || fraction != 0 {
-        if fraction == 0 {
-            text.push_str(&format!("{seconds}S"));
-        } else {
-            let fraction = format!("{fraction:09}").trim_end_matches('0').to_owned();
-            text.push_str(&format!("{seconds}.{fraction}S"));
-        }
+    if secs == 0 && nanos == 0 && text.len() > 2 {
+        return text;
     }
+    if seconds < 0 && nanos > 0 && secs == 0 {
+        text.push_str("-0");
+    } else {
+        text.push_str(&secs.to_string());
+    }
+    if nanos > 0 {
+        let fraction = if seconds < 0 {
+            2 * 1_000_000_000 - nanos
+        } else {
+            nanos + 1_000_000_000
+        };
+        let fraction = fraction.to_string();
+        let fraction = fraction.trim_end_matches('0');
+        // The leading digit stands for the point.
+        text.push('.');
+        text.push_str(&fraction[1..]);
+    }
+    text.push('S');
     text
+}
+
+/// How a `Duration` operation reports a result past its `long` seconds.
+#[derive(Clone, Copy)]
+enum DurationOverflow {
+    /// `Math.multiplyExact`/`addExact`: "long overflow".
+    Long,
+    /// `Duration.create(BigDecimal)`: "Exceeds capacity of Duration: <nanos>".
+    Capacity,
+}
+use DurationOverflow::{Capacity as EXCEEDS_CAPACITY, Long as LONG_OVERFLOW};
+
+fn arithmetic(message: String) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/ArithmeticException".into(),
+        message: Some(message),
+        frame: None,
+    }
+}
+
+/// The `Duration` of `nanos`, or the `ArithmeticException` Java throws when its seconds
+/// (the floor) are past a `long`.
+fn duration_in_range(nanos: i128, overflow: DurationOverflow) -> Result<Value, NativeError> {
+    let seconds = nanos.div_euclid(1_000_000_000);
+    if seconds < i128::from(i64::MIN) || seconds > i128::from(i64::MAX) {
+        return Err(arithmetic(match overflow {
+            DurationOverflow::Long => "long overflow".into(),
+            DurationOverflow::Capacity => format!("Exceeds capacity of Duration: {nanos}"),
+        }));
+    }
+    Ok(duration_value(nanos))
+}
+
+/// `value` as a `long`, or `multiplyExact`'s "long overflow".
+fn long_or_overflow(value: i128) -> Result<Value, NativeError> {
+    i64::try_from(value)
+        .map(Value::Long)
+        .map_err(|_| arithmetic("long overflow".into()))
 }
 
 fn saturating_long(value: i128) -> Value {
@@ -10406,12 +10490,7 @@ fn random_uuid() -> String {
 }
 
 fn uuid_value(text: &str) -> Result<Value, NativeError> {
-    let canonical = canonical_uuid(text)?;
-    Ok(Value::Ref(Some(format!("uuid/{canonical}"))))
-}
-
-fn uuid_text(value: &Value) -> Option<&str> {
-    expect_ref(value)?.strip_prefix("uuid/")
+    Ok(host_jdk_value::uuid(&canonical_uuid(text)?))
 }
 
 fn canonical_uuid(text: &str) -> Result<String, NativeError> {
@@ -10423,11 +10502,32 @@ fn canonical_uuid(text: &str) -> Result<String, NativeError> {
             .enumerate()
             .any(|(index, byte)| ![8, 13, 18, 23].contains(&index) && !byte.is_ascii_hexdigit())
     {
-        return Err(NativeError::Metadata(format!(
-            "invalid UUID string {text:?}"
-        )));
+        return legacy_uuid(text)
+            .ok_or_else(|| NativeError::Metadata(format!("invalid UUID string {text:?}")));
     }
     Ok(text.to_ascii_lowercase())
+}
+
+/// `UUID.fromString1` (Java 25), the form other than the canonical 36 characters: five
+/// dash-separated hex fields of any width, each `Long.parseLong(.., 16)` masked to its field
+/// (`1-2-3-4-5` is `00000001-0002-0003-0004-000000000005`). `None` where Java throws, or a
+/// field has a sign this model does not read.
+fn legacy_uuid(text: &str) -> Option<String> {
+    let fields: Vec<&str> = text.split('-').collect();
+    if text.len() > 36 || fields.len() != 5 {
+        return None;
+    }
+    let mut values = [0_i64; 5];
+    for (value, field) in values.iter_mut().zip(&fields) {
+        if field.is_empty() || !field.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        *value = i64::from_str_radix(field, 16).ok()?;
+    }
+    let msb =
+        ((values[0] & 0xffff_ffff) << 32) | ((values[1] & 0xffff) << 16) | (values[2] & 0xffff);
+    let lsb = ((values[3] & 0xffff) << 48) | (values[4] & 0xffff_ffff_ffff);
+    Some(host_jdk_value::uuid_text_of(msb, lsb))
 }
 
 fn enum_name(value: &Value) -> &str {
@@ -11032,6 +11132,10 @@ impl host_ref::Nested for HostNested<'_> {
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
         let host = self.0.as_deref()?;
         facade_text::json_now(value, Some(&host.component_states))
+    }
+
+    fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
+        self.0.as_deref()?.constructed_uuid(value)
     }
 }
 
@@ -33840,12 +33944,26 @@ mandatory = true
                     descriptor: "(Ljava/lang/Object;)Z".into(),
                 },
                 &uuid,
+                &[host_jdk_value::uuid("550e8400-e29b-41d4-a716-446655440000")],
+            )
+            .unwrap(),
+            Value::Int(1)
+        );
+        // A String spelled like the old marker is no UUID.
+        assert_eq!(
+            host.invoke_instance(
+                &MethodRef {
+                    owner: "java/util/UUID".into(),
+                    name: "equals".into(),
+                    descriptor: "(Ljava/lang/Object;)Z".into(),
+                },
+                &uuid,
                 &[Value::Ref(Some(
                     "uuid/550e8400-e29b-41d4-a716-446655440000".into(),
                 ))],
             )
             .unwrap(),
-            Value::Int(1)
+            Value::Int(0)
         );
         let random = host
             .invoke(
@@ -33870,10 +33988,7 @@ mandatory = true
             .unwrap(),
             {
                 // A distinct version-4 UUID per call, as `UUID.randomUUID`.
-                let text = expect_string(&random)
-                    .strip_prefix("uuid/")
-                    .unwrap()
-                    .to_owned();
+                let text = host_jdk_value::uuid_text(&random).unwrap().to_owned();
                 assert_eq!((text.len(), &text[14..15]), (36, "4"));
                 assert!("89ab".contains(&text[19..20]));
                 Value::Ref(Some(text))
