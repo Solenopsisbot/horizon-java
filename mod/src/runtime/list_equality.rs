@@ -124,19 +124,22 @@ impl<H: Host> Runtime<'_, H> {
             "java/util/ArrayList" => ARRAY_LIST,
             "java/util/LinkedList" | "java/util/Vector" | "java/util/Stack" => ABSTRACT_LIST,
             "java/util/concurrent/CopyOnWriteArrayList" => COPY_ON_WRITE,
-            "java/util/ImmutableCollections$ListN" => {
-                // The host reports this class for every unmodifiable list
-                // that owns its elements, but only `List.of`/`List.copyOf`
-                // build the JDK's null-hostile `List12`/`ListN`.
-                // `Collections.emptyList`/`singletonList` (and Guava's
-                // `ImmutableList`) look `null` up like `AbstractList`:
-                // `Collections.emptyList().contains(null)` is `false` on
-                // JDK 25.
+            // The unmodifiable lists that own their elements, each the class
+            // Java makes (`java_immutable.rs`). Only `List.of`/`List.copyOf`
+            // build the JDK's null-hostile `List12`/`ListN`;
+            // `Collections.emptyList`/`singletonList`, Guava's
+            // `ImmutableList` and `Stream.toList()`'s nulls-allowed `ListN`
+            // look `null` up like `AbstractList`:
+            // `Collections.emptyList().contains(null)` is `false` on JDK 25.
+            "java/util/ImmutableCollections$ListN"
+            | "java/util/ImmutableCollections$List12"
+            | "java/util/Collections$EmptyList"
+            | "java/util/Collections$SingletonList"
+            | "com/google/common/collect/RegularImmutableList"
+            | "com/google/common/collect/SingletonImmutableList" => {
                 let rules = if !self.host.is_jdk_list_of(marker) {
                     ABSTRACT_LIST
-                } else if (1..=2).contains(&self.host.mutable_collection_values(value)?.len()) {
-                    // `List.of`/`copyOf` build a `List12` for one or two
-                    // elements.
+                } else if class == "java/util/ImmutableCollections$List12" {
                     LIST_12
                 } else {
                     LIST_N
