@@ -1512,9 +1512,10 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::host_codec::opaque_codec_types,
         },
-        // The key is the declared type alone: two handles prove nothing.
-        canonical: never_canonical,
-        methods: &crate::host_events::DECLARED_TYPE_METHODS,
+        // A static field's codec is one object; a method result's key is its
+        // declared type alone, and two such handles prove nothing.
+        canonical: crate::host_codec::opaque_canonical,
+        methods: &crate::host_codec::OPAQUE_CODEC_METHODS,
     },
     KindInfo {
         kind: HostKind::ModelledCodec,

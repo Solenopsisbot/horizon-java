@@ -3,6 +3,7 @@ package demo;
 import com.mojang.datafixers.kinds.App;
 import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
+import net.minecraft.network.codec.ByteBufCodecs;
 import java.util.*;
 
 /** DataFixerUpper's Pair and the game's codecs as host objects (#156 P5c). */
@@ -63,6 +64,37 @@ public final class HostCodecs {
   /** A pair of an identity-hashed object: its hash and text are counted. */
   public static String identityHeld() {
     return "" + Pair.of(new Object(), 1).hashCode();
+  }
+
+  /** A library's codec constants are one object each (#199 F2). */
+  public static String codecConstants() {
+    Object s = Codec.STRING;
+    Set<Object> set = new HashSet<>();
+    return "" + (s == Codec.STRING) + (s == Codec.INT) + (ByteBufCodecs.INT == ByteBufCodecs.INT)
+        + (ByteBufCodecs.INT == ByteBufCodecs.VAR_INT) + s.equals(Codec.STRING) + s.equals(Codec.INT)
+        + identities(s, Codec.STRING, Codec.INT) + List.of(s).contains(Codec.STRING)
+        + new ArrayList<>(List.of(Codec.INT, s)).indexOf(Codec.STRING) + set.add(Codec.BOOL) + set.add(Codec.BOOL)
+        + set.size() + set.contains(Codec.BOOL);
+  }
+
+  /** `Set.of` refuses one constant twice, printing it (DataFixerUpper's `toString`). */
+  public static String codecDuplicate() {
+    try {
+      return "" + Set.of(Codec.STRING, Codec.STRING).size();
+    } catch (IllegalArgumentException x) {
+      return x.getMessage();
+    }
+  }
+
+  public static String codecText() {
+    return Codec.STRING + "|" + Codec.INT + "|" + Codec.BOOL;
+  }
+
+  /** A pair is never equal to an object that is not a pair (#199 F4). */
+  public static String pairVsJdk() {
+    Pair<Integer, String> p = Pair.of(1, "a");
+    return "" + p.equals(new Object()) + p.equals(new ArrayList<>()) + p.equals(new AbstractMap.SimpleEntry<>(1, "a"))
+        + p.equals(Map.entry(1, "a")) + p.equals(List.of(1, "a"));
   }
 
   /** An unmodelled codec constant: counted (Java: `truetrue`). */

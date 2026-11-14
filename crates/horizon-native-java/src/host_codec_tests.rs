@@ -15,6 +15,7 @@ use crate::{NativeJar, StdHost, Value};
 
 enum Outcome {
     Exact(&'static str),
+    CountedAs(&'static str),
     Counted,
 }
 use Outcome::*;
@@ -111,6 +112,17 @@ fn pairs_and_codecs_answer_as_java_25_or_count() {
         ("identityHeld", Counted),
         // An unmodelled codec constant (Java `truetrue`): counted.
         ("opaqueCodec", Counted),
+        // A library's codec constants are one object each: identity, `equals`, hash
+        // collections exact, the constants' reads counted (#199 F2).
+        (
+            "codecConstants",
+            CountedAs("truefalsetruefalsetruefalse2true1truefalse1true"),
+        ),
+        // `Set.of` refuses one constant twice and prints it (DFU's `toString`).
+        ("codecDuplicate", CountedAs("duplicate element: String")),
+        ("codecText", CountedAs("String|Int|Bool")),
+        // A pair is never equal to a JDK object (#199 F4).
+        ("pairVsJdk", Exact("falsefalsefalsefalsefalse")),
     ];
     let mut failures = Vec::new();
     for (method, outcome) in &cases {
@@ -129,6 +141,9 @@ fn pairs_and_codecs_answer_as_java_25_or_count() {
         let ok = match outcome {
             Exact(expected) => {
                 answer.as_ref() == Ok(&Value::Ref(Some((*expected).into()))) && unknown.is_empty()
+            }
+            CountedAs(expected) => {
+                answer.as_ref() == Ok(&Value::Ref(Some((*expected).into()))) && !unknown.is_empty()
             }
             Counted => !unknown.is_empty(),
         };
@@ -159,11 +174,49 @@ fn a_string_is_not_a_codec() {
     let codec = opaque_codec("net/minecraft/network/codec/StreamCodec");
     assert_eq!(
         opaque_codec_type(&codec),
-        Some("net/minecraft/network/codec/StreamCodec")
+        Some("net/minecraft/network/codec/StreamCodec".to_owned())
     );
     assert_eq!(
         modelled_codec_key(&modelled_codec("map:3".into())),
         Some("map:3")
+    );
+}
+
+/// A content declaration labels a codec by what it is (#199 F1): `CompoundTag.CODEC` by its
+/// field, a modelled node and an unmodelled codec by their declared type; a String is no codec.
+#[test]
+fn a_codec_label_names_the_codec() {
+    use crate::host_codec::{codec_label, modelled_codec, opaque_codec, static_codec};
+    let compound = crate::attachment_codec::codec_static(&crate::MethodRef {
+        owner: "net/minecraft/nbt/CompoundTag".into(),
+        name: "CODEC".into(),
+        descriptor: "Lcom/mojang/serialization/Codec;".into(),
+    })
+    .unwrap();
+    assert_eq!(
+        codec_label(&compound).as_deref(),
+        Some("net/minecraft/nbt/CompoundTag#CODEC")
+    );
+    assert_eq!(
+        codec_label(&modelled_codec("map:2".into())).as_deref(),
+        Some("com/mojang/serialization/MapCodec")
+    );
+    assert_eq!(
+        codec_label(&opaque_codec("com/mojang/serialization/Codec")).as_deref(),
+        Some("com/mojang/serialization/Codec")
+    );
+    assert_eq!(
+        codec_label(&static_codec(
+            "com/mojang/serialization/codecs/PrimitiveCodec",
+            "com/mojang/serialization/Codec",
+            "STRING"
+        ))
+        .as_deref(),
+        Some("com/mojang/serialization/codecs/PrimitiveCodec")
+    );
+    assert_eq!(
+        codec_label(&Value::Ref(Some("nf-codec/compound-tag".into()))),
+        None
     );
 }
 

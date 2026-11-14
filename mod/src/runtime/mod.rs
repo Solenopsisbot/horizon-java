@@ -3747,7 +3747,7 @@ impl StdHost {
                 let id = self.packet_types.get(marker)?.clone();
                 // The declared type of an opaque codec; no codec the model makes
                 // has a name, and a String is not a codec.
-                let codec = host_codec::opaque_codec_type(&registration.codec).map(str::to_owned);
+                let codec = host_codec::opaque_codec_type(&registration.codec);
                 Some((id, registration.direction.clone(), codec))
             })
             .collect()
@@ -4419,6 +4419,15 @@ impl Host for StdHost {
         if let Some(value) = self.facade_field(receiver, r) {
             return Ok(value);
         }
+        // An object's codec field is its own: never a library constant's
+        // one object (`get_static`), a counted neutral answer instead.
+        if r.descriptor
+            .strip_prefix('L')
+            .and_then(|name| name.strip_suffix(';'))
+            .is_some_and(host_codec::is_opaque_type)
+        {
+            return self.unknown_host_call(r);
+        }
         self.get_static(r)
     }
 
@@ -4911,6 +4920,19 @@ impl Host for StdHost {
                 "rarity/{}",
                 r.name.to_ascii_lowercase()
             )))),
+            // A library's codec constant (`Codec.STRING`, `ByteBufCodecs.INT`):
+            // not modelled, so counted, but one object however often it is
+            // read (`host_codec.rs`).
+            (owner, name, descriptor)
+                if descriptor
+                    .strip_prefix('L')
+                    .and_then(|name| name.strip_suffix(';'))
+                    .is_some_and(host_codec::is_opaque_type) =>
+            {
+                let declared = &descriptor[1..descriptor.len() - 1];
+                let codec = host_codec::static_codec(declared, owner, name);
+                self.unknown_host_call(r).map(|_| codec)
+            }
             _ => self.unknown_host_call(r),
         }
     }

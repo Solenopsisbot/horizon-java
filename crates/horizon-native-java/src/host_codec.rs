@@ -107,8 +107,12 @@ fn pair_equals(
     let Some((first, second)) = pair_fields(handle) else {
         return Ok(None);
     };
-    // A jar object may be an instance of a `Pair` subclass.
-    if crate::jar_object::object_key(other).is_some() {
+    // A jar object may be an instance of a `Pair` subclass; a JDK object never is.
+    if let Some(class) = crate::jar_object::object_class(other)
+        && !["java/", "javax/", "jdk/"]
+            .iter()
+            .any(|prefix| class.starts_with(prefix))
+    {
         return Ok(None);
     }
     let (their_first, their_second) = match other {
@@ -163,23 +167,119 @@ pub(crate) const PAIR_CLASS_SIDE: ClassSide = ClassSide {
     classes: || vec![PAIR.to_owned()],
 };
 
-/// An opaque codec of the declared type `declared`.
+/// The codec types an unmodelled call may be declared to answer.
+const OPAQUE_TYPES: [&str; 5] = [
+    "net/minecraft/network/codec/StreamCodec",
+    CODEC,
+    "com/mojang/serialization/codecs/PrimitiveCodec",
+    MAP_CODEC,
+    "com/mojang/serialization/codecs/RecordCodecBuilder",
+];
+
+/// An opaque codec an unmodelled method answers, of the declared type `declared`: its key is
+/// that type alone, and two such handles prove nothing about identity.
 pub(crate) fn opaque_codec(declared: &str) -> Value {
     Value::Host(HostRef::new(HostKind::OpaqueCodec, declared))
 }
 
-/// The declared type of an opaque codec handle, `None` for any other value.
-pub(crate) fn opaque_codec_type(value: &Value) -> Option<&str> {
-    match value {
-        Value::Host(handle) if handle.kind() == HostKind::OpaqueCodec => Some(handle.key()),
+/// The opaque codec a library's `static final` field holds (`Codec.STRING`,
+/// `ByteBufCodecs.INT`): one object, keyed by the field (`HostRef::of_values`, which escapes):
+/// `[declared, owner, name]`. Every read of the field is that one object (canonical).
+pub(crate) fn static_codec(declared: &str, owner: &str, name: &str) -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::OpaqueCodec,
+        &[
+            Value::Ref(Some(declared.to_owned())),
+            Value::Ref(Some(owner.to_owned())),
+            Value::Ref(Some(name.to_owned())),
+        ],
+    ))
+}
+
+/// Whether `declared` names a codec type an unmodelled call answers an opaque codec for.
+pub(crate) fn is_opaque_type(declared: &str) -> bool {
+    OPAQUE_TYPES.contains(&declared)
+}
+
+/// The `[declared, owner, name]` of a static codec's key, `None` for a method result's.
+fn static_field(key: &str) -> Option<(String, String, String)> {
+    if is_opaque_type(key) {
+        return None;
+    }
+    match HostRef::new(HostKind::OpaqueCodec, key)
+        .values()?
+        .as_slice()
+    {
+        [
+            Value::Ref(Some(declared)),
+            Value::Ref(Some(owner)),
+            Value::Ref(Some(name)),
+        ] => Some((declared.clone(), owner.clone(), name.clone())),
         _ => None,
     }
 }
 
+/// A static codec's key names one object; a method result's names only its declared type.
+pub(crate) fn opaque_canonical(key: &str) -> bool {
+    !is_opaque_type(key)
+}
+
+/// The declared type of an opaque codec handle, `None` for any other value.
+pub(crate) fn opaque_codec_type(value: &Value) -> Option<String> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::OpaqueCodec => Some(
+            static_field(handle.key())
+                .map_or_else(|| handle.key().to_owned(), |(declared, ..)| declared),
+        ),
+        _ => None,
+    }
+}
+
+/// A codec's label in a content declaration (`declarations_content.rs`): what it is.
+pub(crate) fn codec_label(value: &Value) -> Option<String> {
+    if let Some(declared) = opaque_codec_type(value) {
+        return Some(declared);
+    }
+    if let Some(key) = modelled_codec_key(value) {
+        return Some(if key == COMPOUND_TAG_KEY {
+            "net/minecraft/nbt/CompoundTag#CODEC".to_owned()
+        } else {
+            modelled_codec_types(key)[0].to_owned()
+        });
+    }
+    crate::jar_object::object_key(value).map(str::to_owned)
+}
+
+/// `toString()` of the DataFixerUpper primitive codec constants (`Codec.STRING` prints
+/// `String`, Java 25 on 10.0.21); any other opaque codec's text is counted.
+fn opaque_text(handle: &HostRef, _: &mut dyn Nested) -> Result<Option<String>, NativeError> {
+    let Some((_, owner, name)) = static_field(handle.key()) else {
+        return Ok(None);
+    };
+    Ok((owner == CODEC)
+        .then_some(match name.as_str() {
+            "STRING" => Some("String"),
+            "INT" => Some("Int"),
+            "BOOL" => Some("Bool"),
+            _ => None,
+        })
+        .flatten()
+        .map(str::to_owned))
+}
+
+pub(crate) const OPAQUE_CODEC_METHODS: Methods = Methods {
+    to_string: opaque_text,
+    ..crate::host_events::DECLARED_TYPE_METHODS
+};
+
 /// The declared type of an opaque codec and every supertype it names (`javap`: DataFixerUpper
 /// 10.0.21, Minecraft 26.3).
 pub(crate) fn opaque_codec_types(key: &str) -> &'static [&'static str] {
-    match key {
+    let declared = match static_field(key) {
+        Some((declared, ..)) => declared,
+        None => key.to_owned(),
+    };
+    match declared.as_str() {
         "net/minecraft/network/codec/StreamCodec" => &[
             "net/minecraft/network/codec/StreamCodec",
             "net/minecraft/network/codec/StreamEncoder",
