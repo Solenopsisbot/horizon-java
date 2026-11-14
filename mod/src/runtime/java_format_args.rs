@@ -108,9 +108,10 @@ fn boxed_arg(boxed: Boxed) -> Arg {
 fn formats_like_us(locale: &Value) -> bool {
     match locale {
         Value::Ref(None) => true,
-        Value::Ref(Some(marker)) => matches!(
-            marker.as_str(),
-            "locale/US" | "locale/ROOT" | "locale/ENGLISH" | "locale/en_US" | "locale/en_"
+        // `Locale.US`, `ROOT`, `ENGLISH` (`host_jdk_constant.rs`).
+        value @ Value::Host(_) => matches!(
+            crate::runtime::host_jdk_constant::locale_parts(value),
+            Some(("en", "US" | "") | ("", ""))
         ),
         _ => false,
     }
