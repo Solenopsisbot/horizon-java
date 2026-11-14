@@ -358,7 +358,7 @@ pub(crate) const IDENTIFIER_METHODS: Methods = Methods {
             Value::Host(other) => Some(other == handle),
             // An object a `new ResourceLocation(..)` built (pre-1.21): its id
             // lives in the host's table, which no `Nested` reaches.
-            Value::Ref(Some(marker)) => crate::jar_text::object_marker_class(marker)
+            Value::Ref(Some(marker)) => crate::jar_object::packaged_key_class(marker)
                 .is_none_or(|class| class != RESOURCE_LOCATION && class != IDENTIFIER)
                 .then_some(false),
             _ => Some(false),

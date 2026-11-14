@@ -204,8 +204,8 @@ fn state_marker<H: Host>(
         // constructs (`new ThreadPoolExecutor(..)`). A `String` spelled like
         // a pool's marker (`"executor#0"`) is no executor, so its call goes
         // on to be counted, never reaching a real pool's state. (Allocation
-        // markers are still text until #156 P12.)
-        Some(Value::Ref(Some(marker))) => Ok(jvm_dispatch::constructed_object_class(marker)
+        // markers are still text until #156 P12b.)
+        Some(Value::Ref(Some(marker))) => Ok(crate::jar_object::key_class(marker)
             .is_some_and(|class| rt.class(class).is_some() || JDK_EXECUTORS.contains(&class))
             .then(|| marker.clone())),
         Some(value) => Ok(host_executors::allocation(value, kind).map(str::to_owned)),
@@ -372,10 +372,10 @@ fn run_runnable<H: Host>(rt: &mut Runtime<'_, H>, task: &Value) -> Result<(), Na
         rt.host.invoke_instance(&run_ref(), task, &[])?;
         return Ok(());
     }
-    let Some(marker) = expect_ref(task) else {
+    if *task == Value::Ref(None) {
         return Err(native_npe());
-    };
-    if let Some((class, _)) = marker.split_once('#')
+    }
+    if let Some(class) = crate::jar_object::object_class(task)
         && rt
             .class(class)
             .is_some_and(|file| file.method("run", RUNNABLE_RUN).is_some())
@@ -398,10 +398,10 @@ fn run_callable<H: Host>(rt: &mut Runtime<'_, H>, task: &Value) -> Result<Value,
     if let Some(value) = rt.invoke_callback(task, &[])? {
         return Ok(value);
     }
-    let Some(marker) = expect_ref(task) else {
+    if *task == Value::Ref(None) {
         return Err(native_npe());
-    };
-    if let Some((class, _)) = marker.split_once('#')
+    }
+    if let Some(class) = crate::jar_object::object_class(task)
         && rt
             .class(class)
             .is_some_and(|file| file.method("call", CALLABLE_CALL).is_some())

@@ -163,7 +163,7 @@ impl<H: Host> Runtime<'_, H> {
     /// The jar class of an object this run built whose class the interpreter
     /// runs (not a host- or library-modelled copy).
     pub(crate) fn interpreted_object_class(&self, value: &Value) -> Option<String> {
-        let class = jvm_dispatch::constructed_object_class(expect_ref(value)?)?;
+        let class = crate::jar_object::object_class(value)?;
         (!self.host.models_class(class)
             && !jvm_dispatch::library_modelled(class)
             && self.class(class).is_some())
@@ -828,7 +828,7 @@ impl<H: Host> Runtime<'_, H> {
             "map" => return Some("java/util/LinkedHashMap".into()),
             _ => {}
         }
-        let mut class = jvm_dispatch::constructed_object_class(marker)
+        let mut class = crate::jar_object::key_class(marker)
             .or_else(|| marker.split_once('#').map(|(class, _)| class))?
             .to_owned();
         // A jar subclass: the first JDK class up its chain.

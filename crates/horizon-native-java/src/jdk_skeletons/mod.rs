@@ -320,8 +320,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(answer) = self.host_entry_equals(r, opcode, this, args)? {
             return Ok(Some(answer));
         }
-        if let Some(class) =
-            expect_ref(this).and_then(|marker| jvm_dispatch::constructed_object_class(marker))
+        if let Some(class) = crate::jar_object::object_class(this)
             && INTERNAL.iter().any(|(internal, _, _)| *internal == class)
         {
             let class = class.to_owned();
@@ -329,8 +328,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A jar object on a skeleton, or a `SimpleEntry`/`SimpleImmutableEntry`
         // itself (its state is the same two fields either way).
-        let direct_entry = expect_ref(this)
-            .and_then(|marker| jvm_dispatch::constructed_object_class(marker))
+        let direct_entry = crate::jar_object::object_class(this)
             .filter(|class| [map::SIMPLE_ENTRY, map::IMMUTABLE_ENTRY].contains(class))
             .map(str::to_owned);
         let Some(base) = self.stateless_jar_object(this).or(direct_entry) else {
@@ -431,7 +429,7 @@ impl<H: Host> Runtime<'_, H> {
                 skeleton_owner(&owner).or_else(|| interface_default(&[data_interface(&owner)?]))
             }
             0xb6 | 0xb9 if !r.name.starts_with('<') => {
-                let class = jvm_dispatch::constructed_object_class(expect_ref(this)?)?;
+                let class = crate::jar_object::object_class(this)?;
                 // A jar declaration (abstract, or a jar interface's default
                 // the JVM dispatch already declined) is not a JDK body.
                 if self
@@ -531,9 +529,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         }
         let other = args.first().cloned().unwrap_or(Value::Ref(None));
-        let Some(class) =
-            expect_ref(&other).and_then(|marker| jvm_dispatch::constructed_object_class(marker))
-        else {
+        let Some(class) = crate::jar_object::object_class(&other) else {
             return Ok(None);
         };
         if self.class(class).is_none() && !jar_operands::is_skeleton(class) {

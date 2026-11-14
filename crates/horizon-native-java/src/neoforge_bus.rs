@@ -426,8 +426,9 @@ impl<H: Host> Runtime<'_, H> {
     /// typetools' `resolveRawArgument(Consumer.class, consumer.getClass())`, where the runtime can
     /// follow it; `None` where it cannot (counted, departure B3).
     fn consumer_event_class(&self, consumer: &Value) -> Option<String> {
-        let text = expect_ref(consumer)?;
-        if text.starts_with("@indy:") {
+        if let Some(text) = expect_ref(consumer)
+            && text.starts_with("@indy:")
+        {
             let marker = parse_callback_marker(text).ok()?;
             let parameters = crate::descriptor_arguments(&marker.target.descriptor);
             // `populateLambdaArgs`: an implementation method with one parameter fewer than
@@ -445,7 +446,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // An object of a jar class: the `Consumer<X>` its own or a jar superclass's signature
         // implements.
-        let (class, _) = text.split_once('#')?;
+        let class = crate::jar_object::object_class(consumer)?;
         let mut at = class.to_owned();
         for _ in 0..32 {
             let file = self.class(&at)?;
@@ -478,15 +479,16 @@ impl<H: Host> Runtime<'_, H> {
     /// `accept` of a jar object (its typed `accept(Event)` when it declares one, so the bridge's
     /// cast of a game event is not needed).
     fn consumer_callback(&self, consumer: &Value, class: &str) -> Option<ListenerCallback> {
-        let text = expect_ref(consumer)?;
-        if text.starts_with("@indy:") {
+        if let Some(text) = expect_ref(consumer)
+            && text.starts_with("@indy:")
+        {
             let marker = parse_callback_marker(text).ok()?;
             return Some(ListenerCallback::Indy {
                 target: marker.target,
                 captures: marker.captures,
             });
         }
-        let (owner, _) = text.split_once('#')?;
+        let owner = crate::jar_object::object_class(consumer)?;
         let typed = format!("(L{class};)V");
         for descriptor in [typed.as_str(), "(Ljava/lang/Object;)V"] {
             let mut at = owner.to_owned();
