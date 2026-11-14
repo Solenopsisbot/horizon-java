@@ -175,12 +175,15 @@ const ATTACHMENT_BUILDER: &str = "net/fabricmc/fabric/api/attachment/v1/Attachme
 const ATTACHMENT_TYPE: &str = "net/fabricmc/fabric/api/attachment/v1/AttachmentType";
 
 /// A codec argument's label: a non-null marker made of printable characters.
-/// An unmodelled codec answers the opaque `<type>#codec` marker, which names
-/// only the declared codec type, so the label is that type
+/// An unmodelled codec answers an opaque codec handle (`host_codec.rs`),
+/// which names only the declared codec type, so the label is that type
 /// (`com/mojang/serialization/Codec`).
 fn codec_label(value: Option<&Value>) -> Option<String> {
-    let label = value.and_then(expect_ref)?;
-    let label = label.strip_suffix("#codec").unwrap_or(label);
+    let value = value?;
+    let label = match crate::runtime::host_codec::opaque_codec_type(value) {
+        Some(declared) => declared,
+        None => expect_ref(value)?,
+    };
     (!label.is_empty()
         && label.len() <= MAX_CODEC_LABEL
         && label.bytes().all(|b| b.is_ascii_graphic()))

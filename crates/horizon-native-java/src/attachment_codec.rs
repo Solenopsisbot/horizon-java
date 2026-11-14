@@ -4,8 +4,8 @@
 //! the two mod lambdas `flatXmap` takes.
 //!
 //! Everything else stays an opaque codec, as before: `RecordCodecBuilder`, the primitive codecs,
-//! `xmap`, `optionalFieldOf`, `listOf`, `dispatch`... still answer the neutral `<type>#codec`
-//! marker, and a serializer built on one is refused by name (`neoforge_attachments`). A
+//! `xmap`, `optionalFieldOf`, `listOf`, `dispatch`... still answer an opaque codec handle
+//! (`host_codec.rs`), and a serializer built on one is refused by name (`neoforge_attachments`). A
 //! `DataResult` this module did not make is opaque too.
 //!
 //! # The behaviour, from the bytecode and a JVM oracle
@@ -34,8 +34,7 @@ const CODEC: &str = "com/mojang/serialization/Codec";
 const DATA_RESULT: &str = "com/mojang/serialization/DataResult";
 /// The synthetic owner of a modelled `DataResult`'s hidden fields.
 const RESULT_OWNER: &str = "horizon-java/data-result";
-/// The marker `CompoundTag.CODEC` answers.
-pub(crate) const COMPOUND_TAG_CODEC: &str = "nf-codec/compound-tag";
+use crate::host_codec::{COMPOUND_TAG_KEY, modelled_codec, modelled_codec_key};
 /// Codec nodes one jar may build. Codecs are built in class initialisers, so a jar that builds
 /// more is building them in a loop: past this they stay opaque (counted).
 const MAX_CODEC_NODES: usize = 4096;
@@ -59,7 +58,8 @@ pub(crate) enum CodecNode {
     FieldOf { inner: String, name: String },
 }
 
-/// The modelled codecs of one jar, by marker.
+/// The modelled codecs of one jar, by key (`host_codec.rs`: a codec the jar holds is a
+/// `ModelledCodec` handle of that key).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Codecs {
     nodes: BTreeMap<String, CodecNode>,
@@ -67,7 +67,7 @@ pub(crate) struct Codecs {
 
 impl Codecs {
     pub(crate) fn node(&self, marker: &str) -> Option<&CodecNode> {
-        if marker == COMPOUND_TAG_CODEC {
+        if marker == COMPOUND_TAG_KEY {
             return Some(&CodecNode::CompoundTag);
         }
         self.nodes.get(marker)
@@ -82,7 +82,12 @@ impl Codecs {
         if self.nodes.len() >= MAX_CODEC_NODES {
             return None;
         }
-        let marker = format!("nf-codec/{}", self.nodes.len());
+        // `map:` names a `MapCodec`, which the handle's declared types follow.
+        let kind = match node {
+            CodecNode::FieldOf { .. } => "map",
+            _ => "codec",
+        };
+        let marker = format!("{kind}:{}", self.nodes.len());
         self.nodes.insert(marker.clone(), node);
         Some(marker)
     }
@@ -143,32 +148,29 @@ impl<H: Host> Runtime<'_, H> {
                 "flatXmap",
                 "(Ljava/util/function/Function;Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;",
             ) => {
-                let inner = receiver.and_then(expect_ref)?;
+                let inner = receiver.and_then(modelled_codec_key)?.to_owned();
                 // A `MapCodec` has its own `flatXmap`, answering a `MapCodec`; this is `Codec`'s.
-                if codecs.is_map_codec(inner) {
+                if codecs.is_map_codec(&inner) {
                     return None;
                 }
-                codecs.node(inner)?;
+                codecs.node(&inner)?;
                 let node = CodecNode::FlatXmap {
-                    inner: inner.clone(),
+                    inner,
                     to: args.first().cloned()?,
                     from: args.get(1).cloned()?,
                 };
-                codecs.add(node).map(|marker| Value::Ref(Some(marker)))
+                codecs.add(node).map(modelled_codec)
             }
             (CODEC, "fieldOf", "(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;") => {
-                let inner = receiver.and_then(expect_ref)?;
+                let inner = receiver.and_then(modelled_codec_key)?.to_owned();
                 // `fieldOf` is a `Codec` method: a `MapCodec` has no `fieldOf`.
-                if codecs.is_map_codec(inner) {
+                if codecs.is_map_codec(&inner) {
                     return None;
                 }
-                codecs.node(inner)?;
+                codecs.node(&inner)?;
                 let name = args.first().and_then(expect_ref)?.clone();
-                let node = CodecNode::FieldOf {
-                    inner: inner.clone(),
-                    name,
-                };
-                codecs.add(node).map(|marker| Value::Ref(Some(marker)))
+                let node = CodecNode::FieldOf { inner, name };
+                codecs.add(node).map(modelled_codec)
             }
             _ => None,
         }
@@ -305,5 +307,5 @@ pub(crate) fn codec_static(r: &MethodRef) -> Option<Value> {
     (r.owner == COMPOUND_TAG
         && r.name == "CODEC"
         && r.descriptor == "Lcom/mojang/serialization/Codec;")
-        .then(|| Value::Ref(Some(COMPOUND_TAG_CODEC.into())))
+        .then(|| modelled_codec(COMPOUND_TAG_KEY.to_owned()))
 }

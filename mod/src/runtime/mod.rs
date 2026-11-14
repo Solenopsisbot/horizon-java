@@ -71,6 +71,7 @@ mod hook_shapes;
 mod host_array;
 mod host_attachment;
 mod host_brigadier;
+mod host_codec;
 mod host_config;
 mod host_entry;
 mod host_events;
@@ -3132,14 +3133,14 @@ impl StdHost {
         // (`StreamCodec.composite(ByteBufCodecs.INT, ...)`,
         // `RecordCodecBuilder.create`); no factory or constant of the game
         // answers null for one, and payload records `requireNonNull` theirs.
-        // An opaque marker of the declared type keeps the chain honest: it
-        // names no behaviour, it is just not null.
+        // An opaque handle of the declared type keeps the chain honest: it
+        // names no behaviour, it is just not null (`host_codec.rs`).
         if let Some(codec) = result_descriptor(descriptor)
             .strip_prefix('L')
             .and_then(|name| name.strip_suffix(';'))
             .filter(|name| is_codec_type(name))
         {
-            return Value::Ref(Some(format!("{codec}#codec")));
+            return host_codec::opaque_codec(codec);
         }
         Value::default_for(descriptor)
     }
@@ -3736,7 +3737,8 @@ impl StdHost {
 
     /// The registered payload channels as `(id, direction, codec)` for the
     /// game's transport: the `CustomPacketPayload.Type` marker resolves to the
-    /// identifier it was built with, and a `codec/...` marker names the codec.
+    /// identifier it was built with, and an opaque codec names its declared
+    /// codec type (`host_codec.rs`).
     pub fn payload_channels(&self) -> Vec<(String, String, Option<String>)> {
         self.payload_registrations
             .iter()
@@ -3746,10 +3748,9 @@ impl StdHost {
                     _ => return None,
                 };
                 let id = self.packet_types.get(marker)?.clone();
-                let codec = match &registration.codec {
-                    Value::Ref(Some(codec)) => codec.strip_prefix("codec/").map(str::to_owned),
-                    _ => None,
-                };
+                // The declared type of an opaque codec; no codec the model makes
+                // has a name, and a String is not a codec.
+                let codec = host_codec::opaque_codec_type(&registration.codec).map(str::to_owned);
                 Some((id, registration.direction.clone(), codec))
             })
             .collect()

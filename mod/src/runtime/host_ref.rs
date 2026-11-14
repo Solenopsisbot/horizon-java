@@ -372,6 +372,15 @@ pub enum HostKind {
     FabricPayloadTypes,
     /// A `ResourceLoader`: key its `PackType`.
     FabricResourceLoader,
+    /// DataFixerUpper's `Pair.of(..)`: key `[serial, first, second]`
+    /// (`host_codec.rs`).
+    DfuPair,
+    /// An unmodelled codec call's answer: key its declared codec type
+    /// (`host_codec.rs`).
+    OpaqueCodec,
+    /// A codec the attachment model builds: key `compound-tag` or
+    /// `codec:<n>`/`map:<n>` (`host_codec.rs`, `attachment_codec.rs`).
+    ModelledCodec,
 }
 
 /// How a kind's Java class follows from its key.
@@ -540,6 +549,7 @@ pub(crate) type InstanceOfClassFn = fn(&str, &str, &dyn ClassHierarchy) -> Optio
 
 /// The kinds with a [`ClassSide`], in `KINDS` order.
 const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
+    (HostKind::DfuPair, &crate::runtime::host_codec::PAIR_CLASS_SIDE),
     (
         HostKind::GameEvent,
         &crate::runtime::host_game_event::EVENT_CLASS_SIDE,
@@ -1474,6 +1484,34 @@ const KINDS: &[KindInfo] = &[
         // One per `PackType` (`IMPL_MAP`).
         canonical: always_canonical,
         methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::DfuPair,
+        tag: "dpair",
+        class: ClassRule::FromKey(crate::runtime::host_codec::pair_class),
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_codec::PAIR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::OpaqueCodec,
+        tag: "ocdc",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_codec::opaque_codec_types,
+        },
+        // The key is the declared type alone: two handles prove nothing.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ModelledCodec,
+        tag: "mcdc",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_codec::modelled_codec_types,
+        },
+        // One node, one object.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
     },
 ];
 
