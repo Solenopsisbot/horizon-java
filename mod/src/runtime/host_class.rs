@@ -11,24 +11,32 @@
 //! Until #156 P13 a `Class` was text: the internal name, the same `Value::Ref`
 //! a `String` is. P13 moves it in steps (`hj-notes/p13-plan.md`):
 //!
-//! * **P13a (this layer):** every reader of a `Class` value goes through
+//! * **P13a (done):** every reader of a `Class` value goes through
 //!   [`class_name`] and [`is_class`], which accept a handle and, until P13c,
 //!   the class-marker text every producer still answers. No answer changes.
-//! * **P13b1 (done):** the core producers answer handles: `ldc` (`Foo.class`),
-//!   `getClass`, `Class.forName`/`ClassLoader.loadClass`, the wrappers'
-//!   `TYPE`, and the `Class` members that answer a class (`getSuperclass`,
-//!   `getInterfaces`, `getComponentType`). Until P13c `expect_ref` answers a
-//!   handle's key, as it does a jar object's, so a reader not yet moved to
-//!   [`class_name`] keeps the text it read.
-//! * **P13b2:** the remaining producers (the reflective getters, type nodes,
-//!   annotation values, `MethodType`) answer handles.
+//! * **P13b1 (done):** the producers config code compares with `X.class`
+//!   answer handles: `ldc` (`Foo.class`), `getClass`,
+//!   `Class.forName`/`ClassLoader.loadClass`, the wrappers' `TYPE`, the
+//!   `Class` members that answer a class (`getSuperclass`, `getInterfaces`,
+//!   `getComponentType`, `getEnclosingClass`), the reflective getters
+//!   (`Field.getType`/`getDeclaringClass`, `Method.getReturnType`/
+//!   `getParameterTypes`/`getDeclaringClass`), type nodes that are classes
+//!   (`getGenericType`, `getRawType`, arguments, bounds,
+//!   `getGenericDeclaration`), commons-lang's `ClassUtils` boxing,
+//!   `ServiceLoader.Provider.type` and Fabric's `getEntrypointClass`. Until
+//!   P13c `expect_ref` answers a handle's key, as it does a jar object's, so a
+//!   reader not yet moved to [`class_name`] keeps the text it read.
+//! * **P13b2:** the rest: annotation `Class` values and `annotationType`,
+//!   `MethodType`/`Lookup`, `Proxy`, `StackWalker` frames, an enum's
+//!   `getDeclaringClass`, Guava's `TypeToken` beyond `getRawType`.
 //! * **P13c:** text is never a `Class`: a `String` spelled like a class name
 //!   is that `String` everywhere, and [`class_name`] stops reading text.
 //!
 //! The row: `Class` is final and its supertypes are Java 25's
 //! (`jdk_closure.rs`). `equals` is identity, exact between handles (one name,
-//! one object); against text it is counted until P13c (a class marker may be
-//! the same `Class`, a `String` spelled like it is not). `hashCode` is an
+//! one object) and against text of another name; against text of its own
+//! name it is counted until P13c, as `==` is (a class marker may be the same
+//! `Class`, a `String` spelled like it is not: [`handle_against_same_text`]). `hashCode` is an
 //! identity hash (counted). `toString` (`class X`, `interface X`, `int`) needs
 //! to know whether X is an interface: the row hands the handle back to the
 //! caller's `Nested` (as `jar_object.rs` does), and the runtime answers from
