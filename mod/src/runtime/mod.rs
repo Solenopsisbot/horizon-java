@@ -8344,10 +8344,15 @@ impl Host for StdHost {
                 // A collection of its own holding the entry handles themselves, so every
                 // reading of one node stays the same object (a `set/...` literal would print
                 // and re-parse them). Its class is the literal's (`LinkedHashSet`) until
-                // P14d1 names each answer's JDK class.
+                // P14d1 names each answer's JDK class. It is the map's `entrySet` view: it
+                // follows the map (`refresh_map_views`), in the map's order, with no hash
+                // layout of its own (`hash_table_kind`).
                 let set = self.empty_collection("set");
-                if let Some(marker) = expect_ref(&set) {
+                if let (Some(marker), Some(map)) = (expect_ref(&set).cloned(), expect_ref(receiver))
+                {
                     self.mutable_collections.insert(marker.clone(), entries);
+                    self.note_view_copy(&marker, map);
+                    self.note_view_kind(&marker, "entrySet");
                 }
                 Ok(set)
             }
@@ -40963,7 +40968,9 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(entries, collection_value("set", &[]));
+        // An empty set of its own, the map's entry view.
+        assert!(matches!(&entries, Value::Host(handle) if handle.kind() == HostKind::Collection));
+        assert_eq!(host.mutable_collection_values(&entries), Some(Vec::new()));
     }
 
     #[test]
