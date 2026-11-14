@@ -141,7 +141,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         let mut names = Vec::with_capacity(interfaces.len());
         for interface in &interfaces {
-            let Some(name) = expect_ref(interface) else {
+            let Some(name) = crate::host_class::class_name(interface) else {
                 return Err(npe(None));
             };
             let name = name.replace('.', "/");
@@ -161,7 +161,7 @@ impl<H: Host> Runtime<'_, H> {
             // Architectury's `createLoop` proxies `Runnable`) has no method
             // table here, but the proxy needs none to exist: a call on it
             // names its own method, which `invoke_on_proxy` hands the handler.
-            names.push(Value::Ref(Some(name)));
+            names.push(crate::host_class::class_value(&name));
         }
         let proxy = self.new_object(PROXY_CLASS);
         let marker = expect_ref(&proxy).cloned().unwrap_or_default();
@@ -185,7 +185,7 @@ impl<H: Host> Runtime<'_, H> {
             .map(|values| {
                 values
                     .iter()
-                    .filter_map(|value| expect_ref(value).cloned())
+                    .filter_map(|value| crate::host_class::class_name(value).map(str::to_owned))
                     .collect()
             })
             .unwrap_or_default()
@@ -385,7 +385,7 @@ impl<H: Host> Runtime<'_, H> {
                     message: Some(message),
                     frame: None,
                 };
-                if class_is_primitive(&Value::Ref(Some(class.clone()))) {
+                if crate::host_class::is_primitive(&class) {
                     return Err(illegal(format!("{class} is a primitive class")));
                 }
                 if class.starts_with('[') {
@@ -428,7 +428,7 @@ impl<H: Host> Runtime<'_, H> {
                     // The receiver is typed as the special caller.
                     let Some(caller) = args
                         .get(1)
-                        .and_then(expect_ref)
+                        .and_then(crate::host_class::class_name)
                         .map(|caller| caller.replace('.', "/"))
                     else {
                         return Err(npe(None));

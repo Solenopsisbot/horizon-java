@@ -1422,7 +1422,7 @@ impl StdHost {
             // by the type's own getter; the raw object is not modelled.
             _ => return self.unknown_host_call(r),
         };
-        let Some(wanted) = args.get(1).and_then(expect_ref).map(String::as_str) else {
+        let Some(wanted) = args.get(1).and_then(crate::host_class::class_name) else {
             return self.unknown_host_call(r);
         };
         let wrapper = match wanted {

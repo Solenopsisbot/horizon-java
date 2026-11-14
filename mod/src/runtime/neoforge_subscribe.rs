@@ -30,12 +30,8 @@
 //!   `Class#getDeclaredMethods`' order, which the JVM leaves unspecified; it only shows between two
 //!   methods of one class on the same event and priority, or in which mismatched method a refusal
 //!   names.
-//! * **R2** the runtime carries a class literal and a `@Mod` class's own instance (the `this` FML
-//!   constructs) as the same bare class name. A bare name is read as the `Class`, except for a
-//!   `@Mod` class: there it is read as the instance (`NeoForge.EVENT_BUS.register(this)` in the
-//!   constructor), unless the class declares only static `@SubscribeEvent` methods. Each reading
-//!   gives NeoForge's answer for the call it assumes; the other call on a `@Mod` class is answered
-//!   as if it were that one. A `ServiceLoader` provider, also a bare name, is read as its class.
+//! * **R2** (retired by #156 P13c) a class literal is a `Class` handle and an instance a jar object,
+//!   so `register(Foo.class)` and `register(this)` are told apart exactly; text is neither.
 //! * **R3** `Class#getSimpleName` in the "to NOT be static" message is the name after the last `$`
 //!   without leading digits, not read from the `InnerClasses` attribute; a top-level class whose
 //!   own name holds a `$` would be named wrongly.
@@ -49,7 +45,7 @@ use crate::runtime::neoforge_bus::{
 };
 use crate::runtime::{
     AnnotationValue, ClassFile, Host, Method, MethodRef, NativeError, Reader, Runtime, Value,
-    expect_ref, read_pool, utf8,
+    read_pool, utf8,
 };
 
 const SUBSCRIBE_EVENT: &str = "Lnet/neoforged/bus/api/SubscribeEvent;";
@@ -144,27 +140,11 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Some(Target::Object(class.to_owned()));
         }
-        // Departure R2: a bare jar class name is that `Class`, or a `@Mod` class's instance.
-        let text = expect_ref(target)?;
-        let file = self.class(text)?;
-        let entry = file
-            .annotations
-            .iter()
-            .any(|annotation| annotation.descriptor == "Lnet/neoforged/fml/common/Mod;");
-        let subscribers = || {
-            file.methods.iter().filter(|method| {
-                method
-                    .annotations
-                    .iter()
-                    .any(|annotation| annotation.descriptor == SUBSCRIBE_EVENT)
-            })
-        };
-        let only_static = subscribers().next().is_some() && subscribers().all(Method::is_static);
-        Some(if entry && !only_static {
-            Target::Object(text.clone())
-        } else {
-            Target::Class(text.clone())
-        })
+        // `register(Foo.class)`: the `Class` handle of a jar class (#156 P13c).
+        // Text is a `String`, neither a class nor an instance.
+        let class = crate::runtime::host_class::class_name(target)?;
+        self.class(class)?;
+        Some(Target::Class(class.to_owned()))
     }
 
     /// `checkSupertypes(registered, at)`: no superclass or interface of `registered` may declare a

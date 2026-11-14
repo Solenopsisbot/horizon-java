@@ -84,11 +84,9 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(value) = args.first().filter(|value| **value != Value::Ref(None)) else {
                     return Err(npe());
                 };
-                // Text is a `Type` only as a class marker (a String cast to `Type` is
-                // Java's `ClassCastException`): counted otherwise.
-                if matches!(value, Value::Ref(Some(_)))
-                    && !crate::runtime::host_class::is_class(value, self.classes, &self.linked)
-                {
+                // Text is never a `Type` (#156 P13c): a String cast to `Type` is
+                // Java's `ClassCastException`, so text reaching here is counted.
+                if matches!(value, Value::Ref(Some(_))) {
                     return self.host.unknown_operand_call(r).map(Some);
                 }
                 return Ok(match canonicalize(value) {

@@ -125,10 +125,10 @@ pub(crate) fn type_value(node: &GenericType) -> Value {
     Value::Host(HostRef::of_values(HostKind::ReflectType, &values))
 }
 
-/// The node a `Type` value names: a type handle's, or a class marker's.
+/// The node a `Type` value names: a type handle's, or a `Class`'s. Text is
+/// never a `Type` (#156 P13c).
 pub(crate) fn type_node(value: &Value) -> Option<GenericType> {
     match value {
-        Value::Ref(Some(name)) => Some(GenericType::Class(name.clone())),
         // A `Class` is a `Type` (`host_class.rs`).
         Value::Host(handle) if handle.kind() == HostKind::Class => {
             Some(GenericType::Class(handle.key().to_owned()))

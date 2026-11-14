@@ -39,7 +39,7 @@
 
 use crate::runtime::host_config;
 use crate::runtime::host_ref::HostKind;
-use crate::runtime::{Host, MethodRef, NativeError, Runtime, Value, expect_ref};
+use crate::runtime::{Host, MethodRef, NativeError, Runtime, Value};
 
 const AUTO_CONFIG: &str = "me/shedaniel/autoconfig/AutoConfig";
 const AUTO_HOLDER: &str = "me/shedaniel/autoconfig/ConfigHolder";
@@ -59,8 +59,9 @@ fn slot(class: &str) -> String {
     format!("{AUTO_CONFIG}#instance/{class}")
 }
 
+/// The config class a call names: its `Class` argument.
 fn class_arg(args: &[Value]) -> Option<String> {
-    Some(expect_ref(args.first()?)?.replace('.', "/"))
+    Some(crate::runtime::host_class::class_name(args.first()?)?.replace('.', "/"))
 }
 
 impl<H: Host> Runtime<'_, H> {
