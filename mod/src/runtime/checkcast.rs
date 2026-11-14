@@ -95,12 +95,16 @@ fn in_java_base(class: &str) -> bool {
 }
 
 /// The `ClassCastException` of a cast that fails where the runtime does not
-/// know the value's exact class (the message would name it); the cast is
-/// counted by the caller.
-pub(crate) fn cast_failed_counted() -> NativeError {
+/// know the value's exact class: the cast is counted by the caller, and the
+/// message, which in Java names that class first, names only the target
+/// (never a marker).
+pub(crate) fn cast_failed_counted(target: &str) -> NativeError {
     NativeError::UncaughtException {
         class: "java/lang/ClassCastException".into(),
-        message: None,
+        message: Some(format!(
+            "cannot be cast to class {}",
+            target.replace('/', ".")
+        )),
         frame: None,
     }
 }
@@ -155,7 +159,7 @@ impl<H: Host> Runtime<'_, H> {
             Some(HostCast::Unknown) => return self.count_cast(value, target),
             Some(HostCast::FailsCounted) => {
                 self.count_cast(value, target)?;
-                return Err(cast_failed_counted());
+                return Err(cast_failed_counted(target));
             }
             None => {}
         }
@@ -178,7 +182,7 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(());
             }
             self.count_cast(value, target)?;
-            return Err(cast_failed_counted());
+            return Err(cast_failed_counted(target));
         }
         // A plain `String`, or a `stream/...` text that is no live stream (a
         // jar `String` spelled like one), is never a stream: Java's CCE.

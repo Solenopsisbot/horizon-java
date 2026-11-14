@@ -567,7 +567,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             Some(crate::runtime::checkcast::HostCast::FailsCounted) => {
                 self.count_cast(&value, &wanted)?;
-                return Err(crate::runtime::checkcast::cast_failed_counted());
+                return Err(crate::runtime::checkcast::cast_failed_counted(&wanted));
             }
             Some(crate::runtime::checkcast::HostCast::Fits) | None => {}
         }
@@ -575,7 +575,7 @@ impl<H: Host> Runtime<'_, H> {
         // no `instance` above), counted, its marker never put in a message.
         if expect_ref(&value).is_some_and(|marker| self.is_live_stream(marker)) {
             self.count_cast(&value, &wanted)?;
-            return Err(crate::runtime::checkcast::cast_failed_counted());
+            return Err(crate::runtime::checkcast::cast_failed_counted(&wanted));
         }
         // Only a class the runtime can judge throws; anything else keeps the
         // value, as the opcode-level `checkcast` does.
