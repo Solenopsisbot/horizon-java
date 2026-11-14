@@ -261,10 +261,10 @@ fn parse_method_signature(text: &str, scope: TypeScope) -> Option<(Vec<GenericTy
     Some((parameters, result))
 }
 
-/// The erased class marker of one descriptor (`I` is `int`, `[I` stays the
-/// array descriptor, `Ljava/util/List;` is `java/util/List`).
+/// The erased class of one descriptor (`I` is `int`, `[I` stays the array
+/// descriptor, `Ljava/util/List;` is `java/util/List`): its `Class` object.
 fn erased(descriptor: &str) -> Value {
-    Value::Ref(Some(erased_field_type(descriptor)))
+    crate::runtime::host_class::class_value(&erased_field_type(descriptor))
 }
 
 /// The `(class, name, descriptor)` a `Method` handle names, when it carries
@@ -339,7 +339,10 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Ok(Some(match parsed {
                 Some((superclass, _)) => generic_type_value(&superclass),
-                None => Value::Ref(Some(super_name)),
+                // No Signature attribute (a plain `class Bar extends Foo`):
+                // the generic superclass is the raw class, the literal's own
+                // `Class` handle, never its name as text (#215 re-check).
+                None => crate::runtime::host_class::class_value(&super_name),
             }));
         }
         let types = match parsed {
@@ -375,8 +378,13 @@ impl<H: Host> Runtime<'_, H> {
         ) {
             return Some(PUBLIC | ABSTRACT | FINAL);
         }
+        // A nested class's are its own `InnerClasses` row's (`static` lives
+        // only there), as JDK 25's `Class.getModifiers` reads them.
         if let Some(file) = self.class(class) {
-            return class_access_flags(file).map(|flags| i32::from(flags) & !0x0020);
+            return file
+                .nested_access_flags()
+                .or_else(|| class_access_flags(file))
+                .map(|flags| i32::from(flags) & !0x0020);
         }
         Some(match class {
             "java/lang/String"
@@ -464,7 +472,7 @@ impl<H: Host> Runtime<'_, H> {
                     .unwrap_or_else(erased_parameters);
                 self.generic_type_array(TYPE_ARRAY, &types)
             }
-            ("getDeclaringClass", "()Ljava/lang/Class;") => Value::Ref(Some(class)),
+            ("getDeclaringClass", "()Ljava/lang/Class;") => crate::runtime::host_class::class_value(&class),
             ("getModifiers", "()I") => {
                 let file = self.class(&class)?;
                 let method = file.method(&name, &descriptor)?;

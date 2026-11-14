@@ -1007,8 +1007,15 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         if r.owner != "java/lang/Class" || r.descriptor != "()Z" {
             return None;
         }
-        let name = expect_ref(receiver?)?;
-        let file = self.class(name)?;
+        let name = crate::host_class::class_name(receiver?)?;
+        // A primitive, an array or a JDK class: `isInterface` from Java 25's
+        // table (`List.class.isInterface()`); the rest is the host's.
+        let Some(file) = self.class(name) else {
+            return (r.name == "isInterface")
+                .then(|| crate::host_class::table_is_interface(name))
+                .flatten()
+                .map(|interface| Value::Int(i32::from(interface)));
+        };
         let flags = class_access_flags(file)?;
         let answer = match r.name.as_str() {
             "isInterface" => flags & 0x0200 != 0,

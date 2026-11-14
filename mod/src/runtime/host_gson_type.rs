@@ -71,7 +71,8 @@ fn canonical_node(node: GenericType) -> GenericType {
 /// The value a canonical node is, the Gson object `id` for one that is no class or variable.
 fn node_value(id: String, node: &GenericType) -> Value {
     match node {
-        GenericType::Class(name) => Value::Ref(Some(name.clone())),
+        // A class is its `Class` object (#156 P13b1).
+        GenericType::Class(name) => crate::runtime::host_class::class_value(name),
         GenericType::Variable { .. } => type_value(node),
         _ => Value::Host(HostRef::of_values(
             HostKind::GsonType,

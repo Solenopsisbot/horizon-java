@@ -79,7 +79,7 @@ impl<H: Host> Runtime<'_, H> {
                 Some(Value::Ref(Some(class.replace('/', "."))))
             }
             ("getSuperclass", "()Ljava/lang/Class;") => {
-                (side.superclass)(&class).map(|parent| Value::Ref(Some(parent)))
+                (side.superclass)(&class).map(|parent| crate::host_class::class_value(&parent))
             }
             ("isInterface", "()Z") => {
                 (side.is_interface)(&class).map(|is| Value::Int(i32::from(is)))

@@ -5045,7 +5045,7 @@ impl Host for StdHost {
             ("java/lang/Character", "SIZE", "I") => Ok(Value::Int(16)),
             ("java/lang/Character", "BYTES", "I") => Ok(Value::Int(2)),
             // `int.class` and its siblings compile to a `TYPE` read on the
-            // wrapper, so the primitive's `Class` marker is the primitive name.
+            // wrapper: the primitive's `Class`, keyed by its keyword.
             // Without it a `getMethod(name, new Class[]{int.class})` call sees
             // null and loses the signature it is selecting on.
             (
@@ -5060,20 +5060,17 @@ impl Host for StdHost {
                 | "java/lang/Void",
                 "TYPE",
                 "Ljava/lang/Class;",
-            ) => Ok(Value::Ref(Some(
-                match r.owner.as_str() {
-                    "java/lang/Boolean" => "boolean",
-                    "java/lang/Byte" => "byte",
-                    "java/lang/Character" => "char",
-                    "java/lang/Short" => "short",
-                    "java/lang/Integer" => "int",
-                    "java/lang/Long" => "long",
-                    "java/lang/Float" => "float",
-                    "java/lang/Double" => "double",
-                    _ => "void",
-                }
-                .into(),
-            ))),
+            ) => Ok(host_class::class_value(match r.owner.as_str() {
+                "java/lang/Boolean" => "boolean",
+                "java/lang/Byte" => "byte",
+                "java/lang/Character" => "char",
+                "java/lang/Short" => "short",
+                "java/lang/Integer" => "int",
+                "java/lang/Long" => "long",
+                "java/lang/Float" => "float",
+                "java/lang/Double" => "double",
+                _ => "void",
+            })),
             // The standard streams. They are real `PrintStream`s over the
             // process's stdout/stderr; the bounded host has no console, so the
             // text lands in the same in-memory sink a modelled writer uses.
@@ -5772,8 +5769,9 @@ impl Host for StdHost {
                 }
             }
             // commons-lang3 ships with the game, and settings libraries box a
-            // field's type through it (Carpet's `ParsedRule`). A primitive's
-            // class marker is its name, as the wrapper `TYPE` statics answer.
+            // field's type through it (Carpet's `ParsedRule`, which looks the
+            // answer up in a map keyed by `X.class`). A primitive's `Class` is
+            // keyed by its name, as the wrapper `TYPE` statics answer.
             (
                 "org/apache/commons/lang3/ClassUtils",
                 "primitiveToWrapper" | "wrapperToPrimitive",
@@ -5803,12 +5801,23 @@ impl Host for StdHost {
                     }
                 });
                 Ok(match mapped {
-                    Some(mapped) => Value::Ref(Some(mapped.to_owned())),
+                    Some(mapped) => host_class::class_value(mapped),
                     // A non-primitive passes through `primitiveToWrapper`
                     // unchanged; `wrapperToPrimitive` answers null for it.
                     None if to_wrapper => class.clone(),
                     None => Value::Ref(None),
                 })
+            }
+            // A `Class` against class-marker text of its name, until #156 P13c
+            // (`host_class.rs`): counted, the old answer kept.
+            ("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z")
+                if host_class::handle_against_same_text(
+                    Self::argument(r, args, 0)?,
+                    Self::argument(r, args, 1)?,
+                ) =>
+            {
+                self.unknown_host_call(r)?;
+                Ok(Value::Int(1))
             }
             ("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z") => Ok(
                 Value::Int((Self::argument(r, args, 0)? == Self::argument(r, args, 1)?) as i32),
@@ -6376,6 +6385,18 @@ impl Host for StdHost {
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
         }
+        // `equals` between a `Class` and class-marker text of its name (either
+        // side the receiver), until #156 P13c (`host_class.rs`): counted, the
+        // old answer (equal markers) kept.
+        if r.name == "equals"
+            && r.descriptor == "(Ljava/lang/Object;)Z"
+            && args
+                .first()
+                .is_some_and(|other| host_class::handle_against_same_text(receiver, other))
+        {
+            self.unknown_host_call(r)?;
+            return Ok(Value::Int(1));
+        }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
         // An object's are its class's: the models below answer them.
@@ -6485,11 +6506,11 @@ impl Host for StdHost {
             // guess, so it is counted, not answered silently.
             // A text `instanceof String` accepts is a `String` here too.
             return match class_of_value(receiver) {
-                Some(class) => Ok(Value::Ref(Some(class))),
+                Some(class) => Ok(host_class::class_value(&class)),
                 None if expect_ref(receiver)
                     .is_some_and(|text| value_class::is_plain_string(text)) =>
                 {
-                    Ok(Value::Ref(Some("java/lang/String".into())))
+                    Ok(host_class::class_value("java/lang/String"))
                 }
                 None => self.unknown_host_call(r),
             };
@@ -6726,7 +6747,7 @@ impl Host for StdHost {
                 let name = expect_string(Self::argument(r, args, 0)?);
                 return self
                     .class_marker(name)
-                    .map(|marker| Value::Ref(Some(marker.to_owned())))
+                    .map(host_class::class_value)
                     .ok_or_else(|| {
                         NativeError::Metadata(format!(
                             "java/lang/ClassLoader.loadClass {name} was not explicitly seeded; host classpath scanning is disabled"
@@ -6875,14 +6896,14 @@ impl Host for StdHost {
             match (r.name.as_str(), r.descriptor.as_str(), field.descriptor) {
                 ("getName", "()Ljava/lang/String;", _) => return Ok(Value::Ref(Some(field.name))),
                 ("getType", "()Ljava/lang/Class;", Some(descriptor)) => {
-                    return Ok(Value::Ref(Some(erased_field_type(&descriptor))));
+                    return Ok(host_class::class_value(&erased_field_type(&descriptor)));
                 }
                 ("getModifiers", "()I", _) => {
                     return Ok(Value::Int(i32::from(field.access.unwrap_or(0))));
                 }
                 // The class whose field table the lookup found it in.
                 ("getDeclaringClass", "()Ljava/lang/Class;", _) => {
-                    return Ok(Value::Ref(Some(field.class)));
+                    return Ok(host_class::class_value(&field.class));
                 }
                 _ => {}
             }
@@ -7864,9 +7885,8 @@ impl Host for StdHost {
                 ));
             };
             return match (r.name.as_str(), r.descriptor.as_str()) {
-                ("get" | "type", "()Ljava/lang/Object;" | "()Ljava/lang/Class;") => {
-                    Ok(Value::Ref(Some(provider.to_owned())))
-                }
+                ("get", "()Ljava/lang/Object;") => Ok(Value::Ref(Some(provider.to_owned()))),
+                ("type", "()Ljava/lang/Class;") => Ok(host_class::class_value(&provider)),
                 _ => Err(NativeError::MissingMethod(format!(
                     "java/util/ServiceLoader$Provider#{}{}",
                     r.name, r.descriptor
@@ -8071,10 +8091,13 @@ impl Host for StdHost {
                     .filter(|(parent, _)| !parent.is_empty())
                     .map_or(Value::Ref(None), |(parent, _)| path_value(parent)))
             }
-            ("java/lang/Class", "getName", "()Ljava/lang/String;")
-            | ("java/lang/Class", "getTypeName", "()Ljava/lang/String;") => {
+            ("java/lang/Class", "getName", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some(class_binary_name(receiver))))
             }
+            // An array's is its element's name and `[]` per dimension.
+            ("java/lang/Class", "getTypeName", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
+                host_class::type_name(host_class::class_name(receiver).unwrap_or_default()),
+            ))),
             // A nested class the host's collections are made as answers its
             // exact names (`java_immutable::member_class_names`).
             ("java/lang/Class", "getCanonicalName", "()Ljava/lang/String;") => {
@@ -8088,6 +8111,16 @@ impl Host for StdHost {
                 let name = class_binary_name(receiver);
                 if let Some((simple, _)) = java_immutable::member_class_names(&name) {
                     return Ok(Value::Ref(Some(simple)));
+                }
+                // A JDK member class (`Map.Entry`): `Entry`. A nested JDK
+                // class the binary name cannot name (local, anonymous) is
+                // counted, never `Map$Entry`.
+                let internal = name.replace('.', "/");
+                if let Some((simple, _)) = reflect_names::jdk_member_names(&internal) {
+                    return Ok(Value::Ref(Some(simple)));
+                }
+                if internal.contains('$') && jdk_closure::in_jdk_package(&internal) {
+                    return self.unknown_host_call(r);
                 }
                 Ok(Value::Ref(Some(
                     name.rsplit('.').next().unwrap_or(&name).to_owned(),
@@ -8125,7 +8158,18 @@ impl Host for StdHost {
             ("java/lang/Class", "isArray", "()Z") => {
                 Ok(Value::Int(class_is_array(receiver) as i32))
             }
-            ("java/lang/Class", "isInterface", "()Z") => Ok(Value::Int(0)),
+            // The runtime answers a class it holds; a primitive, an array and
+            // a JDK class of Java 25's table answer here. Any other class
+            // (a game's, a JDK class outside the table) is counted, never a
+            // guessed `false`.
+            ("java/lang/Class", "isInterface", "()Z") => {
+                match host_class::table_is_interface(
+                    host_class::class_name(receiver).unwrap_or_default(),
+                ) {
+                    Some(interface) => Ok(Value::Int(i32::from(interface))),
+                    None => self.unknown_host_call(r),
+                }
+            }
             ("java/lang/Class", "desiredAssertionStatus", "()Z") => Ok(Value::Int(0)),
             ("java/lang/Class", "isAssignableFrom", "(Ljava/lang/Class;)Z") => {
                 let target = class_binary_name(receiver);
@@ -9508,10 +9552,15 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/EntrypointContainer",
                 "getEntrypointClass",
                 "()Ljava/lang/Class;",
-            ) => Ok(Value::Ref(
-                host_fabric_runtime::entrypoint_container_parts(receiver)
-                    .map(|parts| parts.class.replace('/', ".")),
-            )),
+            ) => Ok(
+                host_fabric_runtime::entrypoint_container_parts(receiver).map_or(
+                    Value::Ref(None),
+                    |parts| {
+                        // `fabric.mod.json` names it in binary form (`demo.Main`).
+                        host_class::class_value(&parts.class.replace('.', "/"))
+                    },
+                ),
+            ),
             (
                 "net/fabricmc/loader/api/EntrypointContainer"
                 | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
@@ -9938,6 +9987,9 @@ fn expect_ref(value: &Value) -> Option<&String> {
     match value {
         Value::Ref(value) => value.as_ref(),
         Value::Host(handle) if jar_object::is_object_handle(handle) => Some(handle.key_text()),
+        // A `Class` reads as the class marker it was until #156 P13c
+        // (`host_class.rs`), for the readers not yet moved to `class_name`.
+        Value::Host(handle) if handle.kind() == HostKind::Class => Some(handle.key_text()),
         _ => None,
     }
 }
@@ -11078,6 +11130,11 @@ impl host_ref::Nested for MarkerText {
         Ok(Some(match value {
             // An object prints its key, as its marker did.
             Value::Host(handle) if jar_object::is_object_handle(handle) => handle.key().to_owned(),
+            // A `Class` by Java 25's table, else its name (a diagnostic's).
+            Value::Host(handle) if handle.kind() == HostKind::Class => {
+                host_class::class_text(handle.key(), host_class::table_is_interface(handle.key()))
+                    .unwrap_or_else(|| handle.key().to_owned())
+            }
             Value::Host(handle) => return handle.to_string(self),
             other => value_text(other),
         }))
@@ -11125,6 +11182,11 @@ impl host_ref::Nested for HostNested<'_> {
                 host.modelled_to_string(value)
             }
             (Value::Host(handle), None) if jar_object::is_object_handle(handle) => None,
+            // A `Class` the host can name the kind of: a primitive, an array,
+            // a JDK class of Java 25's table. A jar's class is the runtime's.
+            (Value::Host(handle), _) if handle.kind() == HostKind::Class => {
+                host_class::class_text(handle.key(), host_class::table_is_interface(handle.key()))
+            }
             (Value::Host(handle), _) => return handle.to_string(self),
             (Value::Ref(Some(text)), _) if value_class::is_plain_string(text) => Some(text.clone()),
             (Value::Ref(Some(_)), Some(host)) => host.modelled_to_string(value),
@@ -12551,7 +12613,7 @@ fn type_descriptor(value: &GenericType) -> Option<String> {
 }
 
 /// Materialize one type node as the value `Field.getGenericType` and friends
-/// hand back. A plain class is the class marker itself, so
+/// hand back. A plain class is its `Class` object, so
 /// `getGenericType() == String.class` and `getRawType() == List.class` hold;
 /// every other shape is a `java.lang.reflect.Type` handle.
 fn generic_type_value(value: &GenericType) -> Value {
@@ -19594,6 +19656,22 @@ struct Runtime<'a, H> {
     /// [`BUDGET_CHECK_INSTRUCTIONS`] and in [`Runtime::invoke`].
     budget: &'a ExecutionBudget,
 }
+/// A `Class.isAssignableFrom` answer (`Runtime::class_assignable`).
+enum Assignable {
+    Known(bool),
+    /// Not known here: the caller counts the call.
+    Counted,
+    /// A name the runtime does not know: the host's nominal answer.
+    Host,
+}
+
+/// Whether `file` itself declares `field` (name and descriptor).
+fn declares_field(file: &ClassFile, field: &MethodRef) -> bool {
+    file.fields
+        .iter()
+        .any(|declared| declared.name == field.name && declared.descriptor == field.descriptor)
+}
+
 impl<H: Host> Runtime<'_, H> {
     fn static_field_key(field: &MethodRef) -> String {
         format!("{}#{}{}", field.owner, field.name, field.descriptor)
@@ -19618,10 +19696,15 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 break;
             };
-            if file.fields.iter().any(|declared| {
-                declared.name == field.name && declared.descriptor == field.descriptor
-            }) {
+            if declares_field(file, field) {
                 return current;
+            }
+            // JVMS 5.4.3.2: the direct superinterfaces, recursively, come
+            // before the superclass (`JsoncElement.INDENT` read through
+            // `JsoncObject`, a non-constant interface field).
+            let mut seen = BTreeSet::new();
+            if let Some(owner) = self.interface_field_owner(file, field, &mut seen) {
+                return owner;
             }
             if file.super_name.is_empty() || file.super_name == current {
                 break;
@@ -19629,6 +19712,32 @@ impl<H: Host> Runtime<'_, H> {
             current = file.super_name.clone();
         }
         field.owner.clone()
+    }
+
+    /// The superinterface of `file` that declares `field`, searched in
+    /// declaration order and depth first as JVMS 5.4.3.2 does, bounded by
+    /// [`MAX_SUPERCLASS_WALK`] interfaces.
+    fn interface_field_owner(
+        &self,
+        file: &ClassFile,
+        field: &MethodRef,
+        seen: &mut BTreeSet<String>,
+    ) -> Option<String> {
+        for interface in file.interface_names() {
+            if seen.len() >= MAX_SUPERCLASS_WALK || !seen.insert(interface.clone()) {
+                continue;
+            }
+            let Some(declared) = self.class(&interface) else {
+                continue;
+            };
+            if declares_field(declared, field) {
+                return Some(interface);
+            }
+            if let Some(owner) = self.interface_field_owner(declared, field, seen) {
+                return Some(owner);
+            }
+        }
+        None
     }
 
     /// Resolve a class this execution may link: the running jar's own classes
@@ -20938,7 +21047,41 @@ impl<H: Host> Runtime<'_, H> {
         let binary = expect_string(
             name.ok_or_else(|| NativeError::Metadata("Class.forName needs a class name".into()))?,
         );
+        let not_found = || NativeError::UncaughtException {
+            class: "java/lang/ClassNotFoundException".into(),
+            message: Some(binary.to_owned()),
+            frame: None,
+        };
+        // `forName` takes a binary name: `java/lang/String` names no class.
+        if binary.contains('/') {
+            return Err(not_found());
+        }
         let internal = binary.replace('.', "/");
+        // An array class by its `getName` (`[I`, `[Ljava.lang.String;`): one
+        // when its element class is (`[V` and a bare `[L…` are not).
+        if let Some((dimensions, _)) = host_class::array_element(&internal) {
+            let element = &internal[dimensions..];
+            let resolves = match element.as_bytes() {
+                [b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D'] => true,
+                [b'L', .., b';'] => {
+                    let class = &element[1..element.len() - 1];
+                    self.has_class(class)
+                        || library_dispatch::jdk_class_exists(class)
+                        || self.host.platform_class_present(class)
+                }
+                _ => false,
+            };
+            // HotSpot names a malformed array class in its internal form.
+            return if resolves {
+                Ok(host_class::class_value(&internal))
+            } else {
+                Err(NativeError::UncaughtException {
+                    class: "java/lang/ClassNotFoundException".into(),
+                    message: Some(internal),
+                    frame: None,
+                })
+            };
+        }
         if self.has_class(&internal) {
             let initialize = match r.descriptor.as_str() {
                 "(Ljava/lang/String;)Ljava/lang/Class;" => true,
@@ -20950,19 +21093,19 @@ impl<H: Host> Runtime<'_, H> {
             if initialize {
                 self.ensure_initialized(&internal)?;
             }
-            return Ok(Value::Ref(Some(internal)));
+            return Ok(host_class::class_value(&internal));
         }
         if library_dispatch::jdk_class_exists(&internal)
             || self.host.platform_class_present(&internal)
         {
-            return Ok(Value::Ref(Some(internal)));
+            return Ok(host_class::class_value(&internal));
         }
         // A class a family kind owns (an event's `getClass().getName()`): the run's loader may
         // provide it (NeoForge) or not (Java's `ClassNotFoundException` on Fabric), which is not
         // known here. Counted; the class is the answer a caller can go on with.
         if owned_class::owned_class_name(&internal) {
             self.host.unknown_operand_call(r)?;
-            return Ok(Value::Ref(Some(internal)));
+            return Ok(host_class::class_value(&internal));
         }
         // The JVM throws for an absent class, and a platform probe relies on
         // its `catch (ClassNotFoundException)` to try the next loader. A null
@@ -21069,6 +21212,103 @@ impl<H: Host> Runtime<'_, H> {
         false
     }
 
+    /// `target.isAssignableFrom(source)` (internal names): known, counted
+    /// (the supertypes are not known here), or left to the host (a name the
+    /// runtime does not know at all keeps the host's nominal answer).
+    ///
+    /// * A primitive is assignable only from itself (`Object.class` is not
+    ///   from `int.class`).
+    /// * An array is an `Object`, a `Cloneable` and a `Serializable`; one
+    ///   array type is assignable from another when their components are (a
+    ///   primitive component only from itself), JLS 4.10.3.
+    /// * A host kind's class answers by its row unless the run holds that
+    ///   class file; a held class walks its hierarchy and the jar's Mixins; a
+    ///   JDK class answers from Java 25's table, counted outside it.
+    fn class_assignable(&self, target: &str, source: &str, depth: usize) -> Assignable {
+        if target == source {
+            return Assignable::Known(true);
+        }
+        if host_class::is_primitive(source) || host_class::is_primitive(target) {
+            return Assignable::Known(false);
+        }
+        if let Some(component) = source.strip_prefix('[') {
+            if matches!(
+                target,
+                "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable"
+            ) {
+                return Assignable::Known(true);
+            }
+            let Some(target_component) = target.strip_prefix('[') else {
+                return Assignable::Known(false);
+            };
+            let (source, target) = (
+                erased_field_type(component),
+                erased_field_type(target_component),
+            );
+            if host_class::is_primitive(&source) || host_class::is_primitive(&target) {
+                return Assignable::Known(source == target);
+            }
+            if depth >= MAX_SUPERCLASS_WALK {
+                return Assignable::Counted;
+            }
+            return match self.class_assignable(&target, &source, depth + 1) {
+                // A component the runtime cannot name: its array is not
+                // the host's to answer either.
+                Assignable::Host => Assignable::Counted,
+                known => known,
+            };
+        }
+        if target.starts_with('[') {
+            return Assignable::Known(false);
+        }
+        // A host kind's class (`getClass()` of a handle): its row, unless
+        // the run holds that class file (a jar's own copy wins).
+        if self.class(source).is_none()
+            && let Some(answer) = HostKind::class_instance_of(source, target, self)
+        {
+            return answer.map_or(Assignable::Counted, Assignable::Known);
+        }
+        if target == "java/lang/Object" {
+            return Assignable::Known(true);
+        }
+        if self.class(source).is_some() {
+            return Assignable::Known(
+                self.class_is_instance(source, target) || self.woven_is_instance(source, target),
+            );
+        }
+        // A JDK class of Java 25's generated table (`jdk_closure.rs`; a
+        // `FromKey` kind's class, `java/lang/Thread`): its whole supertype set
+        // is known, and a `false` stands only when proved.
+        if crate::runtime::jdk_closure::class(source).is_some() {
+            return host_ref::ClassHierarchy::is_instance(&host_ref::JdkHierarchy, source, target)
+                .map_or(Assignable::Counted, Assignable::Known);
+        }
+        // A JDK class outside the table: its supertypes are not known here.
+        if crate::runtime::jdk_closure::in_jdk_package(source) {
+            return Assignable::Counted;
+        }
+        Assignable::Host
+    }
+
+    /// Whether a Mixin of the jar adds `wanted` to `name` or one of its held
+    /// superclasses (`checkcast.rs`): the woven class is a `wanted` though
+    /// its class file does not say so.
+    fn woven_is_instance(&self, name: &str, wanted: &str) -> bool {
+        let mut current = name.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if self.mixin_adds_interface(&current, wanted) {
+                return true;
+            }
+            match self.class(&current) {
+                Some(file) if !file.super_name.is_empty() && file.super_name != current => {
+                    current = file.super_name.clone();
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
     /// Whether an interface, or one it extends, is `wanted`.
     ///
     /// An interface's parents are the interfaces its class file lists (its
@@ -21112,8 +21352,25 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A JDK class: Java 25's table (`jdk_closure.rs`); one outside it is
         // left to the host, which counts it.
+        // Every array is a `Cloneable` and a `Serializable` (JLS 10.8).
+        if name.starts_with('[') {
+            let values = ["java/lang/Cloneable", "java/io/Serializable"]
+                .iter()
+                .map(|interface| host_class::class_value(interface))
+                .collect();
+            return Some(self.new_array_value("[Ljava/lang/Class;", values));
+        }
         let interfaces = match (self.class(&name), crate::runtime::jdk_closure::class(&name)) {
-            (Some(file), _) => file.interface_names(),
+            // The woven class's: its own, then what the jar's Mixins add.
+            (Some(file), _) => {
+                let mut interfaces = file.interface_names();
+                for added in self.mixin_added_interfaces(&name) {
+                    if !interfaces.contains(&added) {
+                        interfaces.push(added);
+                    }
+                }
+                interfaces
+            }
             (None, Some(row)) => row
                 .interfaces
                 .iter()
@@ -21123,8 +21380,8 @@ impl<H: Host> Runtime<'_, H> {
             (None, None) => Vec::new(),
         };
         let values = interfaces
-            .into_iter()
-            .map(|interface| Value::Ref(Some(interface)))
+            .iter()
+            .map(|interface| host_class::class_value(interface))
             .collect();
         Some(self.new_array_value("[Ljava/lang/Class;", values))
     }
@@ -21180,10 +21437,8 @@ impl<H: Host> Runtime<'_, H> {
                 // The copy is an array of the original's class, or of the
                 // `Class<? extends T[]> newType` the last argument names.
                 let class = if r.descriptor.contains("Ljava/lang/Class;") {
-                    match args.last() {
-                        Some(Value::Ref(Some(class))) if class.starts_with('[') => {
-                            class.replace('.', "/")
-                        }
+                    match args.last().and_then(host_class::class_name) {
+                        Some(class) if class.starts_with('[') => class.replace('.', "/"),
                         _ => return Ok(None),
                     }
                 } else {
@@ -21381,6 +21636,12 @@ impl<H: Host> Runtime<'_, H> {
         {
             let receiver = receiver.unwrap_or(&Value::Ref(None));
             let other = StdHost::argument(r, args, 0)?;
+            // A `Class` against class-marker text of its name, until #156
+            // P13c (`host_class.rs`): counted, the old answer kept.
+            if host_class::handle_against_same_text(receiver, other) {
+                self.host.unknown_operand_call(r)?;
+                return Ok(Some(Value::Int(1)));
+            }
             return Ok(Some(Value::Int(
                 (value_marker(receiver) == value_marker(other)) as i32,
             )));
@@ -21417,12 +21678,12 @@ impl<H: Host> Runtime<'_, H> {
                 .and_then(|signature| parse_generic_signature(signature, scope))
                 .map_or_else(
                     || {
-                        Value::Ref(Some(
-                            descriptor
+                        host_class::class_value(
+                            &descriptor
                                 .as_deref()
                                 .map(erased_field_type)
                                 .unwrap_or_default(),
-                        ))
+                        )
                     },
                     |value| generic_type_value(&value),
                 );
@@ -21494,7 +21755,7 @@ impl<H: Host> Runtime<'_, H> {
                     "getRawType",
                     "()Ljava/lang/reflect/Type;",
                     GenericType::Parameterized { raw, .. },
-                ) => Some(Value::Ref(Some(raw))),
+                ) => Some(host_class::class_value(&raw)),
                 (
                     "getActualTypeArguments",
                     "()[Ljava/lang/reflect/Type;",
@@ -21541,7 +21802,7 @@ impl<H: Host> Runtime<'_, H> {
                         declaration: Some(TypeDeclaration::Class(class)),
                         ..
                     },
-                ) => Some(Value::Ref(Some(class))),
+                ) => Some(host_class::class_value(&class)),
                 (
                     "getUpperBounds",
                     "()[Ljava/lang/reflect/Type;",
@@ -21572,40 +21833,10 @@ impl<H: Host> Runtime<'_, H> {
         {
             let target = reflection_class_name(receiver, r)?.replace('.', "/");
             let source = reflection_class_name(args.first(), r)?.replace('.', "/");
-            // A host kind's class (`getClass()` of a handle): its row, unless
-            // the run holds that class file (a jar's own copy wins).
-            if self.class(&source).is_none()
-                && let Some(answer) = HostKind::class_instance_of(&source, &target, self)
-            {
-                return match answer {
-                    Some(answer) => Ok(Some(Value::Int(i32::from(answer)))),
-                    None => self.host.unknown_operand_call(r).map(Some),
-                };
-            }
-            let assignable = target == source
-                || target == "java/lang/Object"
-                || (!class_is_primitive(&Value::Ref(Some(source.clone())))
-                    && self.class(&source).is_some()
-                    && self.class_is_instance(&source, &target));
-            if assignable || self.class(&source).is_some() {
-                return Ok(Some(Value::Int(i32::from(assignable))));
-            }
-            // A JDK class of Java 25's generated table (`jdk_closure.rs`;
-            // a `FromKey` kind's class, `java/lang/Thread`): its whole
-            // supertype set is known, and a `false` stands only when proved.
-            if crate::runtime::jdk_closure::class(&source).is_some() {
-                return match host_ref::ClassHierarchy::is_instance(
-                    &host_ref::JdkHierarchy,
-                    &source,
-                    &target,
-                ) {
-                    Some(answer) => Ok(Some(Value::Int(i32::from(answer)))),
-                    None => self.host.unknown_operand_call(r).map(Some),
-                };
-            }
-            // A JDK class outside the table: its supertypes are not known here.
-            if crate::runtime::jdk_closure::in_jdk_package(&source) {
-                return self.host.unknown_operand_call(r).map(Some);
+            match self.class_assignable(&target, &source, 0) {
+                Assignable::Known(answer) => return Ok(Some(Value::Int(i32::from(answer)))),
+                Assignable::Counted => return self.host.unknown_operand_call(r).map(Some),
+                Assignable::Host => {}
             }
         }
         if let Some(value) = self.invoke_reflect_enum(r, receiver)? {
@@ -21615,6 +21846,9 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_reflect_simple_name(r, receiver)? {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.invoke_reflect_canonical_name(r, receiver)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_reflect_enclosing_class(r, receiver)? {
@@ -21642,18 +21876,26 @@ impl<H: Host> Runtime<'_, H> {
             // outside it is counted, never a made-up `Object`.
             if self.class(&class).is_none() {
                 if let Some(row) = crate::runtime::jdk_closure::class(&class) {
-                    return Ok(Some(Value::Ref(row.superclass.map(str::to_owned))));
+                    return Ok(Some(
+                        row.superclass
+                            .map_or(Value::Ref(None), host_class::class_value),
+                    ));
                 }
                 if crate::runtime::jdk_closure::in_jdk_package(&class) {
                     return self.host.unknown_operand_call(r).map(Some);
                 }
+            }
+            // An interface's (an annotation's too) is null; its class file
+            // names `Object`.
+            if self.class_is_interface(&class) == Some(true) {
+                return Ok(Some(Value::Ref(None)));
             }
             let parent = self
                 .class(&class)
                 .map(|file| file.super_name.clone())
                 .filter(|parent| !parent.is_empty())
                 .unwrap_or_else(|| "java/lang/Object".to_owned());
-            return Ok(Some(Value::Ref(Some(parent))));
+            return Ok(Some(host_class::class_value(&parent)));
         }
         if r.owner == "java/lang/Class"
             && matches!(r.name.as_str(), "getFields" | "getDeclaredFields")
@@ -22295,7 +22537,7 @@ impl<H: Host> Runtime<'_, H> {
                 .strip_prefix('L')
                 .and_then(|descriptor| descriptor.strip_suffix(';'))
                 .unwrap_or(&annotation.descriptor);
-            return Ok(Value::Ref(Some(name.to_owned())));
+            return Ok(host_class::class_value(name));
         }
         // The use site's value, else the interface's `default`, converted to
         // the member's declared type (`annotation_values`).
@@ -26839,7 +27081,8 @@ fn read_i32(code: &[u8], pc: &mut usize) -> Result<i32, NativeError> {
 
 fn constant_value(pool: &[Cp], index: u16) -> Result<Value, NativeError> {
     match pool.get(index as usize) {
-        Some(Cp::Class(_)) => Ok(Value::Ref(Some(class_name(pool, index)?))),
+        // `Foo.class`, `int[].class`: the class's one `Class` object.
+        Some(Cp::Class(_)) => Ok(host_class::class_value(&class_name(pool, index)?)),
         Some(Cp::String(i)) => match pool.get(*i as usize) {
             Some(Cp::Utf8(s)) => Ok(Value::Ref(Some(s.clone()))),
             x => Err(NativeError::InvalidConstant(index, format!("{x:?}"))),
@@ -32897,7 +33140,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&load, &loader, &[Value::Ref(Some("demo.Provider".into()))],)
                 .unwrap(),
-            Value::Ref(Some("demo/Provider".into()))
+            host_class::class_value("demo/Provider")
         );
         let missing = host
             .invoke_instance(
@@ -38351,7 +38594,7 @@ mandatory = true
                     &[Value::Ref(Some("demo.Reflective".into()))]
                 )
                 .unwrap(),
-            Value::Ref(Some("demo/Reflective".into()))
+            host_class::class_value("demo/Reflective")
         );
         // The JVM throws for an absent class; a platform probe catches the
         // exception and tries its next loader.
@@ -38562,8 +38805,8 @@ mandatory = true
                 .invoke_instance(&field_type, &declared[0], &[])
                 .unwrap(),
             // A primitive field's class is the primitive's own class
-            // (`int.class`), whose marker is its name, not its descriptor.
-            Value::Ref(Some("int".into()))
+            // (`int.class`), keyed by its name, not its descriptor.
+            host_class::class_value("int")
         );
     }
 
@@ -41945,7 +42188,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Ref(Some("demo.Main".into()))
+            host_class::class_value("demo/Main")
         );
         assert_eq!(
             host.invoke_instance(
@@ -43739,7 +43982,7 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(class, Value::Ref(Some("demo/Model".into())));
+        assert_eq!(class, host_class::class_value("demo/Model"));
     }
 
     /// Every site names one distinct vanilla method, a position the hook can
