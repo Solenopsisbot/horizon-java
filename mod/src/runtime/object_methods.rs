@@ -877,6 +877,20 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Ok(Some(Value::Int(hash)));
             }
+            // A host set or map no model hashed (Guava's `ImmutableSet`/`ImmutableMap`, #223):
+            // `AbstractSet`'s sum and `AbstractMap`'s sum of `hash(k) ^ hash(v)`, which every
+            // `Set`/`Map` keeps (`host_value_hash`); an element it cannot hash is counted.
+            if self.equality_of(receiver) == Equality::Host
+                && matches!(
+                    self.host_collection_kind(receiver),
+                    Some(CollectionKind::Set | CollectionKind::Map)
+                )
+            {
+                return match self.java_hash(receiver)? {
+                    Some(hash) => Ok(Some(Value::Int(hash))),
+                    None => self.host.unknown_operand_call(r).map(Some),
+                };
+            }
         }
         if r.name == "equals"
             && r.descriptor == EQUALS
