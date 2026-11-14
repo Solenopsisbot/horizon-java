@@ -10,7 +10,7 @@ mod javac_fixture;
 
 use horizon_native_java::StdHost;
 
-/// `java` (Temurin 25.0.5) running this `Probe`'s first six methods,
+/// `java` (Temurin 25.0.5) running this `Probe`'s first eight methods,
 /// compiled with `javac --release 21` against the real 26.3
 /// `server-game.jar` and its libraries, NeoForge 26.3.0.101's universal jar
 /// and its libraries, and fabric-registry-sync 8.0.4 (`main`, left out here,
@@ -18,6 +18,8 @@ use horizon_native_java::StdHost;
 /// first), printed these lines, the same on two runs; pasted verbatim.
 const EXPECTED: &str = "\
 registers=falsefalse11truetruefalse\n\
+registerClass=net.neoforged.neoforge.registries.DeferredRegistertrue\n\
+spelledRegister=CCE\n\
 entries=falsetruetruetrue22truetrue|truetruefalse|UOEUOEUOE|2|[DeferredHolder{ResourceKey[minecraft:item / demo:x]}, DeferredHolder{ResourceKey[minecraft:item / demo:y]}]\n\
 entriesIteratorRemove=UOE\n\
 entriesEmpty=true0[]falsetruefalse\n\
@@ -99,7 +101,7 @@ const STUBS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The probe. The oracle ran its first six methods; the Fabric ones need
+/// The probe. The oracle ran its first eight methods; the Fabric ones need
 /// Fabric's Mixins (`buildAndRegister` registers through an accessor), so
 /// their Java answer is fabric-registry-sync 8.0.4's bytecode: `from(r)` is
 /// `new FabricRegistryBuilder(r)` and `buildAndRegister()` ends
@@ -129,6 +131,16 @@ public final class Probe {
         return "" + (r1 == r2) + r1.equals(r2) + r1.getEntries().size() + r2.getEntries().size()
             + (r1.getEntries().iterator().next() == x) + (r2.getEntries().iterator().next() == y)
             + r1.getEntries().contains(y);
+    }
+
+    public static String registerClass() {
+        Object r = DeferredRegister.create(Registries.ITEM, "demo");
+        return r.getClass().getName() + (r instanceof DeferredRegister);
+    }
+
+    public static String spelledRegister() {
+        try { return "cast" + ((DeferredRegister) (Object) "deferred-register/registry/minecraft:item/demo").getEntries(); }
+        catch (ClassCastException e) { return "CCE"; }
     }
 
     public static String entries() {
@@ -208,6 +220,21 @@ fn run(fixture: &javac_fixture::Fixture, method: &str) -> (String, Vec<(String, 
     let mut host = fixture.jar.seed_host(StdHost::new());
     let text = fixture.text_on(&mut host, method);
     (text, host.unknown_host_calls())
+}
+
+/// Each `DeferredRegister.create` is a new register (`new DeferredRegister`,
+/// whose `equals` is `Object`'s) holding only what was registered through it,
+/// of the class `create` made; a `String` spelled like a register's old text
+/// is no register. Two `create` calls for one registry and namespace were one
+/// `String` sharing one entry list (#182 P1).
+#[test]
+fn each_create_is_a_register_of_its_own() {
+    let fixture = fixture("registry-answers-registers");
+    for method in ["registers", "registerClass", "spelledRegister"] {
+        let (text, unknown) = run(&fixture, method);
+        assert_eq!(text, expected(method), "{method}: {unknown:?}");
+        assert!(unknown.is_empty(), "{method}: {unknown:?}");
+    }
 }
 
 /// `getEntries()` is NeoForge's `entriesView`: one `UnmodifiableSet` per

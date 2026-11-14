@@ -383,11 +383,18 @@ const RETIRED_MARKERS: &[&str] = &[
     "holder/",
     "registered/",
     "fabric-registry-builder/",
+    "deferred-register/",
 ];
 
 /// The game classes only this family's handles (or a jar's own objects) are.
 fn family_class(target: &str) -> bool {
     target == crate::runtime::fabric_registry::BUILDER
+        || [
+            crate::runtime::host_deferred_register::NEOFORGE,
+            crate::runtime::host_deferred_register::DATA_COMPONENTS,
+            crate::runtime::host_deferred_register::FORGE,
+        ]
+        .contains(&target)
         || [
             DEFAULTED_TYPES,
             DEFERRED_HOLDER_TYPES,
@@ -469,7 +476,7 @@ fn unbound_key(row: &HolderRow) -> Option<(String, String)> {
 /// What `DeferredRegister.register` recorded for one registration.
 #[derive(Clone, Debug)]
 pub(crate) struct HolderRow {
-    /// The register's marker (`deferred-register/…`).
+    /// The register's handle key (`host_deferred_register.rs`).
     pub(crate) register: String,
     /// Forge's `RegistryObject` rather than NeoForge's `DeferredHolder`.
     pub(crate) forge: bool,

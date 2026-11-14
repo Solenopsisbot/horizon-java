@@ -235,12 +235,12 @@ impl StdHost {
                     .map_or("default", String::as_str);
                 let marker = format!("deferred-register/data-component-type/{namespace}");
                 let registry_key = args.first().cloned().unwrap_or(Value::Ref(None));
-                self.record_deferred_register(
+                Some(self.new_deferred_register(
+                    crate::runtime::host_deferred_register::DATA_COMPONENTS,
                     &marker,
                     &registry_key,
                     args.get(1).and_then(expect_ref),
-                );
-                Some(Value::Ref(Some(marker)))
+                ))
             }
             // The real game reports the running client's own version; the
             // host answers the version it was seeded with, and nothing when

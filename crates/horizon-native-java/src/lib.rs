@@ -76,6 +76,7 @@ mod host_codec;
 mod host_collector;
 mod host_component;
 mod host_config;
+mod host_deferred_register;
 mod host_entry;
 mod host_events;
 mod host_executors;
@@ -2955,11 +2956,11 @@ pub struct StdHost {
     /// marker. A constructor answers `void`, so this is where the id lives.
     identifier_objects: BTreeMap<String, String>,
     /// What each `DeferredRegister.create` was made from (registry key,
-    /// namespace), by the register's marker; `None` when two registers share
-    /// the marker or the namespace was not text (`host_ids.rs`).
+    /// namespace), by the register handle's key; `None` when the namespace
+    /// was not text (`host_ids.rs`).
     deferred_registers: BTreeMap<String, Option<(Value, String)>>,
     /// Each register's `getEntries()` view and the set it reads, by the
-    /// register's marker (`host_registry::register_entries`).
+    /// register handle's key (`host_registry::register_entries`).
     register_views: BTreeMap<String, (Value, Value)>,
     /// The registries this jar built and registered itself
     /// (`FabricRegistryBuilder.buildAndRegister`), by id: the only ones whose
@@ -5409,12 +5410,13 @@ impl Host for StdHost {
                     Some(key) => key.clone(),
                     None => Value::Ref(None),
                 };
-                self.record_deferred_register(
+                // A new register per call (#182 P1).
+                Ok(self.new_deferred_register(
+                    owner,
                     &marker,
                     &registry_key,
                     args.get(1).and_then(expect_ref),
-                );
-                Ok(Value::Ref(Some(marker)))
+                ))
             }
             ("net/fabricmc/fabric/api/event/EventFactory", "createArrayBacked", descriptor)
                 if descriptor.ends_with("Lnet/fabricmc/fabric/api/event/Event;") =>
@@ -9835,9 +9837,13 @@ impl Host for StdHost {
                     .first()
                     .and_then(expect_ref)
                     .map_or("entry", String::as_str);
-                let register = expect_ref(receiver)
-                    .map_or("deferred-register/registry/default", String::as_str)
-                    .to_owned();
+                // Only a register this runtime made (a `String` spelled like
+                // its text is none): anything else is counted.
+                let Some((register, text)) = host_deferred_register::parts(receiver)
+                    .map(|(key, text)| (key.to_owned(), text.to_owned()))
+                else {
+                    return self.unknown_host_call(r);
+                };
                 // `Identifier.fromNamespaceAndPath(namespace, name)` (Forge:
                 // `new ResourceLocation(modid, name)`): bad text throws here.
                 let forge = r.owner.starts_with("net/minecraftforge/");
@@ -9846,7 +9852,7 @@ impl Host for StdHost {
                 let (holder, value) = self.new_holder(&register, forge, made);
                 self.add_register_entry(&register, &holder);
                 self.registrations.push(RegistryEntry {
-                    registry: register,
+                    registry: text,
                     id: id.to_owned(),
                     value,
                     declaration: None,
@@ -9858,9 +9864,9 @@ impl Host for StdHost {
                 | "net/minecraftforge/registries/DeferredRegister",
                 "getEntries",
                 "()Ljava/util/Collection;",
-            ) => match expect_ref(receiver) {
-                Some(register) => {
-                    let register = register.clone();
+            ) => match host_deferred_register::parts(receiver) {
+                Some((register, _)) => {
+                    let register = register.to_owned();
                     Ok(self.register_entries(&register))
                 }
                 // No register this runtime made: what it holds is unknown.

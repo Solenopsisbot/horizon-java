@@ -480,25 +480,22 @@ pub(crate) const BLOCK_ITEM_ID_METHODS: Methods = Methods {
 };
 
 impl crate::runtime::StdHost {
-    /// `DeferredRegister.create(registryKey, namespace)`: remember what the
-    /// register was made from under its marker; a second register with the
-    /// same marker but other arguments makes the marker ambiguous.
-    pub(crate) fn record_deferred_register(
+    /// `DeferredRegister.create(registryKey, namespace)` (and its
+    /// `createDataComponents`): a new register of `class`, named `text` in the
+    /// registration rows, remembering what it was made from.
+    pub(crate) fn new_deferred_register(
         &mut self,
-        marker: &str,
+        class: &str,
+        text: &str,
         registry: &Value,
         namespace: Option<&String>,
-    ) {
-        let made = namespace.map(|namespace| (registry.clone(), namespace.clone()));
-        match self.deferred_registers.get(marker) {
-            Some(known) if *known != made => {
-                self.deferred_registers.insert(marker.to_owned(), None);
-            }
-            Some(_) => {}
-            None => {
-                self.deferred_registers.insert(marker.to_owned(), made);
-            }
+    ) -> Value {
+        let register = crate::runtime::host_deferred_register::new_register(class, text);
+        if let Some((key, _)) = crate::runtime::host_deferred_register::parts(&register) {
+            let made = namespace.map(|namespace| (registry.clone(), namespace.clone()));
+            self.deferred_registers.insert(key.to_owned(), made);
         }
+        register
     }
 
     /// `DeferredRegister.register(name, ..)`: NeoForge builds the entry's id

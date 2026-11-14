@@ -798,13 +798,20 @@ impl<H: Host> Runtime<'_, H> {
             };
             return self.attachment_holder_value(&key);
         }
-        let Some(marker) = receiver.and_then(crate::runtime::game_object::text).cloned() else {
+        // A register handle (`host_deferred_register.rs`): its key names this
+        // one register, its text the registry and namespace.
+        let Some(register) = receiver.cloned() else {
+            return Ok(None);
+        };
+        let Some((marker, text)) = crate::runtime::host_deferred_register::parts(&register)
+            .map(|(key, text)| (key.to_owned(), text.to_owned()))
+        else {
             return Ok(None);
         };
         if r.owner != DEFERRED_REGISTER {
             return Ok(None);
         }
-        let Some(namespace) = marker.strip_prefix(REGISTER_PREFIX) else {
+        let Some(namespace) = text.strip_prefix(REGISTER_PREFIX) else {
             return Ok(None);
         };
         let namespace = namespace.to_owned();
@@ -822,9 +829,7 @@ impl<H: Host> Runtime<'_, H> {
             ) => {
                 // The host keeps the registration row and the holder as it always has; this keeps
                 // the supplier the row drops, to run at the registration point.
-                let holder =
-                    self.host
-                        .invoke_instance(r, &Value::Ref(Some(marker.clone())), args)?;
+                let holder = self.host.invoke_instance(r, &register, args)?;
                 let (Some(path), Some(key)) = (
                     args.first().and_then(expect_ref).cloned(),
                     holder_key(&holder),

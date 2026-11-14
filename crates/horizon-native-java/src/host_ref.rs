@@ -239,6 +239,9 @@ pub enum HostKind {
     /// A Fabric `FabricRegistryBuilder`: key the [`HostRef::of_values`] of
     /// the registry its `buildAndRegister()` answers (`fabric_registry.rs`).
     RegistryBuilder,
+    /// A NeoForge/Forge `DeferredRegister`: key its class, a serial per
+    /// `create` call and its registration text (`host_deferred_register.rs`).
+    DeferredRegister,
     /// The event a NeoForge/Forge game-event listener receives: key its class
     /// (`host_game_event.rs`).
     GameEvent,
@@ -1051,6 +1054,15 @@ const KINDS: &[KindInfo] = &[
         // `create(key)` twice is two builders for one registry.
         canonical: never_canonical,
         methods: &crate::host_registry::BUILDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::DeferredRegister,
+        tag: "dreg",
+        // The class `create` made: `new DeferredRegister(..)` (26.3.0.101).
+        class: ClassRule::FromKey(crate::host_deferred_register::register_class),
+        // A serial per `create` call: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_deferred_register::REGISTER_METHODS,
     },
     KindInfo {
         kind: HostKind::GameEvent,
