@@ -359,6 +359,15 @@ pub enum HostKind {
     /// A modelled JDK spliterator over jar code (`jdk_spliterators.rs`): key
     /// `iter:<n>` or `ra:<n>`, which names its class.
     Spliterator,
+    /// Gson's `FormattingStyle`: key `[id, newline, indent, space]`, `id` a
+    /// constant's name or a serial per allocation (`host_gson.rs`).
+    FormattingStyle,
+    /// A `GsonBuilder`'s or `Gson`'s option set, held in its synthetic field:
+    /// key the runtime's encoding (`host_gson.rs`, `gson_model.rs`).
+    GsonOptions,
+    /// Guava `TypeToken.of(..)`'s `SimpleTypeToken`: key `[serial, type]`
+    /// (`host_type_token.rs`).
+    TypeToken,
 }
 
 /// How a kind's Java class follows from its key.
@@ -542,6 +551,14 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::AttachmentBuilder,
         &crate::host_attachment::BUILDER_CLASS_SIDE,
+    ),
+    (
+        HostKind::FormattingStyle,
+        &crate::host_gson::STYLE_CLASS_SIDE,
+    ),
+    (
+        HostKind::TypeToken,
+        &crate::host_type_token::TOKEN_CLASS_SIDE,
     ),
 ];
 
@@ -1398,6 +1415,32 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::FromKey(crate::jdk_spliterators::spliterator_class),
         canonical: never_canonical,
         methods: &crate::jdk_spliterators::JDK_SPLITERATOR,
+    },
+    KindInfo {
+        kind: HostKind::FormattingStyle,
+        tag: "gfmt",
+        class: ClassRule::Fixed(crate::host_gson::FORMATTING_STYLE),
+        // A constant's name or a serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_gson::STYLE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GsonOptions,
+        tag: "gopt",
+        // Not a Java object a jar holds: only `Object` is declared.
+        class: ClassRule::Unknown {
+            declared: crate::host_gson::options_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::TypeToken,
+        tag: "ttok",
+        class: ClassRule::Fixed(crate::host_type_token::SIMPLE_TYPE_TOKEN),
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_type_token::TOKEN_METHODS,
     },
 ];
 

@@ -24,7 +24,6 @@
 use super::*;
 
 const TYPE_TOKEN: &str = "com/google/common/reflect/TypeToken";
-const TOKEN_PREFIX: &str = "typetoken/";
 /// The captured type a `TypeToken` subclass object keeps, under its marker.
 const RUNTIME_TYPE: &str = "#runtimeTypeLjava/lang/reflect/Type;";
 
@@ -68,14 +67,6 @@ fn boxed_class(primitive: &str) -> Option<&'static str> {
     })
 }
 
-/// Java's `String.hashCode` of `text`, so a token's hash is stable and the
-/// same for equal types.
-fn java_string_hash(text: &str) -> i32 {
-    text.encode_utf16().fold(0i32, |hash, unit| {
-        hash.wrapping_mul(31).wrapping_add(i32::from(unit))
-    })
-}
-
 impl<H: Host> Runtime<'_, H> {
     /// The Guava calls this module answers, or `None`.
     pub(super) fn invoke_guava(
@@ -88,9 +79,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         if !r.owner.starts_with("com/google/common/")
-            && !receiver
-                .and_then(expect_ref)
-                .is_some_and(|marker| marker.starts_with(TOKEN_PREFIX))
+            && !receiver.is_some_and(|token| crate::host_type_token::token_type(token).is_some())
         {
             // A jar `TypeToken` subclass object answers through its type even
             // when the call site names the subclass.
@@ -400,13 +389,13 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    /// The `Type` marker a token names: a `typetoken/` marker's suffix, or
-    /// the type a jar subclass object captured.
+    /// The `Type` marker a token names: a `TypeToken.of` handle's
+    /// (`host_type_token.rs`), or the type a jar subclass object captured.
     fn token_type(&self, token: &Value) -> Option<String> {
-        let marker = expect_ref(token)?;
-        if let Some(inner) = marker.strip_prefix(TOKEN_PREFIX) {
-            return Some(inner.to_owned());
+        if let Some(inner) = crate::host_type_token::token_type(token) {
+            return Some(inner);
         }
+        let marker = crate::jar_object::object_key(token)?;
         match self
             .fields
             .get(&format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"))
@@ -417,7 +406,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn token_value(inner: &str) -> Value {
-        Value::Ref(Some(format!("{TOKEN_PREFIX}{inner}")))
+        crate::host_type_token::token(inner)
     }
 
     /// The raw class a type marker erases to.
@@ -525,16 +514,27 @@ impl<H: Host> Runtime<'_, H> {
                     None => Value::Ref(None),
                 }
             }
+            // `runtimeType.equals(that.runtimeType)` for another token;
+            // `false` for anything that is not one. Two types the markers
+            // cannot tell apart or apart for sure are counted.
             ("equals", "(Ljava/lang/Object;)Z") => {
-                let other = args.first().and_then(|value| self.token_type(value));
-                Value::Int(i32::from(other.as_deref() == Some(inner.as_str())))
+                let other = args
+                    .first()
+                    .ok_or_else(|| thrown("java/lang/NullPointerException", None))?;
+                let equal = match self.token_type(other) {
+                    Some(theirs) => crate::host_type_token::types_equal(&inner, &theirs),
+                    None if crate::jar_object::object_key(other).is_some() => None,
+                    None => Some(false),
+                };
+                match equal {
+                    Some(equal) => Value::Int(i32::from(equal)),
+                    None => return self.host.unknown_operand_call(r).map(Some),
+                }
             }
-            ("hashCode", "()I") => Value::Int(java_string_hash(&inner)),
+            // `runtimeType.hashCode()`: a class's identity hash.
+            ("hashCode", "()I") => return self.host.unknown_operand_call(r).map(Some),
             ("toString", "()Ljava/lang/String;") => {
-                Value::Ref(Some(decode_generic_type(&inner).map_or_else(
-                    || class_type_display(&inner),
-                    |node| generic_type_display(&node),
-                )))
+                Value::Ref(Some(crate::host_type_token::type_text(&inner)))
             }
             (
                 "isSubtypeOf" | "isSupertypeOf",
