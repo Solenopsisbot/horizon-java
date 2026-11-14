@@ -20,10 +20,6 @@
 use super::*;
 use crate::jdk_model::class_access_flags;
 
-/// Prefix of an `AnnotatedType` marker; the rest is the `Type` marker it
-/// wraps (a class name or a `type/` node).
-pub(crate) const ANNOTATED_TYPE_PREFIX: &str = "annotated-type/";
-
 /// `java.lang.reflect.AnnotatedType[]`.
 const ANNOTATED_TYPES: &str = "[Ljava/lang/reflect/AnnotatedType;";
 
@@ -101,47 +97,77 @@ fn read_signature_attribute(r: &mut Reader<'_>, pool: &[Cp]) -> Option<String> {
     found
 }
 
-/// Skip a `<T:Bound;U::Iface;>` formal type parameter list, if one starts at
-/// the parser's position.
-fn skip_type_parameters(parser: &mut GenericSignatureParser<'_>) -> Option<()> {
-    if parser.peek() != Some(b'<') {
-        return Some(());
-    }
-    parser.pos += 1;
-    while parser.peek()? != b'>' {
-        // Identifier, then the class bound (may be empty) and interface bounds.
-        while parser.peek()? != b':' {
-            parser.pos += 1;
-        }
-        parser.pos += 1;
-        // An empty class bound (`T::Ljava/lang/Comparable;`) goes straight
-        // to the interface bounds.
-        if parser.peek()? != b':' {
-            parser.parse_reference()?;
-        }
-        while parser.peek()? == b':' {
-            parser.pos += 1;
-            parser.parse_reference()?;
-        }
-    }
-    parser.pos += 1;
-    Some(())
-}
-
-fn signature_parser(text: &str) -> Option<GenericSignatureParser<'_>> {
+fn signature_parser(text: &str, scope: TypeScope) -> Option<GenericSignatureParser<'_>> {
     (!text.is_empty() && text.len() <= MAX_GENERIC_SIGNATURE_BYTES).then_some(
         GenericSignatureParser {
             bytes: text.as_bytes(),
             pos: 0,
             depth: 0,
+            scope,
         },
     )
 }
 
-/// A class `Signature`: the generic superclass and interfaces.
-pub(crate) fn parse_class_signature(text: &str) -> Option<(GenericType, Vec<GenericType>)> {
-    let mut parser = signature_parser(text)?;
-    skip_type_parameters(&mut parser)?;
+/// The variables in scope in class `class` (its own formal type parameters).
+pub(crate) fn class_scope(class: &str, file: Option<&ClassFile>) -> TypeScope {
+    TypeScope {
+        class: class.to_owned(),
+        class_variables: file
+            .and_then(ClassFile::class_signature)
+            .map(|signature| type_parameter_names(&signature))
+            .unwrap_or_default(),
+        method: None,
+        method_variables: Vec::new(),
+    }
+}
+
+/// The variables in scope in method `name descriptor` of `class`: its own
+/// formal type parameters, then the class's.
+fn method_scope(class: &str, file: Option<&ClassFile>, name: &str, descriptor: &str) -> TypeScope {
+    TypeScope {
+        method: Some((name.to_owned(), descriptor.to_owned())),
+        method_variables: file
+            .and_then(|file| file.method_signature(name, descriptor))
+            .map(|signature| type_parameter_names(&signature))
+            .unwrap_or_default(),
+        ..class_scope(class, file)
+    }
+}
+
+/// The bounds of variable `name` that `declaration` declares
+/// (`TypeVariable.getBounds`), from its formal type parameter list.
+pub(crate) fn variable_bounds(
+    declaration: &TypeDeclaration,
+    name: &str,
+    file: Option<&ClassFile>,
+) -> Option<Vec<GenericType>> {
+    let file = file?;
+    let (signature, scope) = match declaration {
+        TypeDeclaration::Class(class) => (file.class_signature()?, class_scope(class, Some(file))),
+        TypeDeclaration::Method {
+            class,
+            name: method,
+            descriptor,
+        } => (
+            file.method_signature(method, descriptor)?,
+            method_scope(class, Some(file), method, descriptor),
+        ),
+    };
+    let mut parser = signature_parser(&signature, scope)?;
+    parser
+        .parse_type_parameters()?
+        .into_iter()
+        .find_map(|(declared, bounds)| (declared == name).then_some(bounds))
+}
+
+/// A class `Signature`: the generic superclass and interfaces, read with the
+/// class's own variables in `scope`.
+pub(crate) fn parse_class_signature(
+    text: &str,
+    scope: TypeScope,
+) -> Option<(GenericType, Vec<GenericType>)> {
+    let mut parser = signature_parser(text, scope)?;
+    parser.parse_type_parameters()?;
     let superclass = parser.parse_reference()?;
     let mut interfaces = Vec::new();
     while parser.pos < parser.bytes.len() {
@@ -155,9 +181,9 @@ pub(crate) fn parse_class_signature(text: &str) -> Option<(GenericType, Vec<Gene
 
 /// A method `Signature`: the generic parameter types and return type
 /// (`void` is the class `void`). Thrown types are ignored.
-pub(crate) fn parse_method_signature(text: &str) -> Option<(Vec<GenericType>, GenericType)> {
-    let mut parser = signature_parser(text)?;
-    skip_type_parameters(&mut parser)?;
+fn parse_method_signature(text: &str, scope: TypeScope) -> Option<(Vec<GenericType>, GenericType)> {
+    let mut parser = signature_parser(text, scope)?;
+    parser.parse_type_parameters()?;
     if parser.peek()? != b'(' {
         return None;
     }
@@ -199,38 +225,9 @@ fn method_marker(value: Option<&Value>) -> Option<(String, String, String)> {
     Some((method.class, method.name, descriptor))
 }
 
-/// The `Type` a type marker (a class name or a `type/` node) names.
-fn type_of_marker(marker: &str) -> GenericType {
-    decode_generic_type(marker).unwrap_or_else(|| GenericType::Class(marker.to_owned()))
-}
-
+/// The `AnnotatedType` of a type node (`host_reflect_type.rs`).
 fn annotated(value: &GenericType) -> Value {
-    let inner = match generic_type_value(value) {
-        Value::Ref(Some(marker)) => marker,
-        _ => String::new(),
-    };
-    Value::Ref(Some(format!("{ANNOTATED_TYPE_PREFIX}{inner}")))
-}
-
-/// `instanceof` for the `AnnotatedType` markers this module builds.
-pub(crate) fn annotated_type_instance_of(marker: &str, wanted: &str) -> bool {
-    let Some(inner) = marker.strip_prefix(ANNOTATED_TYPE_PREFIX) else {
-        return false;
-    };
-    match wanted {
-        "java/lang/reflect/AnnotatedType" | "java/lang/reflect/AnnotatedElement" => true,
-        "java/lang/reflect/AnnotatedParameterizedType" => {
-            matches!(type_of_marker(inner), GenericType::Parameterized { .. })
-        }
-        "java/lang/reflect/AnnotatedWildcardType" => {
-            matches!(type_of_marker(inner), GenericType::Wildcard { .. })
-        }
-        "java/lang/reflect/AnnotatedTypeVariable" => {
-            matches!(type_of_marker(inner), GenericType::Variable { .. })
-        }
-        "java/lang/reflect/AnnotatedArrayType" => inner.starts_with('['),
-        _ => false,
-    }
+    crate::host_reflect_type::annotated(generic_type_value(value))
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -272,10 +269,9 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         };
         let interface = class_access_flags(file).is_some_and(|flags| flags & 0x0200 != 0);
-        let parsed = file
-            .class_signature()
-            .as_deref()
-            .and_then(parse_class_signature);
+        let parsed = file.class_signature().as_deref().and_then(|signature| {
+            parse_class_signature(signature, class_scope(&class, Some(file)))
+        });
         let super_name = file.super_name.clone();
         let interface_names = file.interface_names();
         if wants_super {
@@ -360,10 +356,15 @@ impl<H: Host> Runtime<'_, H> {
     fn method_generic(&mut self, r: &MethodRef, receiver: Option<&Value>) -> Option<Value> {
         let (class, name, descriptor) = method_marker(receiver)?;
         let generic = || {
-            self.class(&class)
-                .and_then(|file| file.method_signature(&name, &descriptor))
+            let file = self.class(&class);
+            file.and_then(|file| file.method_signature(&name, &descriptor))
                 .as_deref()
-                .and_then(parse_method_signature)
+                .and_then(|signature| {
+                    parse_method_signature(
+                        signature,
+                        method_scope(&class, file, &name, &descriptor),
+                    )
+                })
         };
         let erased_parameters = || {
             descriptor_arguments(&descriptor)
@@ -433,11 +434,10 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn annotated_type_member(&mut self, r: &MethodRef, receiver: Option<&Value>) -> Option<Value> {
-        let marker = receiver.and_then(expect_ref)?;
-        let inner = marker.strip_prefix(ANNOTATED_TYPE_PREFIX)?.to_owned();
-        let node = type_of_marker(&inner);
+        let inner = crate::host_reflect_type::annotated_inner(receiver?)?;
+        let node = crate::host_reflect_type::type_node(&inner)?;
         Some(match (r.name.as_str(), r.descriptor.as_str()) {
-            ("getType", "()Ljava/lang/reflect/Type;") => Value::Ref(Some(inner)),
+            ("getType", "()Ljava/lang/reflect/Type;") => inner,
             (
                 "getAnnotations" | "getDeclaredAnnotations",
                 "()[Ljava/lang/annotation/Annotation;",
@@ -471,7 +471,6 @@ impl<H: Host> Runtime<'_, H> {
                 let values = lower.iter().map(annotated).collect::<Vec<_>>();
                 self.new_array_value(ANNOTATED_TYPES, values)
             }
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(generic_type_display(&node))),
             _ => return None,
         })
     }
