@@ -148,6 +148,16 @@ impl<H: Host> Runtime<'_, H> {
         if *value == Value::Ref(None) || target == "java/lang/Object" {
             return Ok(());
         }
+        // A `String` spelling an object's key is a `String`, certainly: no
+        // other value is that text (`jar_object.rs`).
+        if let Value::Ref(Some(text)) = value
+            && crate::jar_object::spells_key(value)
+        {
+            if crate::value_class::string_instance_of(text, target) {
+                return Ok(());
+            }
+            return Err(class_cast_exception("java/lang/String", target));
+        }
         // A reference's text cast to a reflective `Type` shape: no text is a
         // `ParameterizedType`, `TypeVariable`, `WildcardType` or
         // `GenericArrayType` (those are handles, `host_reflect_type.rs`), and
@@ -492,6 +502,15 @@ impl<H: Host> Runtime<'_, H> {
                 return (Verdict::No, class_of_value(value));
             }
             Value::Void | Value::Ref(None) => return (Verdict::Yes, None),
+            // A `String` spelling an object's key: its supertypes only.
+            Value::Ref(Some(text)) if crate::jar_object::spells_key(value) => {
+                let verdict = if crate::value_class::string_instance_of(text, target) {
+                    Verdict::Yes
+                } else {
+                    Verdict::No
+                };
+                return (verdict, Some("java/lang/String".into()));
+            }
             Value::Ref(Some(marker)) => marker.as_str(),
         };
         // A `stream/...` text that is no live stream is a jar `String`

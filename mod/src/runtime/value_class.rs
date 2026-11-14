@@ -53,7 +53,10 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 /// a non-string (the previous answer for every text):
 /// - a box, a builder, a collection, a path or an enum constant: whatever
 ///   `Object.getClass` names (`class_of_value`), including `true`/`false`;
-/// - an object `<class>#<n>`: a `#` after a non-empty, separator-free class;
+/// - a host marker `<class>#<kind>` (`…#neutral0`, `…#immutable3`: P14's
+///   collections): a `#` after a non-empty, separator-free class. An
+///   object's key `<class>#<n>` is a handle, never text (#156 P12b), so a
+///   text spelled like one is a `String`;
 /// - a callback or comparator: a leading `@`; an array class: a whole
 ///   descriptor (`[I`, `[Ljava/lang/String;`);
 /// - a marker kind or class name: a `/` whose first segment has no `:`, `.`
@@ -76,6 +79,11 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     // `/`, `#`, `@` or `:` is never a runtime marker any more.
     if marker.starts_with('@') || host_array::is_array_descriptor(marker) {
         return false;
+    }
+    // An object is a handle (`jar_object.rs`): a text spelling its key is a
+    // `String`.
+    if crate::runtime::jar_object::parse_key(marker).is_some() {
+        return true;
     }
     if let Some((class, _)) = marker.split_once('#')
         && !class.is_empty()
@@ -215,11 +223,14 @@ mod tests {
             "stack-walker",
             // Spelled like a `Lookup` once was (#156 P10b).
             "method-handles-lookup",
+            // Spelled like an object's key (#156 P12b).
+            "demo/Main#3",
+            "java/util/concurrent/ThreadPoolExecutor#0",
         ] {
             assert!(is_plain_string(text), "{text:?} should be a string");
         }
         for marker in [
-            "demo/Main#3",
+            "java/util/ArrayList#neutral0",
             "list/4",
             "registry/minecraft:item",
             "string-builder/2",

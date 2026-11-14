@@ -52,8 +52,9 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(Value::Ref(Some(text))) = receiver else {
                     return Ok(None);
                 };
+                // A `String` receiver: an object (a builder) is a handle.
                 if self.string_builders.contains_key(text)
-                    || crate::runtime::jar_object::packaged_key_class(text).is_some()
+                    && crate::runtime::jar_object::parse_key(text).is_none()
                 {
                     return Ok(None);
                 }
@@ -105,8 +106,9 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(Value::Ref(Some(text))) = receiver else {
                     return Ok(None);
                 };
+                // A `String` receiver: an object (a builder) is a handle.
                 if self.string_builders.contains_key(text)
-                    || crate::runtime::jar_object::packaged_key_class(text).is_some()
+                    && crate::runtime::jar_object::parse_key(text).is_none()
                 {
                     return Ok(None);
                 }

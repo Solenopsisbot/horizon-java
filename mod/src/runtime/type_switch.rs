@@ -137,6 +137,10 @@ impl<H: Host> Runtime<'_, H> {
                     .any(|prefix| marker.starts_with(prefix));
             return !claimed;
         }
+        // A `String` spelling an object's key is no object.
+        if crate::runtime::jar_object::spells_key(value) {
+            return false;
+        }
         // A class is its class marker (#156 P13 will make it a handle): the
         // same answer the `instanceof` opcode gives (`class_marker_like`).
         if class == "java/lang/Class"

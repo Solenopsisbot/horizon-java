@@ -123,6 +123,10 @@ impl<H: Host> Runtime<'_, H> {
     /// The hash collection `value` is: a host row of one of the four classes,
     /// or of a jar class extending one.
     pub(crate) fn hash_table_kind(&self, value: &Value) -> Option<TableKind> {
+        // A `String` is no table, whatever it spells.
+        if crate::runtime::jar_object::spells_key(value) {
+            return None;
+        }
         let marker = expect_ref(value)?;
         let (class, _) = marker.split_once('#')?;
         let mut class = class.to_owned();
