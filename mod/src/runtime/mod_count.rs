@@ -403,6 +403,8 @@ impl<H: Host> Runtime<'_, H> {
         } else {
             DequeStep::None
         };
+        // A map's live entries follow the call (`host_map_entry.rs`).
+        self.host.entries_before_call(marker, name, args);
         Ok(Some(ModToken {
             marker: marker.clone(),
             name: name.to_owned(),
@@ -444,6 +446,7 @@ impl<H: Host> Runtime<'_, H> {
             _ => {}
         }
         let after = self.host.mod_stamp(&token.marker);
+        self.host.entries_after_call(&token.marker);
         if self.host.sub_list_link(&token.marker).is_some() {
             let structural =
                 (after != token.stamp).then_some(after.uncertain != token.stamp.uncertain);

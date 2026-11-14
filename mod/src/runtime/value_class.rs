@@ -44,6 +44,8 @@ const RETIRED_PREFIXES: &[&str] = &[
     "enumeration/",
     "list-iterator/",
     "collector/",
+    // Map entries are handles (#156 P14e, `host_map_entry.rs`).
+    "map-entry/",
     // The client's objects and values are game handles (#156 P16d,
     // `client_values.rs`, `game_object::client_value`).
     "client/",
@@ -103,6 +105,11 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     // An object is a handle (`jar_object.rs`), a host-made collection too
     // (P14c): a text spelling either's key is a `String`.
     if crate::runtime::jar_object::spells_key_text(marker) {
+        return true;
+    }
+    // A host map entry's key (`<class>#entry<n>`/`#node<n>`, #156 P14e) is a handle's,
+    // never text.
+    if crate::runtime::host_map_entry::spells_entry_key(marker) {
         return true;
     }
     if let Some((class, _)) = marker.split_once('#')

@@ -221,10 +221,13 @@ impl<H: Host> Runtime<'_, H> {
                 // A game id compares and hashes by its key (`host_ids.rs`).
                 crate::host_ids::pure_equality(value)
                     || is_map_entry(value)
-                        && map_entry_parts(value).is_ok_and(|(key, entry)| {
-                            self.pure_equality_at(&key, depth + 1)
-                                && self.pure_equality_at(&entry, depth + 1)
-                        })
+                        && self
+                            .host
+                            .map_entry_parts(value)
+                            .is_some_and(|(key, entry)| {
+                                self.pure_equality_at(&key, depth + 1)
+                                    && self.pure_equality_at(&entry, depth + 1)
+                            })
             }
             Equality::Jar { equals, hash_code } => {
                 if depth >= MAX_PURITY_DEPTH {
@@ -351,19 +354,11 @@ impl<H: Host> Runtime<'_, H> {
         {
             return handle.hash_code(&mut RuntimeNested::new(self));
         }
-        let Some(marker) = expect_ref(value) else {
+        if expect_ref(value).is_none() {
             return Ok(None);
-        };
+        }
         if let Some(path) = self.file_path(value) {
             return Ok(Some(file_hash(path)));
-        }
-        if marker.starts_with("map-entry/") {
-            // `Objects.hashCode(key) ^ Objects.hashCode(value)`.
-            let (key, entry) = map_entry_parts(value)?;
-            let (Some(key), Some(entry)) = (self.java_hash(&key)?, self.java_hash(&entry)?) else {
-                return Ok(None);
-            };
-            return Ok(Some(key ^ entry));
         }
         let Some(kind) = self.host_collection_kind(value) else {
             return Ok(None);
@@ -493,21 +488,15 @@ impl<H: Host> Runtime<'_, H> {
                         }
                     };
                 }
-                if is_map_entry(a) {
-                    // `Map.Entry.equals`: an entry with `Objects.equals` keys
-                    // and values.
-                    if !is_map_entry(b) {
-                        return Ok(false);
-                    }
-                    let (left_key, left_value) = map_entry_parts(a)?;
-                    let (right_key, right_value) = map_entry_parts(b)?;
-                    return Ok(self.objects_equals(&left_key, &right_key)?
-                        && self.objects_equals(&left_value, &right_value)?);
-                }
                 if self.host_collection_kind(a) == Some(CollectionKind::List)
                     && self.host_collection_kind(b) == Some(CollectionKind::List)
                 {
                     return self.list_equals(a, b);
+                }
+                if self.host_collection_kind(a) == Some(CollectionKind::Set)
+                    && self.host_collection_kind(b) == Some(CollectionKind::Set)
+                {
+                    return self.abstract_set_equals(a, b);
                 }
                 // `File.equals`: the same path text (`UnixFileSystem.compare`).
                 if let Some(path) = self.file_path(a) {
@@ -543,6 +532,44 @@ impl<H: Host> Runtime<'_, H> {
                 Ok(a == b)
             }
         }
+    }
+
+    /// `AbstractSet.equals` between two sets the host holds, wherever a collection compares
+    /// its elements (`List.contains`, a `HashSet`'s or `HashMap`'s bins, `Set.of`'s duplicate
+    /// check): `o == this`, then the sizes, then `containsAll(o)`, `this.contains(e)` run
+    /// through the dispatch for each of `o`'s elements, a `ClassCastException` or
+    /// `NullPointerException` answering `false`. Two sets with their own handles (two maps'
+    /// `entrySet()` views, #221 review B5) compare by contents, as a direct `equals` does.
+    fn abstract_set_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
+        if identical(a, b) {
+            return Ok(true);
+        }
+        let theirs = self.collection_elements(b)?;
+        if self.collection_elements(a)?.len() != theirs.len() {
+            return Ok(false);
+        }
+        for element in &theirs {
+            let found = self.call_virtual(
+                crate::jdk_call::Site::Interface,
+                "java/util/Set",
+                "contains",
+                "(Ljava/lang/Object;)Z",
+                a,
+                std::slice::from_ref(element),
+            );
+            match found {
+                Ok(Value::Int(0)) => return Ok(false),
+                Ok(_) => {}
+                Err(NativeError::UncaughtException { class, .. })
+                    if class == "java/lang/ClassCastException"
+                        || class == "java/lang/NullPointerException" =>
+                {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
     }
 
     /// `Objects.equals(a, b)`: `a == b || a != null && a.equals(b)`.
@@ -865,7 +892,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             // `Map.Entry.hashCode()` is `host_value_hash`'s; an entry whose
             // key or value has no hash the runtime can compute is counted.
-            if expect_ref(receiver).is_some_and(|marker| marker.starts_with("map-entry/")) {
+            if is_map_entry(receiver) {
                 return match self.java_hash(receiver)? {
                     Some(hash) => Ok(Some(Value::Int(hash))),
                     None => self.host.unknown_operand_call(r).map(Some),
@@ -982,9 +1009,9 @@ impl<H: Host> Runtime<'_, H> {
     }
 }
 
-/// Whether a value is the host's `Map.Entry` (`map-entry/k,v`).
+/// Whether a value is one of the host's `Map.Entry` handles (`host_map_entry.rs`).
 pub(crate) fn is_map_entry(value: &Value) -> bool {
-    expect_ref(value).is_some_and(|marker| marker.starts_with("map-entry/"))
+    crate::host_map_entry::is_entry(value)
 }
 
 /// `a.equals(b)` for a string or a box `a`: equal values of the same kind. A
@@ -1184,6 +1211,10 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
 
     fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
         self.runtime.host.constructed_uuid(value)
+    }
+
+    fn map_entry_parts(&mut self, value: &Value) -> Option<(Value, Value)> {
+        self.runtime.host.map_entry_parts(value)
     }
 }
 

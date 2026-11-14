@@ -25,8 +25,9 @@
 //! tables' contents, never on hashing order or time.
 //!
 //! Markers are text, and composite values embed other markers in their own
-//! text (a lambda's `@indy:...` marker carries its captures, a `map-entry/k,v`
-//! both halves, a map view its map). Rather than parse every composite format,
+//! text (a lambda's `@indy:...` marker carries its captures, a map view its
+//! map). A host map entry is a handle whose key and value (and, for a node, its
+//! map) the host keeps by its key (`host_map_entry.rs`); they are its edges. Rather than parse every composite format,
 //! the collector looks for any collectable marker that ends where a run of
 //! digits ends inside a value's text: every collectable marker ends in its
 //! allocation number, so this finds an embedded one wherever it sits. A string
@@ -260,6 +261,14 @@ fn collectable(marker: &str) -> bool {
     {
         return rest.ends_with(|c: char| c.is_ascii_digit());
     }
+    // A host map entry (`host_map_entry.rs`): `<class>#entry<n>`/`<class>#node<n>`.
+    if let Some((_, serial)) = marker.rsplit_once('#')
+        && let Some(number) = serial
+            .strip_prefix("entry")
+            .or_else(|| serial.strip_prefix("node"))
+    {
+        return !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit());
+    }
     // `new` names an object `<class>#<n>` (`Runtime::new_object`).
     marker.rsplit_once('#').is_some_and(|(class, number)| {
         !class.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
@@ -356,6 +365,7 @@ impl Collectable {
             .chain(host.iterators.keys().map(String::as_str))
             .chain(host.enumerations.keys().map(String::as_str))
             .chain(host.component_states.keys().map(String::as_str))
+            .chain(host.map_entries.keys().map(String::as_str))
             .filter(|marker| collectable(marker))
             .map(str::to_owned)
             .collect();
@@ -461,12 +471,18 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .get(&marker)
             .into_iter()
             .flat_map(|state| state.siblings.iter().chain(state.args.iter().flatten()));
+        // A map entry's key and value, and a node's map (`host_map_entry.rs`).
+        let entries = host.map_entries.held(&marker);
+        if let Some(map) = host.map_entries.map_of(&marker) {
+            collectable.scan(map, &mut found);
+        }
         for value in fields
             .chain(arrays)
             .chain(collections)
             .chain(iterators)
             .chain(enumerations)
             .chain(components)
+            .chain(entries)
         {
             if let Some(text) = value_text(value) {
                 collectable.scan(text, &mut found);
@@ -483,6 +499,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     host.iterators.retain(|key, _| keep(key));
     host.enumerations.retain(|key, _| keep(key));
     host.component_states.retain(|key, _| keep(key));
+    host.map_entries.retain(keep);
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -601,10 +618,14 @@ mod tests {
             "demo/Mod#MAPLjava/util/List;".into(),
             text("java/util/ArrayList#7"),
         );
-        host.mutable_collections.insert(
-            "java/util/ArrayList#7".into(),
-            vec![text("map-entry/rkey,rdemo/Node#1")],
+        let entry = host.mint_map_entry(
+            None,
+            &text("key"),
+            &text("demo/Node#1"),
+            crate::host_map_entry::EntryMade::Holder,
         );
+        host.mutable_collections
+            .insert("java/util/ArrayList#7".into(), vec![entry]);
         host.mutable_collections
             .insert("java/util/ArrayList#8".into(), vec![text("demo/Node#3")]);
         collect(&mut heap, &mut host, &[]);

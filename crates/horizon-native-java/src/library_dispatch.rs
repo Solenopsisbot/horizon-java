@@ -165,7 +165,7 @@ impl<H: Host> Runtime<'_, H> {
     /// value live in the object's own `key`/`value` fields; `getKey`,
     /// `getValue`, `setValue` (the immutable one throws) and `toString`
     /// answer from them. A call typed as `Map.Entry` on one reaches here too,
-    /// before the host's `map-entry/` marker model refuses the object.
+    /// before the host's entry model (`host_map_entry.rs`) counts the object.
     fn invoke_simple_entry(
         &mut self,
         r: &MethodRef,

@@ -167,6 +167,11 @@ public final class JdkSupertypes {
     "java.util.concurrent.atomic.DoubleAdder", "java.util.concurrent.atomic.LongAccumulator",
     "java.util.concurrent.atomic.DoubleAccumulator", "java.util.zip.Adler32",
     "java.util.zip.CRC32C",
+    // The host's map entries (`host_map_entry.rs`, #156 P14e).
+    "java.util.HashMap$Node", "java.util.LinkedHashMap$Entry", "java.util.TreeMap$Entry",
+    "java.util.KeyValueHolder", "java.util.Hashtable$Entry", "java.util.WeakHashMap$Entry",
+    "java.util.EnumMap$EntryIterator$Entry", "java.util.IdentityHashMap$EntryIterator$Entry",
+    "java.util.concurrent.ConcurrentHashMap$MapEntry",
   };
 
   static void walk(Class<?> c, Set<String> out) {

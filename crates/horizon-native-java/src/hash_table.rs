@@ -172,6 +172,12 @@ impl HashTable {
         if self.len() <= 1 {
             return false;
         }
+        // A linked table iterates in insertion order, which the host's list is, wherever
+        // its keys hash (an unplaced key, a tree bin): only access order or an unknown fill
+        // order hide it (#156 P14e: a map's `entrySet()` view of identity-hashed keys).
+        if self.linked {
+            return self.access_order || self.tainted;
+        }
         !self.unplaced.is_empty() || self.treeified || self.access_order || self.tainted
     }
 

@@ -56,6 +56,30 @@ pub struct RedBlackTree {
 }
 
 impl RedBlackTree {
+    /// How many node slots the tree has used (freed ones included).
+    pub(crate) fn slots(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The tree's `modCount` (its structure changes with it).
+    pub(crate) fn mod_count(&self) -> u64 {
+        self.mod_count
+    }
+
+    /// Every live node's index by its key's marker (`host_map_entry.rs`'s lookup memo).
+    pub(crate) fn index_by_key(&self) -> std::collections::HashMap<String, usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(at, node)| Some((crate::runtime::value_marker(&node.as_ref()?.key), at)))
+            .collect()
+    }
+
+    /// The key node `index` holds, `None` once the node is freed.
+    pub(crate) fn key_at(&self, index: usize) -> Option<&Value> {
+        self.nodes.get(index)?.as_ref().map(|node| &node.key)
+    }
+
     fn node(&self, at: usize) -> &Node {
         self.nodes[at].as_ref().expect("a live node")
     }
@@ -843,7 +867,13 @@ impl<H: Host> Runtime<'_, H> {
                     tree.delete_entry(node);
                 }
                 if map {
-                    map_entry_value(&key, &value)
+                    // `exportEntry`: an immutable snapshot, new each call.
+                    self.host.mint_map_entry(
+                        None,
+                        &key,
+                        &value,
+                        crate::runtime::host_map_entry::EntryMade::Snapshot,
+                    )
                 } else {
                     key
                 }
@@ -871,7 +901,12 @@ impl<H: Host> Runtime<'_, H> {
                     "ceilingEntry" | "floorEntry" | "higherEntry" | "lowerEntry"
                 ) {
                     match node {
-                        Some(_) => map_entry_value(&found, &value_of(&values, &found)),
+                        Some(_) => self.host.mint_map_entry(
+                            None,
+                            &found,
+                            &value_of(&values, &found),
+                            crate::runtime::host_map_entry::EntryMade::Snapshot,
+                        ),
                         None => Value::Ref(None),
                     }
                 } else {
