@@ -53,43 +53,63 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     (
         "com/mojang/brigadier/SingleRedirectModifier.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/SingleRedirectModifier.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/SingleRedirectModifier.java"
+        ),
     ),
     (
         "com/mojang/brigadier/arguments/ArgumentType.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/arguments/ArgumentType.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/arguments/ArgumentType.java"
+        ),
     ),
     (
         "com/mojang/brigadier/arguments/IntegerArgumentType.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/arguments/IntegerArgumentType.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/arguments/IntegerArgumentType.java"
+        ),
     ),
     (
         "com/mojang/brigadier/arguments/StringArgumentType.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/arguments/StringArgumentType.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/arguments/StringArgumentType.java"
+        ),
     ),
     (
         "com/mojang/brigadier/builder/ArgumentBuilder.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/builder/ArgumentBuilder.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/builder/ArgumentBuilder.java"
+        ),
     ),
     (
         "com/mojang/brigadier/builder/LiteralArgumentBuilder.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/builder/LiteralArgumentBuilder.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/builder/LiteralArgumentBuilder.java"
+        ),
     ),
     (
         "com/mojang/brigadier/builder/RequiredArgumentBuilder.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/builder/RequiredArgumentBuilder.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/builder/RequiredArgumentBuilder.java"
+        ),
     ),
     (
         "com/mojang/brigadier/context/CommandContext.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/context/CommandContext.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/context/CommandContext.java"
+        ),
     ),
     (
         "com/mojang/brigadier/exceptions/CommandSyntaxException.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/exceptions/CommandSyntaxException.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/exceptions/CommandSyntaxException.java"
+        ),
     ),
     (
         "com/mojang/brigadier/tree/ArgumentCommandNode.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/tree/ArgumentCommandNode.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/tree/ArgumentCommandNode.java"
+        ),
     ),
     (
         "com/mojang/brigadier/tree/CommandNode.java",
@@ -97,15 +117,21 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     (
         "com/mojang/brigadier/tree/LiteralCommandNode.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/tree/LiteralCommandNode.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/tree/LiteralCommandNode.java"
+        ),
     ),
     (
         "com/mojang/brigadier/tree/RootCommandNode.java",
-        include_str!("fixtures/host_values/p7b/stubs/com/mojang/brigadier/tree/RootCommandNode.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/com/mojang/brigadier/tree/RootCommandNode.java"
+        ),
     ),
     (
         "net/fabricmc/fabric/api/command/v2/CommandRegistrationCallback.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/fabricmc/fabric/api/command/v2/CommandRegistrationCallback.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/fabricmc/fabric/api/command/v2/CommandRegistrationCallback.java"
+        ),
     ),
     (
         "net/fabricmc/fabric/api/event/Event.java",
@@ -113,11 +139,15 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     (
         "net/minecraft/commands/CommandBuildContext.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/commands/CommandBuildContext.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/commands/CommandBuildContext.java"
+        ),
     ),
     (
         "net/minecraft/commands/CommandSourceStack.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/commands/CommandSourceStack.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/commands/CommandSourceStack.java"
+        ),
     ),
     (
         "net/minecraft/commands/Commands.java",
@@ -125,31 +155,45 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     (
         "net/minecraft/commands/SharedSuggestionProvider.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/commands/SharedSuggestionProvider.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/commands/SharedSuggestionProvider.java"
+        ),
     ),
     (
         "net/minecraft/server/permissions/Permission.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/Permission.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/Permission.java"
+        ),
     ),
     (
         "net/minecraft/server/permissions/PermissionCheck.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionCheck.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionCheck.java"
+        ),
     ),
     (
         "net/minecraft/server/permissions/PermissionProviderCheck.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionProviderCheck.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionProviderCheck.java"
+        ),
     ),
     (
         "net/minecraft/server/permissions/PermissionSet.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionSet.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionSet.java"
+        ),
     ),
     (
         "net/minecraft/server/permissions/PermissionSetSupplier.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionSetSupplier.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/PermissionSetSupplier.java"
+        ),
     ),
     (
         "net/minecraft/server/permissions/Permissions.java",
-        include_str!("fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/Permissions.java"),
+        include_str!(
+            "fixtures/host_values/p7b/stubs/net/minecraft/server/permissions/Permissions.java"
+        ),
     ),
 ];
 
@@ -219,7 +263,10 @@ impl<'a> Server<'a> {
                 .roots()
                 .find(|(_, node)| node.kind.name() == name)
                 .expect("registered");
-            let command = tree.nodes[root.children[0]].command.clone().expect("executes");
+            let command = tree.nodes[root.children[0]]
+                .command
+                .clone()
+                .expect("executes");
             let run = server.run(
                 &command,
                 &format!("{name} {n}"),
@@ -333,13 +380,19 @@ const EXACT: &[(&str, &str)] = &[
     // What `/probe` saw: `getSource()` twice is one object (`==`, `equals`),
     // a `CommandSourceStack` and no `String`; the context equals itself only;
     // the source's permission set (a game master's) answers its checks.
-    ("ran", "2truetruefalsefalsetruetruetruefalsefalsetrueprobe,truetruefalsefalse"),
+    (
+        "ran",
+        "2truetruefalsefalsetruetruetruefalsefalsetrueprobe,truetruefalsefalse",
+    ),
     // Nodes: `getRoot()` twice is one node; `toString` of the root and of
     // literals (one spelled like a node handle's text form); a node equals
     // itself and not a node of another kind or literal, a string or null;
     // `compareTo` puts literals first, then by name (directly, in
     // `Collections.sort`, in a `TreeSet`); `instanceof` their classes.
-    ("nodes", "true<root><literal a,b><literal hbrnode:i0,rroot,r>a,btruetruefalsefalsefalsefalsefalsefalse,-77-11-11,truetruetruetruetruefalse,a,b|hbrnode:i0,rroot,r||n|3a,b"),
+    (
+        "nodes",
+        "true<root><literal a,b><literal hbrnode:i0,rroot,r>a,btruetruefalsefalsefalsefalsefalsefalse,-77-11-11,truetruetruetruetruefalse,a,b|hbrnode:i0,rroot,r||n|3a,b",
+    ),
     // Builders: two `literal("x")` are two objects; `then` answers the
     // builder itself; their classes; `getLiteral`/`getName`.
     ("builders", "falsefalsetruetruetruetruetruefalsefalsexw"),
@@ -351,13 +404,19 @@ const EXACT: &[(&str, &str)] = &[
     // `brigadier/requires/0`...) and like the handles' text forms stay
     // Strings: `instanceof String`, `getClass`, no command type, `equals`,
     // `hashCode`, concat, `HashMap` keys.
-    ("spelled", "truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue54473928120,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue125400368623,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue88181165317,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-41497116218,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue200562010916,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue31878152219,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-33349272919,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue190755308120,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue160857462022,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue35110043928,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue56925438726,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue990784145,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-60724631518,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-155503949012,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue165091034120,2dn"),
+    (
+        "spelled",
+        "truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue54473928120,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue125400368623,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue88181165317,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-41497116218,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue200562010916,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue31878152219,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-33349272919,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue190755308120,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue160857462022,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue35110043928,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue56925438726,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue990784145,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-60724631518,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue-155503949012,truejava.lang.Stringfalsefalsefalsefalsefalsefalsefalsefalsetrue165091034120,2dn",
+    ),
     // One object read twice and two made apart, on every identity path:
     // `IdentityHashMap`, `==`, `List.contains`, `Set.of`, `Objects.equals`.
     ("identities", "437truefalsetruetrue2falsetrue"),
     // Type switches, `Class.isInstance`, natural order (`List.sort(null)`,
     // `sorted()`, `reverseOrder`, a `TreeMap`) and host collections.
-    ("generic", "literal:gen;root;builder;string;truefalsetruefalse,gen[gen, ][, gen]gen,[<literal gen>, <root>]1falsetrue"),
+    (
+        "generic",
+        "literal:gen;root;builder;string;truefalsetruefalse,gen[gen, ][, gen]gen,[<literal gen>, <root>]1falsetrue",
+    ),
     // A literal builder is no `RequiredArgumentBuilder`, and an integer
     // argument type no `StringArgumentType` (sibling classes).
     ("builderAsOther", "false"),
@@ -375,7 +434,10 @@ const EXACT: &[(&str, &str)] = &[
     // `getArgument` on the kept context: the value as `Integer`, `int` and
     // `Number`; another class is brigadier's `IllegalArgumentException`, a
     // missing name too; `getInput` of its own run.
-    ("argClass", "55,5,iae:Argument 'n' is defined as Integer, not class java.lang.String,iae:No such argument 'zz' exists on this command,rvarg 5"),
+    (
+        "argClass",
+        "55,5,iae:Argument 'n' is defined as Integer, not class java.lang.String,iae:No such argument 'zz' exists on this command,rvarg 5",
+    ),
     // `isFork`: a `redirect` with a modifier is not a fork, a `fork` is.
     ("forks", "falsetruefalse"),
     // A source kept past its run still answers for it.
@@ -390,22 +452,84 @@ const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
     // cast to a game or library class keeps passing text (a stricter cast
     // broke jars whose host values are plain-looking text), so each use is
     // refused and counted, never taken for that object.
-    ("used", "cceccecceccecce", &[("com/mojang/brigadier/CommandDispatcher#register(Lcom/mojang/brigadier/builder/LiteralArgumentBuilder;)Lcom/mojang/brigadier/tree/LiteralCommandNode;", 1), ("com/mojang/brigadier/builder/LiteralArgumentBuilder#requires(Ljava/util/function/Predicate;)Lcom/mojang/brigadier/builder/ArgumentBuilder;", 1), ("com/mojang/brigadier/builder/LiteralArgumentBuilder#then(Lcom/mojang/brigadier/tree/CommandNode;)Lcom/mojang/brigadier/builder/ArgumentBuilder;", 1), ("net/minecraft/commands/CommandSourceStack#getTextName()Ljava/lang/String;", 1), ("net/minecraft/server/permissions/PermissionSet#hasPermission(Lnet/minecraft/server/permissions/Permission;)Z", 1)]),
+    (
+        "used",
+        "cceccecceccecce",
+        &[
+            (
+                "com/mojang/brigadier/CommandDispatcher#register(Lcom/mojang/brigadier/builder/LiteralArgumentBuilder;)Lcom/mojang/brigadier/tree/LiteralCommandNode;",
+                1,
+            ),
+            (
+                "com/mojang/brigadier/builder/LiteralArgumentBuilder#requires(Ljava/util/function/Predicate;)Lcom/mojang/brigadier/builder/ArgumentBuilder;",
+                1,
+            ),
+            (
+                "com/mojang/brigadier/builder/LiteralArgumentBuilder#then(Lcom/mojang/brigadier/tree/CommandNode;)Lcom/mojang/brigadier/builder/ArgumentBuilder;",
+                1,
+            ),
+            (
+                "net/minecraft/commands/CommandSourceStack#getTextName()Ljava/lang/String;",
+                1,
+            ),
+            (
+                "net/minecraft/server/permissions/PermissionSet#hasPermission(Lnet/minecraft/server/permissions/Permission;)Z",
+                1,
+            ),
+        ],
+    ),
     // Two nodes of one literal, no children, no command: `CommandNode.equals`
     // compares their children and commands.
-    ("nodeTwins", "true", &[("java/lang/Object#equals(Ljava/lang/Object;)Z", 1)]),
+    (
+        "nodeTwins",
+        "true",
+        &[("java/lang/Object#equals(Ljava/lang/Object;)Z", 1)],
+    ),
     // `LiteralCommandNode.hashCode` hashes the children and the command.
     ("nodeHash", "3224", &[("java/lang/Object#hashCode()I", 1)]),
     // `ArgumentCommandNode.toString` prints its type's `toString`.
-    ("argumentNodeText", "<argument n:integer(1, 9)>", &[("java/lang/Object#toString()Ljava/lang/String;", 1)]),
+    (
+        "argumentNodeText",
+        "<argument n:integer(1, 9)>",
+        &[("java/lang/Object#toString()Ljava/lang/String;", 1)],
+    ),
     // `getClass()` needs #174's exact class surface (counted, then null).
-    ("nodeClass", "com.mojang.brigadier.tree.LiteralCommandNode", &[("java/lang/Object#getClass()Ljava/lang/Class;", 1)]),
+    (
+        "nodeClass",
+        "com.mojang.brigadier.tree.LiteralCommandNode",
+        &[("java/lang/Object#getClass()Ljava/lang/Class;", 1)],
+    ),
     // `IntegerArgumentType`'s `equals`, `toString`, `hashCode` read its bounds.
-    ("argumentTypeState", "trueinteger(1, 9)40", &[("java/lang/Object#equals(Ljava/lang/Object;)Z", 1), ("java/lang/Object#hashCode()I", 1), ("java/lang/Object#toString()Ljava/lang/String;", 1)]),
+    (
+        "argumentTypeState",
+        "trueinteger(1, 9)40",
+        &[
+            ("java/lang/Object#equals(Ljava/lang/Object;)Z", 1),
+            ("java/lang/Object#hashCode()I", 1),
+            ("java/lang/Object#toString()Ljava/lang/String;", 1),
+        ],
+    ),
     // A constant read twice: one object on Java, two handles here (several
     // constants share a level, so the kind is not canonical).
-    ("permissionTwice", "truetrue", &[("java/lang/Object#if_acmp(Ljava/lang/Object;Ljava/lang/Object;)Z", 1), ("net/minecraft/server/permissions/PermissionCheck#equals(Ljava/lang/Object;)Z", 1)]),
-    ("sourceClass", "net.minecraft.commands.CommandSourceStack", &[("java/lang/Object#getClass()Ljava/lang/Class;", 1)]),
+    (
+        "permissionTwice",
+        "truetrue",
+        &[
+            (
+                "java/lang/Object#if_acmp(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                1,
+            ),
+            (
+                "net/minecraft/server/permissions/PermissionCheck#equals(Ljava/lang/Object;)Z",
+                1,
+            ),
+        ],
+    ),
+    (
+        "sourceClass",
+        "net.minecraft.commands.CommandSourceStack",
+        &[("java/lang/Object#getClass()Ljava/lang/Class;", 1)],
+    ),
 ];
 
 #[test]
