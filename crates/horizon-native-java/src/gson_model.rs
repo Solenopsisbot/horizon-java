@@ -712,13 +712,15 @@ impl<H: Host> Runtime<'_, H> {
                 frame: None,
             });
         }
-        let Some(adapter) = args.get(1).and_then(expect_ref) else {
+        let Some(adapter) = args.get(1).filter(|adapter| **adapter != Value::Ref(None)) else {
             return Err(npe());
         };
-        if adapter.starts_with("@indy:") || adapter.starts_with("@fn:") {
+        if expect_ref(adapter)
+            .is_some_and(|text| text.starts_with("@indy:") || text.starts_with("@fn:"))
+        {
             return Ok(());
         }
-        let Some((class, _)) = adapter.split_once('#') else {
+        let Some(class) = crate::jar_object::object_class(adapter) else {
             return Err(not_a_supported_adapter("java/lang/String"));
         };
         if self.class(class).is_none() {
@@ -849,8 +851,7 @@ impl<H: Host> Runtime<'_, H> {
                     } else {
                         self.gson_array_text(&values, style, depth)?
                     }
-                } else if let Some((class, id)) = marker.split_once('#')
-                    && id.bytes().all(|byte| byte.is_ascii_digit())
+                } else if let Some(class) = crate::jar_object::object_class(value)
                     && self.class(class).is_some()
                 {
                     self.gson_fields_text(class, marker, style, depth)?

@@ -31,19 +31,6 @@ use super::*;
 /// `toString()`'s descriptor.
 const TO_STRING: &str = "()Ljava/lang/String;";
 
-/// The class of a `class#n` marker: an object `new` (or a model) built in this
-/// run. Strings, boxes and the host's other marker families do not match.
-pub(crate) fn object_marker_class(marker: &str) -> Option<&str> {
-    let (class, serial) = marker.split_once('#')?;
-    (!class.is_empty()
-        && class.contains('/')
-        && !host_array::handle_only_class(class)
-        && !class.contains([':', ' ', '.'])
-        && !serial.is_empty()
-        && serial.bytes().all(|byte| byte.is_ascii_digit()))
-    .then_some(class)
-}
-
 /// The `Object.toString()` reference the unknown answer is counted under.
 pub(crate) fn object_to_string() -> MethodRef {
     MethodRef {
@@ -83,7 +70,7 @@ fn string_overload(r: &MethodRef) -> Option<&'static str> {
 impl<H: Host> Runtime<'_, H> {
     /// The jar class of an object this run built from a jar's own class.
     fn jar_object_class(&self, value: &Value) -> Option<String> {
-        let class = object_marker_class(expect_ref(value)?)?;
+        let class = crate::jar_object::packaged_object_class(value)?;
         (!self.host.models_class(class) && self.class(class).is_some()).then(|| class.to_owned())
     }
 
@@ -234,7 +221,7 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(path) = self.file_path(value) {
             return Ok(Some(Value::Ref(Some(path.to_owned()))));
         }
-        if object_marker_class(marker).is_none() {
+        if crate::jar_object::packaged_object_class(value).is_none() {
             return Ok(None);
         }
         if let Some(text) = self.jar_to_string(value, class, method)? {

@@ -1505,7 +1505,7 @@ impl NativeJar {
                     // declared cancellable.
                     if after != before {
                         return Err(NativeError::Metadata(format!(
-                            "uncaught exception java/util/concurrent/CancellationException: game hook callback {}#{}{} cancelled or set the result of {}#{}, which its @Inject does not declare cancellable",
+                            "uncaught exception org/spongepowered/asm/mixin/injection/callback/CancellationException: game hook callback {}#{}{} cancelled or set the result of {}#{}, which its @Inject does not declare cancellable",
                             entry.callback.owner,
                             entry.callback.name,
                             entry.callback.descriptor,

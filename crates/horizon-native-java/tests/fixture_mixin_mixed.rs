@@ -195,7 +195,8 @@ public abstract class ComputeMixin {
     @Inject(method = "compute()I", at = @At("HEAD"))
     private static void onHead(CallbackInfo info) { Probe.mark("head"); }
 
-    @Inject(method = "compute()I", at = @At("RETURN"))
+    // `setReturnValue` cancels: Mixin throws unless the @Inject is cancellable.
+    @Inject(method = "compute()I", at = @At("RETURN"), cancellable = true)
     private static void onReturn(CallbackInfoReturnable<Integer> info) {
         Probe.mark(String.valueOf(info.getReturnValue()));
         info.setReturnValue(42);

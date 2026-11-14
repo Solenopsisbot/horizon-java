@@ -935,17 +935,6 @@ pub(crate) fn class_access_flags(file: &crate::runtime::ClassFile) -> Option<u16
     reader.u2().ok()
 }
 
-/// Whether `marker` names an object this runtime or the host built
-/// (`owner/Class#n`), as opposed to string text.
-fn is_object_marker(marker: &str) -> bool {
-    marker.rsplit_once('#').is_some_and(|(class, number)| {
-        class.contains('/')
-            && !crate::runtime::host_array::handle_only_class(class)
-            && !number.is_empty()
-            && number.bytes().all(|b| b.is_ascii_digit())
-    })
-}
-
 impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     /// `String.join(separator, CharSequence...)` and `String.join(separator,
     /// Iterable)`: command feedback builds its lines with them. The varargs
@@ -997,8 +986,8 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 Value::Ref(Some(marker)) if self.string_builders.contains_key(marker) => {
                     self.string_builders[marker].clone()
                 }
-                Value::Ref(Some(marker))
-                    if crate::runtime::jar_text::object_marker_class(marker).is_some() =>
+                Value::Ref(Some(_))
+                    if crate::runtime::jar_object::packaged_object_class(value).is_some() =>
                 {
                     match self.runtime_value_of(value, "java/lang/String", "join")? {
                         Some(Value::Ref(Some(text))) => text,
@@ -1087,7 +1076,9 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         };
         let text = match self.string_builders.get(marker) {
             Some(text) => text.clone(),
-            None if is_object_marker(marker) => return Ok(None),
+            None if crate::runtime::jar_object::packaged_object_class(receiver).is_some() => {
+                return Ok(None);
+            }
             None => marker.clone(),
         };
         let (name, descriptor) = match (r.name.as_str(), r.descriptor.as_str()) {
@@ -1167,7 +1158,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         {
             return None;
         }
-        let (class, _) = expect_ref(receiver?)?.split_once('#')?;
+        let class = crate::runtime::jar_object::object_class(receiver?)?;
         let Some((owner, true)) = self.member_owner(class, &r.name, &r.descriptor) else {
             return None;
         };

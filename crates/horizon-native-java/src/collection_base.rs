@@ -20,7 +20,7 @@
 //! receiver typed as the jar subclass, which `javac` resolves to the inherited
 //! `AbstractCollection.isEmpty` (same body).
 
-use crate::{Host, MethodRef, NativeError, Runtime, Value, expect_ref};
+use crate::{Host, MethodRef, NativeError, Runtime, Value};
 
 impl<H: Host> Runtime<'_, H> {
     /// `Collection.isEmpty` on a jar object that inherits `AbstractCollection`'s
@@ -37,10 +37,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        let Some(marker) = expect_ref(receiver) else {
-            return Ok(None);
-        };
-        let Some((class, _)) = marker.split_once('#') else {
+        let Some(class) = crate::jar_object::object_class(receiver) else {
             return Ok(None);
         };
         // Only a jar (or linked) class has a body to ask. Its own `<init>` made
