@@ -59,8 +59,10 @@ pub(crate) const ITEM: &str = "game/item/";
 const STACK_DESCRIPTOR: &str = "()Lnet/minecraft/world/item/ItemStack;";
 const HAND_ENUM: &str = "enum/net/minecraft/world/InteractionHand/";
 
+/// A façade value: a `game/…` marker's handle (`game_object.rs`, #156
+/// P16b); `block-pos/` text until P16c.
 fn marker(text: String) -> Value {
-    Value::Ref(Some(text))
+    crate::runtime::game_object::server_value(text)
 }
 
 fn refuse(r: &MethodRef) -> Result<Value, NativeError> {

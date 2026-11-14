@@ -100,8 +100,6 @@ const HOLDER_OWNERS: [&str; 6] = [
     "net/neoforged/neoforge/attachment/AttachmentHolder",
     "net/neoforged/neoforge/attachment/IAttachmentHolder",
 ];
-/// A façade player's marker (`events::player_marker`).
-const PLAYER_PREFIX: &str = "game/player/";
 /// Types and builders one jar may make; past this the builder surface stays unmodelled.
 const MAX_TYPES: usize = 4096;
 const TYPE_ARG: &str = "Lnet/neoforged/neoforge/attachment/AttachmentType;";
@@ -514,10 +512,7 @@ fn holder_op(r: &MethodRef) -> Option<(HolderOp, bool)> {
 }
 
 fn player_uuid(receiver: Option<&Value>) -> Option<u128> {
-    let hex = receiver
-        .and_then(crate::runtime::game_object::text)?
-        .strip_prefix(PLAYER_PREFIX)?;
-    (hex.len() == 32).then(|| u128::from_str_radix(hex, 16).ok())?
+    crate::runtime::game_object::player_uuid(crate::runtime::game_object::text(receiver?)?)
 }
 
 fn npe(message: Option<String>) -> NativeError {
@@ -922,7 +917,12 @@ impl<H: Host> Runtime<'_, H> {
         let Some((op, by_supplier)) = holder_op(r) else {
             return Ok(None);
         };
-        let original = original_uuid(receiver);
+        // The clone's old player: its marker, or its previous life's key
+        // (`events::clone_original`).
+        let original = original_uuid(receiver).or_else(|| {
+            self.host
+                .clone_original_of(crate::runtime::game_object::text(receiver?)?)
+        });
         let Some(player) = player_uuid(receiver).or(original) else {
             return Ok(None);
         };

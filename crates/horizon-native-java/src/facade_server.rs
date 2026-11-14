@@ -131,8 +131,10 @@ const LEVEL_RESOURCES: &[(&str, &str)] = &[
     ("ROOT", "."),
 ];
 
+/// A façade value: a `game/…` marker's handle (`game_object.rs`, #156
+/// P16b); `level-resource/` and `game-rule/` text until P16c.
 fn marker(text: impl Into<String>) -> Value {
-    Value::Ref(Some(text.into()))
+    crate::game_object::server_value(text.into())
 }
 
 fn refuse(r: &MethodRef) -> Result<Value, NativeError> {
@@ -476,17 +478,17 @@ impl crate::StdHost {
                 "connection",
                 "Lnet/minecraft/server/network/ServerGamePacketListenerImpl;",
             ) => Some(marker(format!(
-                "game/connection/{}",
-                text.strip_prefix("game/player/")?
+                "game/connection/{:032x}",
+                crate::game_object::player_uuid(text)?
             ))),
             (
                 "net/minecraft/server/network/ServerGamePacketListenerImpl",
                 "player",
                 "Lnet/minecraft/server/level/ServerPlayer;",
-            ) => Some(marker(format!(
-                "game/player/{}",
-                text.strip_prefix("game/connection/")?
-            ))),
+            ) => Some(crate::game_object::player_value(
+                &self.game_event.as_deref()?.facade,
+                u128::from_str_radix(text.strip_prefix("game/connection/")?, 16).ok()?,
+            )),
             _ => None,
         }
     }
@@ -504,8 +506,7 @@ impl crate::StdHost {
         if let Some(answer) = self.saved_data.call(r, receiver, args) {
             return Some(answer);
         }
-        let player = crate::game_object::text(receiver)?.strip_prefix("game/player/")?;
-        let player = u128::from_str_radix(player, 16).ok()?;
+        let player = crate::game_object::player_uuid(crate::game_object::text(receiver)?)?;
         let firing = self.game_event.as_deref()?;
         player_member(&firing.facade.server, player, r)
     }
@@ -713,7 +714,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let rules = expect_ref(&rules).unwrap().clone();
+        let rules = crate::game_object::text(&rules).unwrap().clone();
         let rule = |name: &str| {
             static_field(&call(
                 GAME_RULES_CLASS,
@@ -796,7 +797,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let access = expect_ref(&access).unwrap().clone();
+        let access = crate::game_object::text(&access).unwrap().clone();
         let lookup = call(
             "net/minecraft/core/RegistryAccess$Frozen",
             "lookupOrThrow",
@@ -809,7 +810,7 @@ mod tests {
             &[crate::host_ids::registry_key_of("minecraft:block")],
         )
         .unwrap();
-        let blocks = expect_ref(&blocks).unwrap().clone();
+        let blocks = crate::game_object::text(&blocks).unwrap().clone();
         let registry =
             |name: &str, descriptor: &str| call("net/minecraft/core/Registry", name, descriptor);
         assert_eq!(
