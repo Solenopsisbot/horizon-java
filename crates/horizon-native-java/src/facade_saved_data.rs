@@ -301,7 +301,7 @@ mod tests {
         let args = [
             crate::host_ids::identifier_of_text(id),
             marker("@indy:demo/Data::new"),
-            marker("codec/opaque"),
+            crate::host_codec::opaque_codec("com/mojang/serialization/Codec"),
             Value::Ref(None),
         ];
         assert_eq!(
