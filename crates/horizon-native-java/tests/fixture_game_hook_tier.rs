@@ -925,3 +925,101 @@ fn game_hook_callbacks_see_a_modelled_receiver_and_refuse_the_rest() {
         .to_string();
     assert!(error.contains("not live"), "{error}");
 }
+
+const HELD_MIXIN: &str = r#"package demo;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Supplier;
+import net.minecraft.server.level.ServerPlayer;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+@Mixin(ServerPlayer.class)
+public abstract class HeldMixin {
+    private Object demo$obj;
+    private Optional<Object> demo$opt;
+    private Supplier<String> demo$sup;
+    private Map.Entry<String, Object> demo$entry;
+    private int demo$n;
+
+    @Inject(method = "tick", at = @At("TAIL"))
+    private void onTick(CallbackInfo ci) {
+        demo$n++;
+        if (demo$n == 1) {
+            demo$obj = new Box(1, "obj");
+            demo$opt = Optional.of(new Box(2, "opt"));
+            Box b = new Box(3, "sup");
+            demo$sup = () -> b.show();
+            demo$entry = Map.entry("k", new Box(4, "entry"));
+        }
+        for (int i = 0; i < 3000; i++) { Box g = new Box(i, "g"); }
+        HookSink.mark(demo$n + ":" + ((Box) demo$obj).show() + "," + ((Box) demo$opt.get()).show() + "," + demo$sup.get() + "," + ((Box) demo$entry.getValue()).show());
+    }
+}
+"#;
+
+const HELD_BOX: &str = r#"package demo;
+public final class Box {
+    int v; String name;
+    public Box(int v, String name) { this.v = v; this.name = name; }
+    public String show() { return v + name; }
+}
+"#;
+
+/// Objects a Mixin keeps in fields on a game object (a player) survive the
+/// heap's collections whatever holds them: a plain reference, an `Optional`
+/// (whose handle names the object in its key), a lambda's capture and a
+/// `Map.entry`. Each tick allocates 3,000 garbage objects; Java 25 (the same
+/// body run plainly, `System.gc()` between ticks) marks every field's object
+/// on every tick. The `Optional` read `0null` from the second tick while the
+/// game-hook roots kept only object handles (#226 review B2).
+#[test]
+fn game_object_fields_keep_every_kind_of_handle_across_collections() {
+    let mut sources: BTreeMap<&str, String> = RECEIVER_GAME
+        .iter()
+        .map(|(path, body)| (*path, (*body).to_owned()))
+        .collect();
+    sources.insert("demo/HeldMixin.java", HELD_MIXIN.into());
+    sources.insert("demo/Box.java", HELD_BOX.into());
+    let compile_only: Vec<&str> = COMPILE_ONLY
+        .iter()
+        .copied()
+        .chain([
+            "net/minecraft/world/entity/Entity.class",
+            "net/minecraft/world/entity/LivingEntity.class",
+            "net/minecraft/world/damagesource/DamageSource.class",
+        ])
+        .collect();
+    let fixture = Fixture::build_with("held-fields", sources, &["HeldMixin"], &compile_only);
+    let jar = fixture.load();
+    let weave = jar.plan_load_time_weave_with_game_hooks(MixinSide::Server);
+    let registrations = jar.register_game_hooks(&weave).unwrap();
+    let mut host = StdHost::new();
+    let mut state = GameHookState::default();
+    let budget = ExecutionBudget::within(std::time::Duration::from_secs(60));
+    for _ in 0..3 {
+        let mut context = GameHookContext::new();
+        let receiver = context.insert(GameObject::player(5, "Alice").with_entity_id(7));
+        jar.run_game_hook_in(
+            &registrations,
+            &mut state,
+            &mut context,
+            "player_tick",
+            Some(receiver),
+            &[],
+            &mut host,
+            &budget,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        marks(&host),
+        [
+            "1:1obj,2opt,3sup,4entry",
+            "2:1obj,2opt,3sup,4entry",
+            "3:1obj,2opt,3sup,4entry",
+        ]
+    );
+}

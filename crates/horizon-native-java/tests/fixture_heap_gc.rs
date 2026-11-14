@@ -18,6 +18,9 @@ use horizon_native_java::{StdHost, Value};
 const ORACLE: &str =
     "100000|705082704|7shared8second9third|truetruetrueid|11capturedtrue|12viewed|13frozen";
 
+/// Java 25's `held=` line: the objects the caller kept across the run.
+const HELD: &str = "41held|42retlist|43retlambda";
+
 const PROBE: &str = include_str!("fixtures/heap_gc/demo/Probe.java");
 
 /// Callbacks run: well past the old 65,536-object limit.
@@ -37,6 +40,46 @@ fn call(fixture: &javac_fixture::Fixture, host: &mut StdHost, method: &str) -> S
     }
 }
 
+/// `demo.Probe.method()` answering an object the caller keeps.
+fn make(fixture: &javac_fixture::Fixture, host: &mut StdHost, method: &str) -> Value {
+    fixture
+        .jar
+        .invoke_method_with_args(
+            "demo/Probe",
+            method,
+            "()Ljava/lang/Object;",
+            None,
+            &[],
+            host,
+        )
+        .unwrap_or_else(|error| panic!("{method}: {error}"))
+}
+
+/// `demo.Probe.method(value)` reading an object the caller kept.
+fn read(
+    fixture: &javac_fixture::Fixture,
+    host: &mut StdHost,
+    method: &str,
+    value: &Value,
+) -> Result<String, String> {
+    match fixture.jar.invoke_method_with_args(
+        "demo/Probe",
+        method,
+        "(Ljava/lang/Object;)Ljava/lang/String;",
+        None,
+        std::slice::from_ref(value),
+        host,
+    ) {
+        Ok(Value::Ref(Some(text))) => Ok(text),
+        other => Err(format!("{other:?}")),
+    }
+}
+
+/// The caller holds a returned object, a held one, a returned `ArrayList`
+/// and a returned bound method reference across the run (Java 25:
+/// `40returned`, then [`HELD`]); one it released is collected, and reading
+/// it fails by name rather than answering `0null` (#226 review).
+///
 /// `setup` keeps one object through a static, a `HashMap`, an `Object[]` and
 /// an `IdentityHashMap` key, a chain behind it reached only through its
 /// fields, an object a lambda captured, one behind an unmodifiable view of a
@@ -51,6 +94,19 @@ fn objects_nothing_reaches_are_collected_and_kept_ones_stay_identical() {
     let fixture = javac_fixture::Fixture::build("heap-gc", &[("demo/Probe.java", PROBE)]);
     let mut host = fixture.jar.seed_host(StdHost::new());
     assert_eq!(call(&fixture, &mut host, "setup"), "ok");
+    // Objects only the caller holds (#226 review B1): returned past 3,000
+    // garbage objects, and kept across every later callback.
+    let returned = make(&fixture, &mut host, "makeReturned");
+    assert_eq!(
+        read(&fixture, &mut host, "read", &returned),
+        Ok("40returned".into())
+    );
+    let held = make(&fixture, &mut host, "makeHeld");
+    let list = make(&fixture, &mut host, "makeReturnedList");
+    let lambda = make(&fixture, &mut host, "makeReturnedLambda");
+    // One the caller released: collected, and then never read as defaults.
+    let released = make(&fixture, &mut host, "makeHeld");
+    host.unpin(&released);
     let start = std::time::Instant::now();
     let mut most = 0;
     for _ in 0..TICKS {
@@ -61,6 +117,19 @@ fn objects_nothing_reaches_are_collected_and_kept_ones_stay_identical() {
     println!(
         "{TICKS} allocating callbacks in {elapsed:?} ({:?} each); at most {most} live fields",
         elapsed / TICKS as u32
+    );
+    let held = [
+        read(&fixture, &mut host, "read", &held),
+        read(&fixture, &mut host, "readList", &list),
+        read(&fixture, &mut host, "readSupplier", &lambda),
+    ]
+    .map(Result::unwrap)
+    .join("|");
+    assert_eq!(held, HELD);
+    let freed = read(&fixture, &mut host, "read", &released).unwrap_err();
+    assert!(
+        freed.contains("was collected while still reachable"),
+        "a collected object read as {freed}"
     );
     assert_eq!(call(&fixture, &mut host, "check"), ORACLE);
     assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());

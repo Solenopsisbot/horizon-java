@@ -23,6 +23,10 @@ public final class Probe {
             this.v = v;
             this.name = name;
         }
+
+        String show() {
+            return v + name;
+        }
     }
 
     static Cell held;
@@ -71,11 +75,64 @@ public final class Probe {
             + frozen.get(0).name;
     }
 
+    static void garbage(int n) {
+        for (int i = 0; i < n; i++) {
+            Cell g = new Cell(i, "g");
+            g.next = new Cell(-i, "h");
+        }
+    }
+
+    /** An object the caller gets back after 3,000 garbage objects (#226 review). */
+    public static Object makeReturned() {
+        garbage(3000);
+        return new Cell(40, "returned");
+    }
+
+    /** An object the caller keeps and passes back after many callbacks. */
+    public static Object makeHeld() {
+        return new Cell(41, "held");
+    }
+
+    /** A jar `ArrayList` the caller gets back. */
+    public static Object makeReturnedList() {
+        garbage(3000);
+        List<Cell> list = new ArrayList<>();
+        list.add(new Cell(42, "retlist"));
+        return list;
+    }
+
+    /** A bound method reference the caller gets back. */
+    public static Object makeReturnedLambda() {
+        Cell c = new Cell(43, "retlambda");
+        garbage(3000);
+        return (Supplier<String>) c::show;
+    }
+
+    public static String read(Object o) {
+        return ((Cell) o).show();
+    }
+
+    @SuppressWarnings("unchecked")
+    public static String readList(Object o) {
+        return ((List<Cell>) o).get(0).show();
+    }
+
+    @SuppressWarnings("unchecked")
+    public static String readSupplier(Object o) {
+        return ((Supplier<String>) o).get();
+    }
+
     public static void main(String[] args) {
         setup();
+        Object returned = makeReturned();
+        System.out.println("returned=" + read(returned));
+        Object held = makeHeld();
+        Object list = makeReturnedList();
+        Object lambda = makeReturnedLambda();
         for (int i = 0; i < 100_000; i++) {
             tick();
         }
+        System.out.println("held=" + read(held) + "|" + readList(list) + "|" + readSupplier(lambda));
         System.out.println("check=" + check());
     }
 }
