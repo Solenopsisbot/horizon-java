@@ -111,23 +111,32 @@ fn split_key(key: &str) -> Option<(&str, &str)> {
 
 /// Whether a reference's *text* spells an object's key, `(class, n)`: what
 /// decides that a `Ref` is a `String` and no host marker. Stricter than a
-/// handle's key: not an array's (`[I#0`), no `:`, space, `.` or `,`, and
-/// not a host collection marker.
+/// handle's key: not an array's (`[I#0`), and no `:`, space, `.`, `,` or `\`
+/// (no class name has one; a host marker may). Whatever the class's package:
+/// `map/Thing#0` is a jar class's key, so a `String` spelling it is a
+/// `String`. No host collection text is shaped like this
+/// ([`unspell_key`]).
 pub(crate) fn parse_key(text: &str) -> Option<(&str, &str)> {
     let (class, number) = split_key(text)?;
-    (!crate::runtime::host_array::handle_only_class(class)
-        && !class.contains([':', ' ', '.', ','])
-        && !is_collection_marker(text))
-    .then_some((class, number))
+    (!crate::runtime::host_array::handle_only_class(class) && !class.contains([':', ' ', '.', ',', '\\']))
+        .then_some((class, number))
 }
 
-/// A host collection's text marker (`list/a,b`, `set/x#3`, `list#i1/…`,
-/// collections #156 P14), whose last element may end in `#<digits>` like a
-/// key does.
-fn is_collection_marker(text: &str) -> bool {
-    let head = text.split_once('/').map_or(text, |(head, _)| head);
-    let kind = head.split_once('#').map_or(head, |(kind, _)| kind);
-    matches!(kind, "list" | "set" | "map")
+/// A host collection's text (`list/<element markers>`, collections #156
+/// P14) as no `String` can be confused with: a one-element literal whose
+/// element ends in `#<digits>` (`list/rfoo#3`, the String `foo#3`) is
+/// [`parse_key`]-shaped, like a jar class `list/rfoo`'s key, so its last `#`
+/// is escaped (`list/rfoo\#3`), which the element splitter reads back as
+/// `#`.
+pub(crate) fn unspell_key(text: String) -> String {
+    if parse_key(&text).is_none() {
+        return text;
+    }
+    let mut text = text;
+    if let Some(at) = text.rfind('#') {
+        text.insert(at, '\\');
+    }
+    text
 }
 
 /// The class of a handle's key (`class#n`), `None` for a text with no
@@ -206,6 +215,28 @@ pub(crate) fn packaged_key_class(text: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// A jar class in a package named like a host collection (`map`, `list`,
+    /// `set`) has keys a `String` can spell; no collection literal is shaped
+    /// like one, and a literal whose element ends like a key reads back its
+    /// element.
+    #[test]
+    fn no_collection_literal_spells_a_key() {
+        assert_eq!(parse_key("map/Thing#0"), Some(("map/Thing", "0")));
+        assert_eq!(
+            parse_key("list/render/Thing#2"),
+            Some(("list/render/Thing", "2"))
+        );
+        let literal = crate::runtime::collection_value("set", &[Value::Ref(Some("foo#3".into()))]);
+        assert_eq!(literal, Value::Ref(Some("set/rfoo\\#3".into())));
+        assert_eq!(parse_key(crate::runtime::expect_string(&literal)), None);
+        assert_eq!(crate::runtime::collection_values(&literal).unwrap(), ["rfoo#3"]);
+        // Any other literal is unchanged.
+        assert_eq!(
+            crate::runtime::collection_value("list", &[Value::Ref(Some("a#1".into())), Value::Int(2)]),
+            Value::Ref(Some("list/ra#1,i2".into()))
+        );
+    }
+
     /// The class is everything before the last `#`, whatever the class name
     /// holds; a suffix that is no allocation number is no object.
     #[test]
@@ -231,8 +262,7 @@ mod tests {
             "plain text",
             // A host collection marker whose element ends like a key.
             "list/r#1,r#2,r#3",
-            "set/r#3",
-            "list#i1/a#3",
+            "set/r\\#3",
         ] {
             assert_eq!(parse_key(text), None, "{text:?}");
         }

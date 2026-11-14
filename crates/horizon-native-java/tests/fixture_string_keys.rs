@@ -17,24 +17,84 @@ mod javac_fixture;
 /// --release 21`), the same on two runs.
 const ORACLE: &str = include_str!("fixtures/string_keys/java25.txt");
 
-const PACKAGES: &[&str] = &["map", "list", "set", "stream", "optional", "type", "component", "uuid", "codec", "iterator", "duration", "locale", "list_render", "set_rows"];
+const PACKAGES: &[&str] = &[
+    "map",
+    "list",
+    "set",
+    "stream",
+    "optional",
+    "type",
+    "component",
+    "uuid",
+    "codec",
+    "iterator",
+    "duration",
+    "locale",
+    "list_render",
+    "set_rows",
+];
 
 const SOURCES: &[(&str, &str)] = &[
-    ("demo/Probe.java", include_str!("fixtures/string_keys/demo/Probe.java")),
-    ("map/Thing.java", include_str!("fixtures/string_keys/map/Thing.java")),
-    ("list/Thing.java", include_str!("fixtures/string_keys/list/Thing.java")),
-    ("set/Thing.java", include_str!("fixtures/string_keys/set/Thing.java")),
-    ("stream/Thing.java", include_str!("fixtures/string_keys/stream/Thing.java")),
-    ("optional/Thing.java", include_str!("fixtures/string_keys/optional/Thing.java")),
-    ("type/Thing.java", include_str!("fixtures/string_keys/type/Thing.java")),
-    ("component/Thing.java", include_str!("fixtures/string_keys/component/Thing.java")),
-    ("uuid/Thing.java", include_str!("fixtures/string_keys/uuid/Thing.java")),
-    ("codec/Thing.java", include_str!("fixtures/string_keys/codec/Thing.java")),
-    ("iterator/Thing.java", include_str!("fixtures/string_keys/iterator/Thing.java")),
-    ("duration/Thing.java", include_str!("fixtures/string_keys/duration/Thing.java")),
-    ("locale/Thing.java", include_str!("fixtures/string_keys/locale/Thing.java")),
-    ("list/render/Thing.java", include_str!("fixtures/string_keys/list/render/Thing.java")),
-    ("set/rows/Thing.java", include_str!("fixtures/string_keys/set/rows/Thing.java")),
+    (
+        "demo/Probe.java",
+        include_str!("fixtures/string_keys/demo/Probe.java"),
+    ),
+    (
+        "map/Thing.java",
+        include_str!("fixtures/string_keys/map/Thing.java"),
+    ),
+    (
+        "list/Thing.java",
+        include_str!("fixtures/string_keys/list/Thing.java"),
+    ),
+    (
+        "set/Thing.java",
+        include_str!("fixtures/string_keys/set/Thing.java"),
+    ),
+    (
+        "stream/Thing.java",
+        include_str!("fixtures/string_keys/stream/Thing.java"),
+    ),
+    (
+        "optional/Thing.java",
+        include_str!("fixtures/string_keys/optional/Thing.java"),
+    ),
+    (
+        "type/Thing.java",
+        include_str!("fixtures/string_keys/type/Thing.java"),
+    ),
+    (
+        "component/Thing.java",
+        include_str!("fixtures/string_keys/component/Thing.java"),
+    ),
+    (
+        "uuid/Thing.java",
+        include_str!("fixtures/string_keys/uuid/Thing.java"),
+    ),
+    (
+        "codec/Thing.java",
+        include_str!("fixtures/string_keys/codec/Thing.java"),
+    ),
+    (
+        "iterator/Thing.java",
+        include_str!("fixtures/string_keys/iterator/Thing.java"),
+    ),
+    (
+        "duration/Thing.java",
+        include_str!("fixtures/string_keys/duration/Thing.java"),
+    ),
+    (
+        "locale/Thing.java",
+        include_str!("fixtures/string_keys/locale/Thing.java"),
+    ),
+    (
+        "list/render/Thing.java",
+        include_str!("fixtures/string_keys/list/render/Thing.java"),
+    ),
+    (
+        "set/rows/Thing.java",
+        include_str!("fixtures/string_keys/set/rows/Thing.java"),
+    ),
 ];
 
 fn expected(method: &str) -> &'static str {

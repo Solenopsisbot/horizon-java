@@ -544,6 +544,28 @@ impl<H: Host> Runtime<'_, H> {
         };
         let value = args.first().cloned().unwrap_or(Value::Ref(None));
         let is_null = matches!(value, Value::Ref(None));
+        // A `String` (plain text, or text spelling an object's key): a final
+        // class whose supertypes are known, so both answer exactly, and a
+        // failed `cast` throws Java's `Cannot cast java.lang.String to X`.
+        if let Value::Ref(Some(text)) = &value
+            && crate::runtime::value_class::is_plain_string(text)
+        {
+            let instance = crate::runtime::value_class::string_instance_of(text, &wanted);
+            if r.name == "isInstance" {
+                return Ok(Some(Value::Int(i32::from(instance))));
+            }
+            if instance {
+                return Ok(Some(value));
+            }
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/ClassCastException".into(),
+                message: Some(format!(
+                    "Cannot cast java.lang.String to {}",
+                    wanted.replace('/', ".")
+                )),
+                frame: None,
+            });
+        }
         // A primitive class has no instances; `int.class.isInstance(1)` is
         // false on the JVM too. A host handle answers by its kind's row, an
         // unknown answer counted (`checkcast.rs`).

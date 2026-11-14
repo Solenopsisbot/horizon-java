@@ -11296,7 +11296,8 @@ fn collection_value(kind: &str, values: &[Value]) -> Value {
     Value::Ref(Some(if values.is_empty() {
         kind.to_owned()
     } else {
-        format!("{kind}/{values}")
+        // No literal spells a jar object's key (`jar_object::unspell_key`).
+        jar_object::unspell_key(format!("{kind}/{values}"))
     }))
 }
 
@@ -21725,16 +21726,38 @@ impl<H: Host> Runtime<'_, H> {
                 Some(StdHost::argument(r, args, 0)?.clone())
             };
             // `Method.invoke` on an object that is surely not a `owner` (a
-            // `String`, `jar_object.rs`): Java's `IllegalArgumentException`.
+            // `String`, plain or spelling an object's key, `jar_object.rs`):
+            // Java 25's `IllegalArgumentException`, naming the receiver's
+            // class.
             if let Some(receiver) = &target_receiver
                 && *receiver != Value::Ref(None)
-                && self.known_instance_of(receiver, owner) == Some(false)
             {
-                return Err(NativeError::UncaughtException {
-                    class: "java/lang/IllegalArgumentException".into(),
-                    message: Some("object is not an instance of declaring class".into()),
-                    frame: None,
-                });
+                let string = match receiver {
+                    Value::Ref(Some(text)) if value_class::is_plain_string(text) => Some(text),
+                    _ => None,
+                };
+                let not_instance = match string {
+                    Some(text) => !value_class::string_instance_of(text, owner),
+                    None => self.known_instance_of(receiver, owner) == Some(false),
+                };
+                if not_instance {
+                    let class = match string {
+                        Some(_) => Some("java/lang/String".to_owned()),
+                        None => self.receiver_class(receiver).map(str::to_owned),
+                    };
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: Some(match class {
+                            Some(class) => format!(
+                                "object of type {} is not an instance of {}",
+                                class.replace('/', "."),
+                                owner.replace('/', ".")
+                            ),
+                            None => "object is not an instance of declaring class".into(),
+                        }),
+                        frame: None,
+                    });
+                }
             }
             // `Method.invoke` dispatches as `invokevirtual`/`invokeinterface`
             // would: a static or private target runs its own body, any other
