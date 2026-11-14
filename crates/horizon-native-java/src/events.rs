@@ -1365,7 +1365,7 @@ impl StdHost {
         let firing = self.game_event.as_deref()?;
         let player = args
             .first()
-            .and_then(expect_ref)
+            .and_then(crate::game_object::text)
             .and_then(|text| match facade(text) {
                 Some(Facade::Player(uuid) | Facade::Connection(uuid)) => Some(uuid),
                 _ => None,
@@ -1391,7 +1391,7 @@ impl StdHost {
             let answer = self.facade_answer(&Facade::Event, r, args);
             return Some(answer.ok_or_else(|| NativeError::UnknownHostCall(r.clone())));
         }
-        let text = expect_ref(receiver)?;
+        let text = crate::game_object::text(receiver)?;
         // `new LevelResource("data/x.json")`: keep its id for a later
         // `getWorldPath`.
         if let Some(id) = facade_server::level_resource_init(r, args) {
@@ -1435,7 +1435,9 @@ impl StdHost {
                 ("getZ", "()I") => Ok(Value::Int(z)),
                 ("asLong", "()J") => Ok(Value::Long(block_pos_long(x, y, z))),
                 ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(i32::from(
-                    args.first().and_then(expect_ref).is_some_and(|o| o == text),
+                    args.first()
+                        .and_then(crate::game_object::text)
+                        .is_some_and(|o| o == text),
                 ))),
                 ("hashCode", "()I") => Ok(Value::Int(stable_hash(text))),
                 _ => Err(NativeError::UnknownHostCall(r.clone())),
@@ -1451,13 +1453,15 @@ impl StdHost {
                 ("is", "(Lnet/minecraft/world/level/block/Block;)Z") => {
                     let other = args
                         .first()
-                        .and_then(expect_ref)
+                        .and_then(crate::game_object::text)
                         .and_then(|value| value.strip_prefix("game/block/"));
                     Ok(Value::Int(i32::from(other == Some(block))))
                 }
                 ("isAir", "()Z") => Ok(Value::Int(i32::from(block == "minecraft:air"))),
                 ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(i32::from(
-                    args.first().and_then(expect_ref).is_some_and(|o| o == text),
+                    args.first()
+                        .and_then(crate::game_object::text)
+                        .is_some_and(|o| o == text),
                 ))),
                 ("hashCode", "()I") => Ok(Value::Int(stable_hash(text))),
                 _ => Err(NativeError::UnknownHostCall(r.clone())),
@@ -1468,7 +1472,9 @@ impl StdHost {
             return Some(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(block.to_owned()))),
                 ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(i32::from(
-                    args.first().and_then(expect_ref).is_some_and(|o| o == text),
+                    args.first()
+                        .and_then(crate::game_object::text)
+                        .is_some_and(|o| o == text),
                 ))),
                 ("hashCode", "()I") => Ok(Value::Int(stable_hash(text))),
                 _ => Err(NativeError::UnknownHostCall(r.clone())),

@@ -40,7 +40,7 @@ impl Original {
 /// The UUID of an original-player marker.
 pub(super) fn original_uuid(receiver: Option<&Value>) -> Option<u128> {
     let hex = receiver
-        .and_then(expect_ref)?
+        .and_then(crate::game_object::text)?
         .strip_prefix(ORIGINAL_PREFIX)?;
     (hex.len() == 32).then(|| u128::from_str_radix(hex, 16).ok())?
 }
