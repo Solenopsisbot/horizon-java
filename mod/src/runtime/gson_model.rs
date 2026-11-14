@@ -873,7 +873,7 @@ impl<H: Host> Runtime<'_, H> {
 
     fn gson_array_text(
         &mut self,
-        values: &[String],
+        values: &[Value],
         style: &GsonStyle,
         depth: usize,
     ) -> Result<Option<String>, NativeError> {
@@ -886,8 +886,7 @@ impl<H: Host> Runtime<'_, H> {
                 out.push(',');
             }
             out.push_str(&style.line(depth + 1));
-            let Some(text) = self.gson_to_json(&parse_value_marker(value)?, style, depth + 1)?
-            else {
+            let Some(text) = self.gson_to_json(value, style, depth + 1)? else {
                 return Ok(None);
             };
             out.push_str(&text);
@@ -899,7 +898,7 @@ impl<H: Host> Runtime<'_, H> {
 
     fn gson_object_text(
         &mut self,
-        values: &[String],
+        values: &[Value],
         style: &GsonStyle,
         depth: usize,
     ) -> Result<Option<String>, NativeError> {
@@ -914,8 +913,7 @@ impl<H: Host> Runtime<'_, H> {
         let mut out = String::from("{");
         let mut first = true;
         for pair in values.chunks(2) {
-            let key = parse_value_marker(&pair[0])?;
-            let value = parse_value_marker(&pair[1])?;
+            let (key, value) = (pair[0].clone(), pair[1].clone());
             if !first {
                 out.push(',');
             }
@@ -957,9 +955,7 @@ impl<H: Host> Runtime<'_, H> {
                 descriptor: descriptor.clone(),
             };
             let value = if access & 0x0008 != 0 {
-                self.static_fields
-                    .get(&Self::static_field_key(&field))
-                    .cloned()
+                self.stored_static(&field)?
             } else {
                 self.fields
                     .get(&format!("{marker}|{declaring}#{name}{descriptor}"))

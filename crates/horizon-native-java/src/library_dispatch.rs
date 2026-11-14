@@ -516,7 +516,6 @@ impl<H: Host> Runtime<'_, H> {
                         || self.object_is_instance_of(marker, wanted)
                         || self.host.host_instance_of(marker, wanted)
                         || crate::jdk_model::platform_instance_of(marker, wanted)
-                        || generic_type_instance_of(marker, wanted)
                         || (wanted == "java/lang/Class"
                             && class_marker_like(marker, self.classes, &self.linked))
                 })
@@ -1121,10 +1120,7 @@ impl<H: Host> Runtime<'_, H> {
         let Ok(items) = runtime_collection_values(&*self.host, receiver) else {
             return Ok(None);
         };
-        let values = items
-            .iter()
-            .map(|item| parse_collection_value(item))
-            .collect::<Result<Vec<_>, _>>()?;
+        let values = items;
         // `toArray(IntFunction)` is `toArray(generator.apply(0))`
         // (`Collection`'s default): the generated array names the class.
         let target = match r.descriptor.as_str() {

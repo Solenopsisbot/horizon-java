@@ -229,7 +229,10 @@ mod tests {
         let literal = crate::collection_value("set", &[Value::Ref(Some("foo#3".into()))]);
         assert_eq!(literal, Value::Ref(Some("set/rfoo\\#3".into())));
         assert_eq!(parse_key(crate::expect_string(&literal)), None);
-        assert_eq!(crate::collection_values(&literal).unwrap(), ["rfoo#3"]);
+        assert_eq!(
+            crate::collection_values(&literal).unwrap(),
+            [Value::Ref(Some("foo#3".into()))]
+        );
         // Any other literal is unchanged.
         assert_eq!(
             crate::collection_value("list", &[Value::Ref(Some("a#1".into())), Value::Int(2)]),

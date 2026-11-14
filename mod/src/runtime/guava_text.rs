@@ -161,11 +161,7 @@ impl StdHost {
             return Ok(Some(values[(*index).min(values.len())..].to_vec()));
         }
         match runtime_collection_values(self, value) {
-            Ok(values) => values
-                .iter()
-                .map(|value| parse_collection_value(value))
-                .collect::<Result<Vec<_>, _>>()
-                .map(Some),
+            Ok(values) => Ok(Some(values)),
             Err(_) => Ok(None),
         }
     }

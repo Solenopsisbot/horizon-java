@@ -233,6 +233,30 @@ impl<H: Host> Runtime<'_, H> {
         key: &Value,
         hash: Option<i32>,
     ) -> Result<Lookup, NativeError> {
+        self.table_lookup_with(table, key, hash, false)
+    }
+
+    /// [`Self::table_lookup`] for a member that only reads or removes
+    /// (`get`, `containsKey`, `contains`, `remove`): the same object stored
+    /// under the hash it had before it changed is a miss, as in the JDK. An
+    /// insert keeps it unknown instead (the host's list holds one entry per
+    /// object, and the JDK would add a second node).
+    pub(crate) fn table_lookup_read(
+        &mut self,
+        table: &HashTable,
+        key: &Value,
+        hash: Option<i32>,
+    ) -> Result<Lookup, NativeError> {
+        self.table_lookup_with(table, key, hash, true)
+    }
+
+    fn table_lookup_with(
+        &mut self,
+        table: &HashTable,
+        key: &Value,
+        hash: Option<i32>,
+        displaced_misses: bool,
+    ) -> Result<Lookup, NativeError> {
         let marker = collection_item_marker(key);
         let Some(hash) = hash else {
             // An identity-hashed (or unhashable) key. With `Object.equals`
@@ -257,6 +281,21 @@ impl<H: Host> Runtime<'_, H> {
             // equal key never a match by itself; one the row cannot decide
             // makes the lookup unknown (counted), never a silent split.
             if let Value::Host(handle) = key {
+                // A chat component whose hash is unknown (styled, arguments):
+                // Java finds a stored component only where the hash it has now
+                // equals the one that component had when it was added, which
+                // no answer here can show. Counted among components.
+                if handle.kind() == crate::host_ref::HostKind::Component {
+                    let components = table.order().iter().any(|stored| {
+                        parse_collection_value(stored)
+                            .is_ok_and(|value| crate::host_component::is_component(&value))
+                    });
+                    return Ok(if components {
+                        Lookup::Unknown
+                    } else {
+                        Lookup::Absent
+                    });
+                }
                 let mut unknown = false;
                 for stored in table.order() {
                     let stored = parse_collection_value(&stored)?;
@@ -295,7 +334,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // The same object under another stored hash (a key mutated after it
         // was put): the JDK misses it, the host's list would find it.
-        if table.contains(&marker) {
+        if table.contains(&marker) && !displaced_misses {
             return Ok(Lookup::Unknown);
         }
         Ok(Lookup::Absent)
@@ -877,7 +916,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Lookup::Absent);
         }
         let hash = self.java_hash(key)?;
-        self.table_lookup(table, key, hash)
+        self.table_lookup_read(table, key, hash)
     }
 
     /// `removeNode(hash(key), ...)`: the hash runs even on an empty map.
@@ -893,7 +932,7 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Option<Value>>, NativeError> {
         let hash = self.java_hash(key)?;
         let found = if table.allocated() {
-            self.table_lookup(table, key, hash)?
+            self.table_lookup_read(table, key, hash)?
         } else {
             Lookup::Absent
         };
@@ -1183,8 +1222,9 @@ impl<H: Host> Runtime<'_, H> {
     fn key_signature(&self, value: &Value, kind: TableKind) -> Result<Vec<String>, NativeError> {
         let step = if kind.map { 2 } else { 1 };
         let mut keys: Vec<String> = runtime_collection_values(self.host, value)?
-            .into_iter()
+            .iter()
             .step_by(step)
+            .map(collection_item_marker)
             .collect();
         keys.sort();
         Ok(keys)

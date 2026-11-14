@@ -548,11 +548,9 @@ impl<H: Host> Runtime<'_, H> {
             && self.jar_map_entry(argument)
             && runtime_collection_values(self.host, receiver).is_ok_and(|values| {
                 !values.is_empty()
-                    && values.iter().all(|value| {
-                        parse_collection_value(value).is_ok_and(|value| {
-                            expect_ref(&value).is_some_and(|m| m.starts_with("map-entry/"))
-                        })
-                    })
+                    && values
+                        .iter()
+                        .all(|value| expect_ref(value).is_some_and(|m| m.starts_with("map-entry/")))
             })
         {
             return self.host.unknown_operand_call(r).map(Some);

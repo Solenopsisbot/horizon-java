@@ -340,7 +340,15 @@ fn budget() -> ExecutionBudget {
 const ANA: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
 
 fn facade() -> Arc<EventFacade> {
+    // The game's rules, as the mod reads them from the level (`sendSuccess` asks
+    // `sendCommandFeedback` for a player's source).
+    let mut server = horizon_native_java::ServerFacts::default();
+    server.game_rules.insert(
+        "send_command_feedback".into(),
+        horizon_native_java::GameRuleValue::Bool(true),
+    );
     Arc::new(EventFacade {
+        server: Arc::new(server),
         dedicated: true,
         players: vec![
             FacadePlayer {

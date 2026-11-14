@@ -784,7 +784,7 @@ impl Host for Tracing {
         );
         out
     }
-    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<String>> {
+    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         Host::mutable_collection_values(&self.inner, value)
     }
     fn service_providers(&self, service: &str) -> Vec<String> {

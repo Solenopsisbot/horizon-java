@@ -874,10 +874,7 @@ impl<H: Host> Runtime<'_, H> {
     /// A host collection's elements (a map's keys and values interleaved),
     /// in the order the host keeps them.
     pub(crate) fn collection_elements(&self, value: &Value) -> Result<Vec<Value>, NativeError> {
-        runtime_collection_values(self.host, value)?
-            .iter()
-            .map(|item| parse_collection_value(item))
-            .collect()
+        runtime_collection_values(self.host, value)
     }
 }
 
@@ -929,6 +926,9 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
         self.runtime
             .value_of_text(value, "Ljava/lang/Object;", self.class, self.method)
             .map(Some)
+    }
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        crate::facade_text::json_now(value, self.runtime.host.component_states())
     }
 }
 

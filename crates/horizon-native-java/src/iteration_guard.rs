@@ -122,7 +122,11 @@ impl<H: Host> Runtime<'_, H> {
 
     /// A collection's structure: its elements in order, or a map's keys.
     fn structure_of(&self, source: &Value, how: FailFast) -> Result<Vec<String>, NativeError> {
-        let items = runtime_collection_values(self.host, source)?;
+        // Compared as their encoded items (#156 P14b keeps `Value`s here).
+        let items: Vec<String> = runtime_collection_values(self.host, source)?
+            .iter()
+            .map(collection_item_marker)
+            .collect();
         Ok(match how {
             FailFast::MapKeys => items.into_iter().step_by(2).collect(),
             FailFast::SetElements => {

@@ -146,7 +146,8 @@ const CASES: &[(&str, Outcome)] = &[
     ("iKinds", Counted),
     ("iNormalizeSame", Counted),
     ("iSameLocal", Exact(r#"truetrue12true"#)),
-    ("iThroughList", Counted),
+    // #156 P14a: a list hands its stored element back (origin kept).
+    ("iThroughList", Exact("true")),
     ("iToAbsSame", Counted),
     ("iTwoPaths", Counted),
     ("iTwoPathsNe", Counted),

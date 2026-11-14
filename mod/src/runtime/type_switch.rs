@@ -138,7 +138,17 @@ impl<H: Host> Runtime<'_, H> {
             return !claimed;
         }
         // A `String` spelling an object's key is no object.
-        !crate::runtime::jar_object::spells_key(value) && self.object_is_instance_of(marker, class)
+        if crate::runtime::jar_object::spells_key(value) {
+            return false;
+        }
+        // A class is its class marker (#156 P13 will make it a handle): the
+        // same answer the `instanceof` opcode gives (`class_marker_like`).
+        if class == "java/lang/Class"
+            && crate::runtime::class_marker_like(marker, self.classes, &self.linked)
+        {
+            return true;
+        }
+        self.object_is_instance_of(marker, class)
     }
 }
 

@@ -68,6 +68,8 @@ mod hook_shapes;
 mod host_array;
 mod host_attachment;
 mod host_brigadier;
+mod host_codec;
+mod host_component;
 mod host_config;
 mod host_entry;
 mod host_events;
@@ -86,6 +88,7 @@ mod host_optional;
 mod host_path;
 mod host_ref;
 mod host_reflect;
+mod host_reflect_type;
 mod host_registry;
 mod host_services;
 mod host_watch;
@@ -2254,6 +2257,38 @@ pub trait Host {
         Ok(Value::default_for(return_desc(&r.descriptor)))
     }
 
+    /// The chat components this host changed in place (`host_component.rs`
+    /// `States`), `None` for a host that keeps none: its components are as
+    /// they were made, and a change to one is counted.
+    fn component_states(&self) -> Option<&host_component::States> {
+        None
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        None
+    }
+
+    /// `CommandSourceStack.sendSuccess(supplier, broadcast)` on `source`:
+    /// whether vanilla calls the supplier now (`Some(Some(true))`), skips it
+    /// (`Some(Some(false))`), or the host cannot tell (`Some(None)`, counted);
+    /// `None` when `source` is not the running command's (the host answers
+    /// the call as before).
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        let _ = (source, broadcast);
+        None
+    }
+
+    /// Deliver the component a `sendSuccess` supplier gave, as it is now.
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        let _ = (component, broadcast);
+        self.unknown_operand_call(r)
+    }
+
     /// Invoke an instance method with its receiver preserved. Existing hosts
     /// keep their old behavior through the default forwarding implementation.
     fn invoke_instance(
@@ -2279,7 +2314,7 @@ pub trait Host {
     /// keeps one. Interpreter helpers that need a collection's contents run
     /// through the generic `Host` boundary, so the table is exposed here
     /// rather than only on [`StdHost`].
-    fn mutable_collection_values(&self, _value: &Value) -> Option<Vec<String>> {
+    fn mutable_collection_values(&self, _value: &Value) -> Option<Vec<Value>> {
         None
     }
 
@@ -2718,8 +2753,13 @@ const MAX_SEEDED_SERVICE_PROVIDERS: usize = 256;
 /// Resident Java class state is bounded per native mod instance. Static
 /// fields and initialized-class markers are retained across callbacks, but a
 /// jar cannot grow an unbounded heap through repeated event dispatch.
-const MAX_PERSISTENT_CLASS_FIELDS: usize = 1024;
-const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1024;
+/// The host's bound on a jar's persistent statics and initialized classes:
+/// far above any real jar (the largest census jar keeps a few thousand). A
+/// `ConstantValue` static is never stored (`class_init.rs`), so constants do
+/// not count; a store over the bound is refused and counted, never an error
+/// in place of the call's result (`Runtime::persist_class_state`).
+const MAX_PERSISTENT_CLASS_FIELDS: usize = 1 << 20;
+const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1 << 20;
 
 /// Deterministic, game-independent mappings for the small standard-library
 /// surface commonly reached during mod bootstrap.
@@ -2842,6 +2882,8 @@ pub struct StdHost {
     /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
     holder_binding: host_registry::Binding,
     mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Chat components changed in place, by marker (`host_component.rs`).
+    pub(crate) component_states: host_component::States,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
     unmodifiable_collections: BTreeMap<String, Option<String>>,
@@ -3019,6 +3061,7 @@ impl StdHost {
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
             mutable_collections: BTreeMap::new(),
+            component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
             jdk_list_of: std::collections::BTreeSet::new(),
@@ -3129,14 +3172,14 @@ impl StdHost {
         // (`StreamCodec.composite(ByteBufCodecs.INT, ...)`,
         // `RecordCodecBuilder.create`); no factory or constant of the game
         // answers null for one, and payload records `requireNonNull` theirs.
-        // An opaque marker of the declared type keeps the chain honest: it
-        // names no behaviour, it is just not null.
+        // An opaque handle of the declared type keeps the chain honest: it
+        // names no behaviour, it is just not null (`host_codec.rs`).
         if let Some(codec) = result_descriptor(descriptor)
             .strip_prefix('L')
             .and_then(|name| name.strip_suffix(';'))
             .filter(|name| is_codec_type(name))
         {
-            return Value::Ref(Some(format!("{codec}#codec")));
+            return host_codec::opaque_codec(codec);
         }
         Value::default_for(descriptor)
     }
@@ -3502,7 +3545,10 @@ impl StdHost {
         self
     }
 
-    fn mutable_values(&self, receiver: &Value) -> Option<Vec<String>> {
+    /// The elements a host collection holds, as the `Value`s it stored (a
+    /// handle keeps its origin, so identity survives the read), or `None` for
+    /// a value the host keeps no elements for.
+    fn mutable_values(&self, receiver: &Value) -> Option<Vec<Value>> {
         // A `String` is no collection, whatever it spells (`jar_object.rs`).
         if jar_object::spells_key(receiver) {
             return None;
@@ -3514,12 +3560,7 @@ impl StdHost {
         if let Some(values) = self.reversed_view_values(marker) {
             return Some(values);
         }
-        self.mutable_collections.get(marker).map(|values| {
-            values
-                .iter()
-                .map(collection_item_marker)
-                .collect::<Vec<_>>()
-        })
+        self.mutable_collections.get(marker).cloned()
     }
 
     /// Answer `java.util.Properties` members from the map a collection keeps.
@@ -3737,17 +3778,17 @@ impl StdHost {
 
     /// The registered payload channels as `(id, direction, codec)` for the
     /// game's transport: the `CustomPacketPayload.Type` marker resolves to the
-    /// identifier it was built with, and a `codec/...` marker names the codec.
+    /// identifier it was built with, and an opaque codec names its declared
+    /// codec type (`host_codec.rs`).
     pub fn payload_channels(&self) -> Vec<(String, String, Option<String>)> {
         self.payload_registrations
             .iter()
             .filter_map(|registration| {
                 let marker = jar_object::object_key(&registration.payload_type)?;
                 let id = self.packet_types.get(marker)?.clone();
-                let codec = match &registration.codec {
-                    Value::Ref(Some(codec)) => codec.strip_prefix("codec/").map(str::to_owned),
-                    _ => None,
-                };
+                // The declared type of an opaque codec; no codec the model makes
+                // has a name, and a String is not a codec.
+                let codec = host_codec::opaque_codec_type(&registration.codec);
                 Some((id, registration.direction.clone(), codec))
             })
             .collect()
@@ -4384,6 +4425,27 @@ impl Host for StdHost {
         self.unknown_host_call(r)
     }
 
+    fn component_states(&self) -> Option<&host_component::States> {
+        Some(&self.component_states)
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        Some(&mut self.component_states)
+    }
+
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        self.brigadier_feedback_calls_supplier(source, broadcast)
+    }
+
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        self.brigadier_send_feedback(r, component, broadcast)
+    }
+
     fn counted_unknown_calls(&self) -> usize {
         self.unknown_host_call_count()
     }
@@ -4419,6 +4481,15 @@ impl Host for StdHost {
         if let Some(value) = self.facade_field(receiver, r) {
             return Ok(value);
         }
+        // An object's codec field is its own: never a library constant's
+        // one object (`get_static`), a counted neutral answer instead.
+        if r.descriptor
+            .strip_prefix('L')
+            .and_then(|name| name.strip_suffix(';'))
+            .is_some_and(host_codec::is_opaque_type)
+        {
+            return self.unknown_host_call(r);
+        }
         self.get_static(r)
     }
 
@@ -4444,7 +4515,7 @@ impl Host for StdHost {
         }
     }
 
-    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<String>> {
+    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         self.mutable_values(value)
     }
 
@@ -4914,6 +4985,19 @@ impl Host for StdHost {
                 "rarity/{}",
                 r.name.to_ascii_lowercase()
             )))),
+            // A library's codec constant (`Codec.STRING`, `ByteBufCodecs.INT`):
+            // not modelled, so counted, but one object however often it is
+            // read (`host_codec.rs`).
+            (owner, name, descriptor)
+                if descriptor
+                    .strip_prefix('L')
+                    .and_then(|name| name.strip_suffix(';'))
+                    .is_some_and(host_codec::is_opaque_type) =>
+            {
+                let declared = &descriptor[1..descriptor.len() - 1];
+                let codec = host_codec::static_codec(declared, owner, name);
+                self.unknown_host_call(r).map(|_| codec)
+            }
             _ => self.unknown_host_call(r),
         }
     }
@@ -6819,10 +6903,7 @@ impl Host for StdHost {
                 && !is_map_owner(&r.owner)
             {
                 let predicate = Self::argument(r, args, 0)?.clone();
-                let values = host_collection_values(self, receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = host_collection_values(self, receiver)?;
                 let mut kept = Vec::with_capacity(values.len());
                 let mut removed = false;
                 for value in values {
@@ -6849,10 +6930,7 @@ impl Host for StdHost {
                 && !is_map_owner(&r.owner)
             {
                 let callback = Self::argument(r, args, 0)?.clone();
-                let values = host_collection_values(self, receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = host_collection_values(self, receiver)?;
                 for value in values {
                     self.invoke_instance(
                         &MethodRef {
@@ -6875,20 +6953,14 @@ impl Host for StdHost {
                 (owner, "<init>", "(Ljava/util/Map;)V") if is_map_owner(owner) => {
                     // `new HashMap<>(other)` copies the entries, and a config
                     // validator that builds a modified copy relies on it.
-                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?;
                     self.mutable_collections.insert(marker.to_owned(), source);
                     return Ok(Value::Void);
                 }
                 (owner, "<init>", "(Ljava/util/Collection;)V")
                     if is_collection_owner(owner) && !is_map_owner(owner) =>
                 {
-                    let mut source = host_collection_values(self, Self::argument(r, args, 0)?)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut source = host_collection_values(self, Self::argument(r, args, 0)?)?;
                     // A set built from a collection holds each element once
                     // (`addAll`: `equals`, so one `NaN`).
                     if is_set_owner(owner) {
@@ -7054,10 +7126,7 @@ impl Host for StdHost {
                 }
                 (owner, "addAll", "(Ljava/util/Collection;)Z") if is_list_like_owner(owner) => {
                     let source = Self::argument(r, args, 0)?;
-                    let additions = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let additions = host_collection_values(self, source)?;
                     let changed = !additions.is_empty();
                     self.mutable_collections
                         .entry(marker.to_owned())
@@ -7068,10 +7137,7 @@ impl Host for StdHost {
                 (owner, "addAll", "(ILjava/util/Collection;)Z") if is_list_like_owner(owner) => {
                     let at = expect_int(r, Self::argument(r, args, 0)?)?;
                     let source = Self::argument(r, args, 1)?;
-                    let additions = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let additions = host_collection_values(self, source)?;
                     let values = self
                         .mutable_collections
                         .entry(marker.to_owned())
@@ -7125,10 +7191,7 @@ impl Host for StdHost {
                     if is_collection_owner(owner) && !is_map_owner(owner) =>
                 {
                     let source = Self::argument(r, args, 0)?;
-                    let removed = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let removed = host_collection_values(self, source)?;
                     let values = self
                         .mutable_collections
                         .entry(marker.to_owned())
@@ -7141,10 +7204,7 @@ impl Host for StdHost {
                     if is_collection_owner(owner) && !is_map_owner(owner) =>
                 {
                     let source = Self::argument(r, args, 0)?;
-                    let retained = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let retained = host_collection_values(self, source)?;
                     let values = self
                         .mutable_collections
                         .entry(marker.to_owned())
@@ -7460,10 +7520,7 @@ impl Host for StdHost {
                     let (pairs, remainder) = entries.as_chunks::<2>();
                     let mut updates = Vec::new();
                     for pair in pairs {
-                        updates.push((
-                            parse_collection_value(&pair[0])?,
-                            parse_collection_value(&pair[1])?,
-                        ));
+                        updates.push((pair[0].clone(), pair[1].clone()));
                     }
                     if !remainder.is_empty() {
                         return Err(NativeError::Metadata(
@@ -7682,10 +7739,7 @@ impl Host for StdHost {
             && is_collection_owner(&r.owner)
             && !is_map_owner(&r.owner)
         {
-            let values = host_collection_values(self, receiver)?
-                .into_iter()
-                .map(|value| parse_collection_value(&value))
-                .collect::<Result<Vec<_>, _>>()?;
+            let values = host_collection_values(self, receiver)?;
             let marker = format!("iterator/{}", self.next_iterator);
             self.next_iterator = self.next_iterator.saturating_add(1);
             self.iterators.insert(marker.clone(), (values, 0));
@@ -7879,22 +7933,17 @@ impl Host for StdHost {
                 Ok(Value::Int(
                     host_collection_values(self, receiver)?
                         .iter()
-                        .any(|value| value == &needle) as i32,
+                        .any(|value| collection_item_marker(value) == needle)
+                        as i32,
                 ))
             }
             (owner, "containsAll", "(Ljava/util/Collection;)Z")
                 if is_collection_owner(owner) && !is_map_owner(owner) =>
             {
                 let source = host_collection_values(self, Self::argument(r, args, 0)?)?;
-                let values = host_collection_values(self, receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = host_collection_values(self, receiver)?;
                 Ok(Value::Int(
                     source
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?
                         .iter()
                         .all(|needle| values.iter().any(|value| value == needle))
                         as i32,
@@ -7905,7 +7954,7 @@ impl Host for StdHost {
                 Ok(Value::Int(
                     host_collection_values(self, receiver)?
                         .iter()
-                        .position(|value| value == &needle)
+                        .position(|value| collection_item_marker(value) == needle)
                         .map_or(-1, |index| index as i32),
                 ))
             }
@@ -7914,7 +7963,7 @@ impl Host for StdHost {
                 Ok(Value::Int(
                     host_collection_values(self, receiver)?
                         .iter()
-                        .rposition(|value| value == &needle)
+                        .rposition(|value| collection_item_marker(value) == needle)
                         .map_or(-1, |index| index as i32),
                 ))
             }
@@ -7922,7 +7971,7 @@ impl Host for StdHost {
                 let at = expect_int(r, Self::argument(r, args, 0)?)?;
                 let values = host_collection_values(self, receiver)?;
                 let index = checked_list_index(at, values.len())?;
-                Ok(parse_collection_value(&values[index])?)
+                Ok(values[index].clone())
             }
             (owner, "get", "(Ljava/lang/Object;)Ljava/lang/Object;") if is_map_owner(owner) => {
                 let needle = collection_item_marker(Self::argument(r, args, 0)?);
@@ -7931,9 +7980,8 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .find(|pair| pair[0] == needle)
-                    .map(|pair| parse_collection_value(&pair[1]))
-                    .transpose()?
+                    .find(|pair| collection_item_marker(&pair[0]) == needle)
+                    .map(|pair| pair[1].clone())
                     .unwrap_or(Value::Ref(None)))
             }
             (owner, "getOrDefault", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")
@@ -7946,9 +7994,9 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .find(|pair| pair[0] == needle)
+                    .find(|pair| collection_item_marker(&pair[0]) == needle)
                 {
-                    parse_collection_value(&pair[1])
+                    Ok(pair[1].clone())
                 } else {
                     Ok(fallback)
                 }
@@ -7960,7 +8008,8 @@ impl Host for StdHost {
                         .as_chunks::<2>()
                         .0
                         .iter()
-                        .any(|pair| pair[0] == needle) as i32,
+                        .any(|pair| collection_item_marker(&pair[0]) == needle)
+                        as i32,
                 ))
             }
             (owner, "containsValue", "(Ljava/lang/Object;)Z") if is_map_owner(owner) => {
@@ -7970,7 +8019,8 @@ impl Host for StdHost {
                         .as_chunks::<2>()
                         .0
                         .iter()
-                        .any(|pair| pair[1] == needle) as i32,
+                        .any(|pair| collection_item_marker(&pair[1]) == needle)
+                        as i32,
                 ))
             }
             (owner, "entrySet", "()Ljava/util/Set;") if is_map_owner(owner) => {
@@ -7980,8 +8030,8 @@ impl Host for StdHost {
                     .0
                     .iter()
                     .map(|pair| {
-                        let key = parse_collection_value(&pair[0])?;
-                        let value = parse_collection_value(&pair[1])?;
+                        let key = pair[0].clone();
+                        let value = pair[1].clone();
                         Ok(map_entry_value(&key, &value))
                     })
                     .collect::<Result<Vec<_>, NativeError>>()?;
@@ -7999,8 +8049,8 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|pair| parse_collection_value(&pair[0]))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|pair| pair[0].clone())
+                    .collect::<Vec<_>>();
                 Ok(collection_value("set", &keys))
             }
             (owner, "values", "()Ljava/util/Collection;") if is_map_owner(owner) => {
@@ -8009,8 +8059,8 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|pair| parse_collection_value(&pair[1]))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|pair| pair[1].clone())
+                    .collect::<Vec<_>>();
                 Ok(collection_value("list", &values))
             }
             (owner, "toString", "()Ljava/lang/String;") if is_collection_owner(owner) => {
@@ -8637,26 +8687,57 @@ impl Host for StdHost {
                 "()Ljava/lang/String;",
             )
             | ("net/minecraft/network/chat/Component", "getString", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(component_text(receiver))))
+                if !host_component::is_component(receiver) {
+                    return Ok(Value::Ref(Some(
+                        expect_ref(receiver).cloned().unwrap_or_default(),
+                    )));
+                }
+                match facade_text::json_now(receiver, Some(&self.component_states)) {
+                    // A translation's text is the server language's: counted.
+                    Some(json) if facade_text::has_translation(&json) => {
+                        self.unknown_host_call(r)?;
+                        Ok(Value::Ref(Some(facade_text::plain(&json))))
+                    }
+                    Some(json) => Ok(Value::Ref(Some(facade_text::plain(&json)))),
+                    // Nested past what resolves (Java: a cycle overflows).
+                    None => self.unknown_host_call(r),
+                }
             }
+            // `siblings.add(c); return this` (`append(String)` adds
+            // `Component.literal(text)`), as `facade_text.rs` answers it in
+            // the interpreter; a receiver or sibling the model did not make
+            // (a jar's own `Component`) is counted.
             ("net/minecraft/network/chat/MutableComponent", "append", descriptor)
             | ("net/minecraft/network/chat/Component", "append", descriptor)
                 if descriptor.ends_with(")Lnet/minecraft/network/chat/MutableComponent;") =>
             {
-                let current = component_text(receiver);
-                let suffix = Self::argument(r, args, 0)?;
-                let suffix = if descriptor.contains("Ljava/lang/String;") {
-                    expect_string(suffix).to_owned()
+                let sibling = Self::argument(r, args, 0)?;
+                let sibling = if descriptor.contains("Ljava/lang/String;") {
+                    host_component::literal(expect_string(sibling))
                 } else {
-                    component_text(suffix)
+                    sibling.clone()
                 };
-                Ok(component_value("literal", &format!("{current}{suffix}")))
+                if !host_component::is_component(receiver)
+                    || !host_component::is_component(&sibling)
+                {
+                    return self.unknown_host_call(r);
+                }
+                host_component::change(
+                    &mut self.component_states,
+                    receiver,
+                    &facade_text::argument,
+                    |state| state.siblings.push(sibling),
+                )?;
+                Ok(receiver.clone())
             }
             ("net/minecraft/network/chat/MutableComponent", "copy", descriptor)
             | ("net/minecraft/network/chat/Component", "copy", descriptor)
                 if descriptor == "()Lnet/minecraft/network/chat/MutableComponent;" =>
             {
-                Ok(component_value("literal", &component_text(receiver)))
+                match host_component::copy(Some(&mut self.component_states), receiver, false) {
+                    Some(copy) => Ok(copy),
+                    None => self.unknown_host_call(r),
+                }
             }
             ("java/util/UUID", "toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
                 uuid_text(receiver)
@@ -9885,21 +9966,12 @@ fn identifier_value(namespace: &str, path: &str) -> Value {
     host_ids::identifier(namespace, path)
 }
 
+/// A new `literal` or `translatable` component (`host_component.rs`).
 fn component_value(kind: &str, text: &str) -> Value {
-    Value::Ref(Some(format!("component/{kind}/{text}")))
-}
-
-fn component_text(value: &Value) -> String {
-    let raw = expect_ref(value).map_or("", |value| value.as_str());
-    // A styled component or one with arguments (`facade_text.rs`).
-    if raw.starts_with(facade_text::JSON_PREFIX) {
-        return facade_text::to_json(value)
-            .map_or_else(String::new, |json| facade_text::plain(&json));
+    match kind {
+        "translatable" => host_component::translatable(text),
+        _ => host_component::literal(text),
     }
-    raw.strip_prefix("component/literal/")
-        .or_else(|| raw.strip_prefix("component/translatable/"))
-        .unwrap_or(raw)
-        .to_owned()
 }
 
 fn identifier_parse(value: &str) -> Value {
@@ -10772,6 +10844,10 @@ impl host_ref::Nested for HostNested<'_> {
             (other, _) => Some(value_text(other)),
         })
     }
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let host = self.0.as_deref()?;
+        facade_text::json_now(value, Some(&host.component_states))
+    }
 }
 
 impl StdHost {
@@ -11618,7 +11694,9 @@ fn checked_list_insert(index: i32, length: usize) -> Result<usize, NativeError> 
         })
 }
 
-fn collection_values(value: &Value) -> Result<Vec<String>, NativeError> {
+/// The elements of an inline collection literal (`list/<m1>,<m2>`), parsed
+/// once into `Value`s (#156 P14d makes literals handles).
+fn collection_values(value: &Value) -> Result<Vec<Value>, NativeError> {
     let marker = expect_string(value);
     let (kind, values) = marker.split_once('/').unwrap_or((marker, ""));
     // A neutral collection carries a `#<n>` generation suffix so each
@@ -11633,7 +11711,10 @@ fn collection_values(value: &Value) -> Result<Vec<String>, NativeError> {
     if values.is_empty() {
         return Ok(Vec::new());
     }
-    split_capture_markers(values)
+    split_capture_markers(values)?
+        .iter()
+        .map(|marker| parse_collection_value(marker))
+        .collect()
 }
 
 /// The class a host collection marker was constructed as
@@ -11649,7 +11730,7 @@ fn iterated_kind(marker: &str) -> Option<String> {
     matches!(kind, "list" | "set").then(|| kind.to_owned())
 }
 
-fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<String>, NativeError> {
+fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<Value>, NativeError> {
     host.mutable_values(value).map_or_else(
         || collection_values(value).map_err(|error| host_call_context(host, error)),
         Ok,
@@ -11658,7 +11739,7 @@ fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<String>, 
 
 /// The same read through the generic `Host` boundary, for interpreter helpers
 /// (`Stream`, Gson) that do not know the concrete host type.
-fn runtime_collection_values<H: Host>(host: &H, value: &Value) -> Result<Vec<String>, NativeError> {
+fn runtime_collection_values<H: Host>(host: &H, value: &Value) -> Result<Vec<Value>, NativeError> {
     host.mutable_collection_values(value)
         .map_or_else(|| collection_values(value), Ok)
 }
@@ -11678,6 +11759,16 @@ fn host_call_context(host: &StdHost, error: NativeError) -> NativeError {
         "{message} (call {}#{}{})",
         call.owner, call.name, call.descriptor
     ))
+}
+
+/// Whether two element snapshots hold the same items, compared as their
+/// encoded items (the comparison the host made when it read collections as
+/// text: a `NaN` matches itself, a box its unboxed twin's encoding).
+pub(crate) fn same_items(a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(a, b)| collection_item_marker(a) == collection_item_marker(b))
 }
 
 fn parse_collection_value(value: &str) -> Result<Value, NativeError> {
@@ -11704,15 +11795,14 @@ fn collection_text(
     // `(this Collection)`/`(this Map)`.
     let mut texts = Vec::with_capacity(values.len());
     for element in &values {
-        texts.push(match parse_collection_value(element) {
-            Ok(Value::Ref(Some(inner))) if inner == marker => if is_map {
+        texts.push(match element {
+            Value::Ref(Some(inner)) if *inner == marker => if is_map {
                 "(this Map)"
             } else {
                 "(this Collection)"
             }
             .to_owned(),
-            Ok(element) => object_text(host, &element),
-            Err(_) => element.clone(),
+            element => object_text(host, element),
         });
     }
     Ok(if is_map {
@@ -11784,19 +11874,15 @@ const MAX_GENERIC_TYPE_DEPTH: usize = 32;
 const MAX_GENERIC_TYPE_ARGUMENTS: usize = 64;
 /// A field signature larger than this is not one javac writes.
 const MAX_GENERIC_SIGNATURE_BYTES: usize = 64 * 1024;
-/// Marker namespace of a `java.lang.reflect.Type` node the interpreter built.
-const GENERIC_TYPE_PREFIX: &str = "type/";
-
 /// One node of a field's generic type, as the class file's `Signature`
 /// attribute declares it.
 ///
 /// `java.lang.reflect.Type` is an interface with four concrete shapes in the
-/// JDK. The interpreter keeps them as data and hands out markers: a plain
-/// class is the class marker `Field.getType` already uses, so identity with
-/// `SomeClass.class` holds, while the parameterized/variable/wildcard shapes
-/// carry a self-describing [`GENERIC_TYPE_PREFIX`] marker. Encoding every node
-/// means `getRawType`, `getActualTypeArguments` and structural `equals` need no
-/// side table, and a marker stays meaningful across host hand-offs.
+/// JDK besides `Class`. The interpreter keeps them as data and hands out
+/// values: a plain class is the class marker `Field.getType` already uses, so
+/// identity with `SomeClass.class` holds, while the parameterized, variable,
+/// wildcard and generic-array shapes are `java.lang.reflect.Type` handles
+/// (`host_reflect_type.rs`) whose key is the node itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GenericType {
     /// A class or array type: the internal name (`java/util/List`) or the
@@ -11808,19 +11894,70 @@ enum GenericType {
         owner: Option<Box<GenericType>>,
         args: Vec<GenericType>,
     },
+    /// A type variable: its name and the class or method declaring it
+    /// (`None` when it is an enclosing class's or method's, which the
+    /// signature alone does not name). Its bounds are the declaration's.
     Variable {
         name: String,
-        bounds: Vec<GenericType>,
+        declaration: Option<TypeDeclaration>,
     },
     Wildcard {
         upper: Vec<GenericType>,
         lower: Vec<GenericType>,
     },
+    /// `T[]` or `List<String>[]`: an array whose component is no class (an
+    /// array of a class is that array class).
+    Array(Box<GenericType>),
+}
+
+/// What declares a type variable (`TypeVariable.getGenericDeclaration`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeDeclaration {
+    /// A class: its internal name.
+    Class(String),
+    /// A method or constructor: its class, name and descriptor.
+    Method {
+        class: String,
+        name: String,
+        descriptor: String,
+    },
+}
+
+/// The type variables in scope where a signature is read: the method's own
+/// (innermost) and its class's.
+#[derive(Debug, Clone, Default)]
+struct TypeScope {
+    class: String,
+    class_variables: Vec<String>,
+    method: Option<(String, String)>,
+    method_variables: Vec<String>,
+}
+
+impl TypeScope {
+    /// The declaration of the variable `name` used here.
+    fn resolve(&self, name: &str) -> Option<TypeDeclaration> {
+        if let Some((method, descriptor)) = &self.method
+            && self
+                .method_variables
+                .iter()
+                .any(|variable| variable == name)
+        {
+            return Some(TypeDeclaration::Method {
+                class: self.class.clone(),
+                name: method.clone(),
+                descriptor: descriptor.clone(),
+            });
+        }
+        self.class_variables
+            .iter()
+            .any(|variable| variable == name)
+            .then(|| TypeDeclaration::Class(self.class.clone()))
+    }
 }
 
 /// Parse a field `Signature` attribute, refusing anything that is not exactly
-/// one complete type signature.
-fn parse_generic_signature(text: &str) -> Option<GenericType> {
+/// one complete type signature. `scope` names the variables in scope.
+fn parse_generic_signature(text: &str, scope: TypeScope) -> Option<GenericType> {
     if text.is_empty() || text.len() > MAX_GENERIC_SIGNATURE_BYTES {
         return None;
     }
@@ -11828,6 +11965,7 @@ fn parse_generic_signature(text: &str) -> Option<GenericType> {
         bytes: text.as_bytes(),
         pos: 0,
         depth: 0,
+        scope,
     };
     let value = parser.parse_reference()?;
     (parser.pos == parser.bytes.len()).then_some(value)
@@ -11837,6 +11975,7 @@ struct GenericSignatureParser<'a> {
     bytes: &'a [u8],
     pos: usize,
     depth: usize,
+    scope: TypeScope,
 }
 
 impl GenericSignatureParser<'_> {
@@ -11879,14 +12018,16 @@ impl GenericSignatureParser<'_> {
     }
 
     fn parse_array(&mut self) -> Option<GenericType> {
-        // At '['. Only an element with a descriptor (class, primitive or a
-        // nested array) can be written as an array descriptor; an array of a
-        // type variable has no class marker, so it is refused rather than
-        // guessed.
+        // At '['. An element with a descriptor (class, primitive or a nested
+        // array class) makes an array class; any other element (a variable,
+        // a parameterized type) a `GenericArrayType`, as `Class` arrays and
+        // `GenericArrayTypeImpl.make` do.
         self.pos += 1;
         let element = self.parse_java_type()?;
-        let descriptor = type_descriptor(&element)?;
-        Some(GenericType::Class(format!("[{descriptor}")))
+        Some(match type_descriptor(&element) {
+            Some(descriptor) => GenericType::Class(format!("[{descriptor}")),
+            None => GenericType::Array(Box::new(element)),
+        })
     }
 
     fn parse_class(&mut self) -> Option<GenericType> {
@@ -11939,6 +12080,18 @@ impl GenericSignatureParser<'_> {
                 }
                 b'.' => {
                     self.pos += 1;
+                    // After a parameterized segment, every segment is a
+                    // `ParameterizedType` of its own, with no arguments and
+                    // the segment before as its owner, as Java 25's `Reifier`
+                    // builds it: `Outer<String>.Mid.Deep<Long>`'s owner is
+                    // `Outer<String>.Mid`, whose owner is `Outer<String>`.
+                    if owner.is_some() {
+                        owner = Some(Box::new(GenericType::Parameterized {
+                            raw: name.clone(),
+                            owner: owner.take(),
+                            args: Vec::new(),
+                        }));
+                    }
                     name.push('$');
                 }
                 b';' => {
@@ -12019,25 +12172,67 @@ impl GenericSignatureParser<'_> {
         let name = std::str::from_utf8(&self.bytes[start..self.pos])
             .ok()?
             .to_owned();
-        let mut bounds = Vec::new();
-        // A field signature is just `TName;`; class and method declarations
-        // add `:LBound;` interface bounds, which the same parser accepts.
-        if self.peek() == Some(b':') {
-            self.pos += 1;
-            if !matches!(self.peek(), Some(b':' | b';') | None) {
-                bounds.push(self.parse_reference()?);
-            }
-            while self.peek() == Some(b':') {
-                self.pos += 1;
-                bounds.push(self.parse_reference()?);
-            }
-        }
+        // A use of a variable is just `TName;`; its bounds are its
+        // declaration's (`TypeVariable.getBounds`).
         if self.peek() != Some(b';') {
             return None;
         }
         self.pos += 1;
-        Some(GenericType::Variable { name, bounds })
+        let declaration = self.scope.resolve(&name);
+        Some(GenericType::Variable { name, declaration })
     }
+
+    /// A formal type parameter list (`<T:Ljava/lang/Object;U::Ljava/lang/Comparable<TU;>;>`)
+    /// if one starts here: each variable's name and bounds (its class bound,
+    /// when present, then its interface bounds).
+    fn parse_type_parameters(&mut self) -> Option<Vec<(String, Vec<GenericType>)>> {
+        let mut parameters = Vec::new();
+        if self.peek() != Some(b'<') {
+            return Some(parameters);
+        }
+        self.pos += 1;
+        while self.peek()? != b'>' {
+            if parameters.len() >= MAX_GENERIC_TYPE_ARGUMENTS {
+                return None;
+            }
+            let start = self.pos;
+            while self.peek()? != b':' {
+                self.pos += 1;
+            }
+            let name = std::str::from_utf8(&self.bytes[start..self.pos])
+                .ok()?
+                .to_owned();
+            self.pos += 1;
+            let mut bounds = Vec::new();
+            // An empty class bound (`T::Ljava/lang/Comparable;`) goes straight
+            // to the interface bounds.
+            if self.peek()? != b':' {
+                bounds.push(self.parse_reference()?);
+            }
+            while self.peek()? == b':' {
+                self.pos += 1;
+                bounds.push(self.parse_reference()?);
+            }
+            parameters.push((name, bounds));
+        }
+        self.pos += 1;
+        Some(parameters)
+    }
+}
+
+/// The names a formal type parameter list declares, read without resolving
+/// any bound (a bound may name the list's own variables).
+fn type_parameter_names(text: &str) -> Vec<String> {
+    let mut parser = GenericSignatureParser {
+        bytes: text.as_bytes(),
+        pos: 0,
+        depth: 0,
+        scope: TypeScope::default(),
+    };
+    parser
+        .parse_type_parameters()
+        .map(|parameters| parameters.into_iter().map(|(name, _)| name).collect())
+        .unwrap_or_default()
 }
 
 /// The class-file descriptor of a node that can appear inside an array
@@ -12066,217 +12261,17 @@ fn type_descriptor(value: &GenericType) -> Option<String> {
     })
 }
 
-fn write_generic_node(tag: char, body: &str, out: &mut String) {
-    out.push(tag);
-    out.push_str(&body.len().to_string());
-    out.push(':');
-    out.push_str(body);
-}
-
-fn push_length_field(out: &mut String, value: &str) {
-    out.push_str(&value.len().to_string());
-    out.push(':');
-    out.push_str(value);
-}
-
-fn encode_generic_type(value: &GenericType) -> String {
-    let mut out = String::from(GENERIC_TYPE_PREFIX);
-    encode_generic_node(value, &mut out);
-    out
-}
-
-fn encode_generic_node(value: &GenericType, out: &mut String) {
-    match value {
-        GenericType::Class(name) => {
-            let mut body = String::new();
-            push_length_field(&mut body, name);
-            write_generic_node('C', &body, out);
-        }
-        GenericType::Variable { name, bounds } => {
-            let mut body = String::new();
-            push_length_field(&mut body, name);
-            body.push_str(&bounds.len().to_string());
-            body.push(':');
-            for bound in bounds {
-                encode_generic_node(bound, &mut body);
-            }
-            write_generic_node('V', &body, out);
-        }
-        GenericType::Parameterized { raw, owner, args } => {
-            let mut body = String::new();
-            push_length_field(&mut body, raw);
-            body.push_str(&args.len().to_string());
-            body.push(':');
-            for arg in args {
-                encode_generic_node(arg, &mut body);
-            }
-            match owner {
-                Some(owner) => encode_generic_node(owner, &mut body),
-                None => body.push('-'),
-            }
-            write_generic_node('P', &body, out);
-        }
-        GenericType::Wildcard { upper, lower } => {
-            let mut body = String::new();
-            body.push_str(&upper.len().to_string());
-            body.push(':');
-            for bound in upper {
-                encode_generic_node(bound, &mut body);
-            }
-            body.push_str(&lower.len().to_string());
-            body.push(':');
-            for bound in lower {
-                encode_generic_node(bound, &mut body);
-            }
-            write_generic_node('W', &body, out);
-        }
-    }
-}
-
-fn decode_generic_type(marker: &str) -> Option<GenericType> {
-    let rest = marker.strip_prefix(GENERIC_TYPE_PREFIX)?;
-    let mut cursor = 0;
-    let value = decode_generic_node(rest, &mut cursor, 0)?;
-    (cursor == rest.len()).then_some(value)
-}
-
-fn decode_generic_node(bytes: &str, cursor: &mut usize, depth: usize) -> Option<GenericType> {
-    if depth >= MAX_GENERIC_TYPE_DEPTH {
-        return None;
-    }
-    let tag = *bytes.as_bytes().get(*cursor)? as char;
-    *cursor += 1;
-    let length = decode_length(bytes, cursor)?;
-    let end = cursor.checked_add(length)?;
-    if end > bytes.len() {
-        return None;
-    }
-    let body = &bytes[*cursor..end];
-    *cursor = end;
-    match tag {
-        'C' => {
-            let mut at = 0;
-            let name = decode_length_field(body, &mut at)?;
-            (at == body.len()).then_some(GenericType::Class(name))
-        }
-        'V' => {
-            let mut at = 0;
-            let name = decode_length_field(body, &mut at)?;
-            let count = decode_length(body, &mut at)?;
-            if count > MAX_GENERIC_TYPE_ARGUMENTS {
-                return None;
-            }
-            let mut bounds = Vec::with_capacity(count);
-            for _ in 0..count {
-                bounds.push(decode_generic_node(body, &mut at, depth + 1)?);
-            }
-            (at == body.len()).then_some(GenericType::Variable { name, bounds })
-        }
-        'P' => {
-            let mut at = 0;
-            let raw = decode_length_field(body, &mut at)?;
-            let count = decode_length(body, &mut at)?;
-            if count > MAX_GENERIC_TYPE_ARGUMENTS {
-                return None;
-            }
-            let mut args = Vec::with_capacity(count);
-            for _ in 0..count {
-                args.push(decode_generic_node(body, &mut at, depth + 1)?);
-            }
-            let owner = if body.as_bytes().get(at) == Some(&b'-') {
-                at += 1;
-                None
-            } else {
-                Some(Box::new(decode_generic_node(body, &mut at, depth + 1)?))
-            };
-            (at == body.len()).then_some(GenericType::Parameterized { raw, owner, args })
-        }
-        'W' => {
-            let mut at = 0;
-            let upper_count = decode_length(body, &mut at)?;
-            if upper_count > MAX_GENERIC_TYPE_ARGUMENTS {
-                return None;
-            }
-            let mut upper = Vec::with_capacity(upper_count);
-            for _ in 0..upper_count {
-                upper.push(decode_generic_node(body, &mut at, depth + 1)?);
-            }
-            let lower_count = decode_length(body, &mut at)?;
-            if lower_count > MAX_GENERIC_TYPE_ARGUMENTS {
-                return None;
-            }
-            let mut lower = Vec::with_capacity(lower_count);
-            for _ in 0..lower_count {
-                lower.push(decode_generic_node(body, &mut at, depth + 1)?);
-            }
-            (at == body.len()).then_some(GenericType::Wildcard { upper, lower })
-        }
-        _ => None,
-    }
-}
-
-fn decode_length(bytes: &str, cursor: &mut usize) -> Option<usize> {
-    let start = *cursor;
-    while bytes
-        .as_bytes()
-        .get(*cursor)
-        .is_some_and(u8::is_ascii_digit)
-    {
-        *cursor += 1;
-    }
-    if *cursor == start || bytes.as_bytes().get(*cursor) != Some(&b':') {
-        return None;
-    }
-    let length = bytes[start..*cursor].parse().ok()?;
-    *cursor += 1;
-    Some(length)
-}
-
-fn decode_length_field(bytes: &str, cursor: &mut usize) -> Option<String> {
-    let length = decode_length(bytes, cursor)?;
-    let start = *cursor;
-    let end = start.checked_add(length)?;
-    let text = bytes.get(start..end)?.to_owned();
-    *cursor = end;
-    Some(text)
-}
-
 /// Materialize one type node as the value `Field.getGenericType` and friends
 /// hand back. A plain class is the class marker itself, so
-/// `getGenericType() == String.class` and `getRawType() == List.class` hold.
+/// `getGenericType() == String.class` and `getRawType() == List.class` hold;
+/// every other shape is a `java.lang.reflect.Type` handle.
 fn generic_type_value(value: &GenericType) -> Value {
-    match value {
-        GenericType::Class(name) => Value::Ref(Some(name.clone())),
-        other => Value::Ref(Some(encode_generic_type(other))),
-    }
+    host_reflect_type::type_value(value)
 }
 
+/// The node a `Type` value (a type handle or a class marker) names.
 fn generic_type_marker(value: &Value) -> Option<GenericType> {
-    decode_generic_type(expect_string(value))
-}
-
-/// Whether a marker is a `java.lang.reflect` type node of the named runtime
-/// type. Only markers this runtime built are claimed; every other `instanceof`
-/// keeps the interpreter's previous neutral answer.
-fn generic_type_instance_of(marker: &str, class: &str) -> bool {
-    let Some(rest) = marker.strip_prefix(GENERIC_TYPE_PREFIX) else {
-        return false;
-    };
-    match rest.as_bytes().first() {
-        Some(b'P') => matches!(
-            class,
-            "java/lang/reflect/ParameterizedType" | "java/lang/reflect/Type" | "java/lang/Object"
-        ),
-        Some(b'V') => matches!(
-            class,
-            "java/lang/reflect/TypeVariable" | "java/lang/reflect/Type" | "java/lang/Object"
-        ),
-        Some(b'W') => matches!(
-            class,
-            "java/lang/reflect/WildcardType" | "java/lang/reflect/Type" | "java/lang/Object"
-        ),
-        _ => false,
-    }
+    host_reflect_type::type_node(value)
 }
 
 /// Whether a marker is one of the class markers the interpreter hands out.
@@ -12329,8 +12324,17 @@ fn class_marker_like(
 fn generic_type_display(value: &GenericType) -> String {
     match value {
         GenericType::Class(name) => class_type_display(name),
-        GenericType::Parameterized { raw, args, .. } => {
-            let mut text = class_type_display(raw);
+        // `ParameterizedTypeImpl.toString`: a parameterized owner's text, `$`
+        // and the raw name past the owner's, else the raw class's name.
+        GenericType::Parameterized { raw, owner, args } => {
+            let mut text = match owner.as_deref() {
+                Some(owner @ GenericType::Parameterized { raw: outer, .. }) => format!(
+                    "{}${}",
+                    generic_type_display(owner),
+                    class_type_display(raw).replace(&format!("{}$", class_type_display(outer)), "")
+                ),
+                _ => class_type_display(raw),
+            };
             if !args.is_empty() {
                 text.push('<');
                 for (index, arg) in args.iter().enumerate() {
@@ -12344,6 +12348,7 @@ fn generic_type_display(value: &GenericType) -> String {
             text
         }
         GenericType::Variable { name, .. } => name.clone(),
+        GenericType::Array(component) => format!("{}[]", generic_type_display(component)),
         GenericType::Wildcard { upper, lower } => {
             if let Some(lower) = lower.first() {
                 format!("? super {}", generic_type_display(lower))
@@ -16718,6 +16723,12 @@ impl NativeJar {
         modify_hooks: Option<&mut ModifyHooks>,
     ) -> Result<Value, NativeError> {
         let class_name = class.replace('.', "/");
+        // A JVM's statics are per class for the whole run (#184): a call, a
+        // Mixin target or one of its callbacks runs against the host's
+        // persistent class state and resident heap, as an entrypoint and a
+        // listener do (`invoke_persistent`), so what one callback writes the
+        // next sees, and `<clinit>` runs once.
+        let (static_fields, initialized_classes) = host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
@@ -16725,8 +16736,8 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields,
+            initialized_classes,
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -16753,7 +16764,15 @@ impl NativeJar {
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
-        runtime.invoke(&class_name, method, descriptor, receiver, args)
+        let resident = runtime.adopt_resident_heap();
+        let result = runtime.invoke(&class_name, method, descriptor, receiver, args);
+        // A failed run keeps what it wrote before failing, as a JVM would.
+        let persistence = runtime.persist_class_state();
+        if resident {
+            runtime.persist_resident_heap()?;
+        }
+        persistence?;
+        result
     }
 
     fn execute_target_without_mixin<H: Host>(
@@ -19354,11 +19373,26 @@ impl<H: Host> Runtime<'_, H> {
     /// Commit jar-owned class state to the resident host after an invocation.
     /// The host applies its own bounded retention policy; a failed commit is
     /// surfaced instead of silently dropping static fields or initialization.
+    ///
+    /// A store the host refuses (over its bound) leaves this run's statics
+    /// unkept: that is counted, and never turns a call that succeeded into an
+    /// error.
     fn persist_class_state(&mut self) -> Result<(), NativeError> {
-        self.host.store_persistent_class_state(
-            self.static_fields.clone(),
-            self.initialized_classes.clone(),
-        )
+        if self
+            .host
+            .store_persistent_class_state(
+                self.static_fields.clone(),
+                self.initialized_classes.clone(),
+            )
+            .is_err()
+        {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/lang/Class".into(),
+                name: "<persistent-statics>".into(),
+                descriptor: "()V".into(),
+            })?;
+        }
+        Ok(())
     }
 
     /// Open one `CallbackInfo` object for a host hook callback.
@@ -20063,9 +20097,7 @@ impl<H: Host> Runtime<'_, H> {
         match plan.kind {
             MixinAccessorKind::Getter => {
                 let value = if plan.static_target {
-                    self.static_fields
-                        .get(&Self::static_field_key(&target))
-                        .cloned()
+                    self.stored_static(&target)?
                 } else {
                     receiver
                         .and_then(|receiver| instance_field_key(receiver, &target))
@@ -20352,10 +20384,7 @@ impl<H: Host> Runtime<'_, H> {
                 && callback.target.descriptor == "()Ljava/util/stream/Stream;"
                 && is_collection_owner(&callback.target.owner)
             {
-                let values = runtime_collection_values(self.host, &receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = runtime_collection_values(self.host, &receiver)?;
                 let stream = self.new_stream("callback", "stream", values);
                 self.mark_stream_origin(&stream, &receiver);
                 if self.collection_stream_sized(&receiver) {
@@ -20680,9 +20709,6 @@ impl<H: Host> Runtime<'_, H> {
         if wanted.starts_with('[') {
             return false;
         }
-        if generic_type_instance_of(marker, wanted) {
-            return true;
-        }
         // Collections and optionals keep their kind in the marker prefix.
         let kind = marker.split_once('/').map_or(marker, |(kind, _)| kind);
         let kind = kind.split_once('#').map_or(kind, |(kind, _)| kind);
@@ -20711,6 +20737,13 @@ impl<H: Host> Runtime<'_, H> {
             && let Some((class, _)) = rest.rsplit_once('/')
         {
             return self.class_is_instance(class, wanted);
+        }
+        // A host kind's objects are handles, never text: a String spelled
+        // like one (`"…/MutableComponent#0"`) is no instance of its class, and
+        // the class's row is not asked (`instance_of_is_guess` counts it).
+        let class = jar_object::marker_class_or_text(marker);
+        if self.class(class).is_none() && HostKind::owning_class(class).is_some() {
+            return false;
         }
         self.class_is_instance(marker, wanted)
     }
@@ -21065,9 +21098,15 @@ impl<H: Host> Runtime<'_, H> {
         }
         // `Field.getGenericType` reads the field's `Signature` attribute; a
         // field without one answers the erased class, exactly as the JVM does.
+        // `getAnnotatedType` is that type's `AnnotatedType`. Type-use
+        // annotations are not read: a field with none answers none exactly,
+        // one with `RuntimeVisibleTypeAnnotations` has its annotation reads
+        // and text counted (`host_reflect_type.rs`).
+        let annotated =
+            r.name == "getAnnotatedType" && r.descriptor == "()Ljava/lang/reflect/AnnotatedType;";
         if r.owner == "java/lang/reflect/Field"
-            && r.name == "getGenericType"
-            && r.descriptor == "()Ljava/lang/reflect/Type;"
+            && (annotated
+                || r.name == "getGenericType" && r.descriptor == "()Ljava/lang/reflect/Type;")
         {
             let field = receiver.and_then(host_reflect::field_of).ok_or_else(|| {
                 NativeError::Metadata("malformed java/lang/reflect/Field handle".into())
@@ -21083,9 +21122,10 @@ impl<H: Host> Runtime<'_, H> {
                 self.class(class)
                     .and_then(|file| file.field_signature(name, descriptor))
             });
+            let scope = reflect_generic::class_scope(class, self.class(class));
             let value = signature
                 .as_deref()
-                .and_then(parse_generic_signature)
+                .and_then(|signature| parse_generic_signature(signature, scope))
                 .map_or_else(
                     || {
                         Value::Ref(Some(
@@ -21097,94 +21137,135 @@ impl<H: Host> Runtime<'_, H> {
                     },
                     |value| generic_type_value(&value),
                 );
-            return Ok(Some(value));
+            return Ok(Some(if annotated {
+                // A field's `RuntimeVisibleTypeAnnotations` all target its
+                // type: Java 25 reports them, so the annotations are counted.
+                let unread = reflect_generic::type_annotations_unread(
+                    self.class(class),
+                    true,
+                    (name, descriptor.as_deref().unwrap_or_default()),
+                );
+                host_reflect_type::annotated(value, unread)
+            } else {
+                value
+            }));
         }
         if matches!(
             r.owner.as_str(),
             "java/lang/reflect/ParameterizedType"
                 | "java/lang/reflect/TypeVariable"
                 | "java/lang/reflect/WildcardType"
+                | "java/lang/reflect/GenericArrayType"
                 | "java/lang/reflect/Type"
         ) {
-            let marker = receiver.and_then(expect_ref);
-            let decoded = marker.and_then(|marker| decode_generic_type(marker));
-            let Some(decoded) = decoded else {
-                // A raw type handed out by `getRawType` is an ordinary class
-                // marker; only its name is a `Type` question this surface owns.
+            let Some(node) = receiver.and_then(host_reflect_type::handle_node) else {
+                // A type that is a class is an ordinary class marker; only its
+                // name is a `Type` question this surface owns.
+                let marker = receiver.and_then(expect_ref);
                 if r.name == "getTypeName" && r.descriptor == "()Ljava/lang/String;" {
                     return Ok(marker
                         .filter(|marker| !marker.is_empty())
                         .map(|marker| Value::Ref(Some(class_type_display(marker)))));
                 }
+                // `Class.equals` is identity, and one class has one marker
+                // (#156 P13 makes it a handle): another class's marker, a type
+                // handle (no `Class`) or `null` is another object. The same
+                // spelling may be that `Class` or a `String` spelled like it
+                // (text until P13): counted, never `true` from the text.
+                if r.name == "equals"
+                    && r.descriptor == "(Ljava/lang/Object;)Z"
+                    && let Some(marker) = marker
+                        .filter(|marker| class_marker_like(marker, self.classes, &self.linked))
+                {
+                    let other = args.first().unwrap_or(&Value::Ref(None));
+                    return Ok(match other {
+                        Value::Ref(Some(other))
+                            if class_marker_like(other, self.classes, &self.linked) =>
+                        {
+                            (other != marker).then_some(Value::Int(0))
+                        }
+                        Value::Ref(None) | Value::Host(_) => Some(Value::Int(0)),
+                        // A string or a jar object: no class marker.
+                        _ => None,
+                    });
+                }
                 return Ok(None);
             };
-            return match (r.name.as_str(), r.descriptor.as_str()) {
-                ("getRawType", "()Ljava/lang/reflect/Type;") => match decoded {
-                    GenericType::Parameterized { raw, .. } => Ok(Some(Value::Ref(Some(raw)))),
-                    other => Err(NativeError::Metadata(format!(
-                        "getRawType needs a parameterized type, got {}",
-                        generic_type_display(&other)
-                    ))),
+            // Each answer is the receiver's own shape's; a call its shape does
+            // not declare is left to the host (counted).
+            return Ok(match (r.name.as_str(), r.descriptor.as_str(), node) {
+                (
+                    "getRawType",
+                    "()Ljava/lang/reflect/Type;",
+                    GenericType::Parameterized { raw, .. },
+                ) => Some(Value::Ref(Some(raw))),
+                (
+                    "getActualTypeArguments",
+                    "()[Ljava/lang/reflect/Type;",
+                    GenericType::Parameterized { args, .. },
+                ) => Some(self.generic_type_array(TYPE_ARRAY, &args)),
+                // `ParameterizedTypeImpl`: a written owner, else the raw
+                // class's declaring class, which a top-level name has none of
+                // (a nested one's is counted: `$` alone does not prove it).
+                (
+                    "getOwnerType",
+                    "()Ljava/lang/reflect/Type;",
+                    GenericType::Parameterized { owner, raw, .. },
+                ) => match owner {
+                    Some(owner) => Some(generic_type_value(&owner)),
+                    None if !raw.contains('$') => Some(Value::Ref(None)),
+                    None => None,
                 },
-                ("getActualTypeArguments", "()[Ljava/lang/reflect/Type;") => match decoded {
-                    GenericType::Parameterized { args, .. } => {
-                        Ok(Some(self.generic_type_array(TYPE_ARRAY, &args)))
-                    }
-                    other => Err(NativeError::Metadata(format!(
-                        "getActualTypeArguments needs a parameterized type, got {}",
-                        generic_type_display(&other)
-                    ))),
-                },
-                ("getOwnerType", "()Ljava/lang/reflect/Type;") => match decoded {
-                    GenericType::Parameterized { owner, .. } => Ok(Some(
-                        owner
-                            .as_deref()
-                            .map_or(Value::Ref(None), generic_type_value),
-                    )),
-                    other => Err(NativeError::Metadata(format!(
-                        "getOwnerType needs a parameterized type, got {}",
-                        generic_type_display(&other)
-                    ))),
-                },
-                ("getName", "()Ljava/lang/String;") => match decoded {
-                    GenericType::Variable { name, .. } => Ok(Some(Value::Ref(Some(name)))),
-                    other => Err(NativeError::Metadata(format!(
-                        "getName needs a type variable, got {}",
-                        generic_type_display(&other)
-                    ))),
-                },
-                ("getBounds", "()[Ljava/lang/reflect/Type;") => match decoded {
-                    GenericType::Variable { bounds, .. } => Ok(Some(
-                        self.generic_type_array(TYPE_ARRAY, &generic_type_bounds(&bounds)),
-                    )),
-                    other => Err(NativeError::Metadata(format!(
-                        "getBounds needs a type variable, got {}",
-                        generic_type_display(&other)
-                    ))),
-                },
-                ("getUpperBounds", "()[Ljava/lang/reflect/Type;") => match decoded {
-                    GenericType::Wildcard { upper, .. } => Ok(Some(
-                        self.generic_type_array(TYPE_ARRAY, &generic_type_bounds(&upper)),
-                    )),
-                    other => Err(NativeError::Metadata(format!(
-                        "getUpperBounds needs a wildcard type, got {}",
-                        generic_type_display(&other)
-                    ))),
-                },
-                ("getLowerBounds", "()[Ljava/lang/reflect/Type;") => match decoded {
-                    GenericType::Wildcard { lower, .. } => {
-                        Ok(Some(self.generic_type_array(TYPE_ARRAY, &lower)))
-                    }
-                    other => Err(NativeError::Metadata(format!(
-                        "getLowerBounds needs a wildcard type, got {}",
-                        generic_type_display(&other)
-                    ))),
-                },
-                ("getTypeName" | "toString", "()Ljava/lang/String;") => {
-                    Ok(Some(Value::Ref(Some(generic_type_display(&decoded)))))
+                ("getName", "()Ljava/lang/String;", GenericType::Variable { name, .. }) => {
+                    Some(Value::Ref(Some(name)))
                 }
-                _ => Ok(None),
-            };
+                // The declaration's own bounds; a variable whose declaration
+                // the signature does not name is counted.
+                (
+                    "getBounds",
+                    "()[Ljava/lang/reflect/Type;",
+                    GenericType::Variable {
+                        name,
+                        declaration: Some(declaration),
+                    },
+                ) => {
+                    let (TypeDeclaration::Class(class) | TypeDeclaration::Method { class, .. }) =
+                        &declaration;
+                    let class = class.clone();
+                    reflect_generic::variable_bounds(&declaration, &name, self.class(&class)).map(
+                        |bounds| self.generic_type_array(TYPE_ARRAY, &generic_type_bounds(&bounds)),
+                    )
+                }
+                // A class declaration is that class; a method's is a `Method`
+                // object (counted).
+                (
+                    "getGenericDeclaration",
+                    "()Ljava/lang/reflect/GenericDeclaration;",
+                    GenericType::Variable {
+                        declaration: Some(TypeDeclaration::Class(class)),
+                        ..
+                    },
+                ) => Some(Value::Ref(Some(class))),
+                (
+                    "getUpperBounds",
+                    "()[Ljava/lang/reflect/Type;",
+                    GenericType::Wildcard { upper, .. },
+                ) => Some(self.generic_type_array(TYPE_ARRAY, &generic_type_bounds(&upper))),
+                (
+                    "getLowerBounds",
+                    "()[Ljava/lang/reflect/Type;",
+                    GenericType::Wildcard { lower, .. },
+                ) => Some(self.generic_type_array(TYPE_ARRAY, &lower)),
+                (
+                    "getGenericComponentType",
+                    "()Ljava/lang/reflect/Type;",
+                    GenericType::Array(component),
+                ) => Some(generic_type_value(&component)),
+                ("getTypeName", "()Ljava/lang/String;", node) => {
+                    Some(Value::Ref(Some(generic_type_display(&node))))
+                }
+                _ => None,
+            });
         }
         // `isAssignableFrom` walks the jar's hierarchy, so a predicate such as
         // `Enum.class::isAssignableFrom` accepts a jar enum. Names the runtime
@@ -21596,13 +21677,20 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("get", "(Ljava/lang/Object;)Ljava/lang/Object;") => {
                     // An unset field answers its type's default, exactly as a
-                    // JVM field does before the constructor assigns it.
-                    let value = self
+                    // JVM field does before the constructor assigns it; an
+                    // unset static its `ConstantValue` (never stored).
+                    let stored = self
                         .fields
                         .get(&key)
                         .or_else(|| self.static_fields.get(&key))
-                        .cloned()
-                        .unwrap_or_else(|| Value::default_for(&descriptor));
+                        .cloned();
+                    let value = match stored {
+                        Some(value) => value,
+                        None if access & 8 != 0 => self
+                            .static_constant(class, name, &descriptor)?
+                            .unwrap_or_else(|| Value::default_for(&descriptor)),
+                        None => Value::default_for(&descriptor),
+                    };
                     declared_value(&descriptor, value)
                 }
                 ("set", "(Ljava/lang/Object;Ljava/lang/Object;)V") => {
@@ -23747,10 +23835,7 @@ impl<H: Host> Runtime<'_, H> {
             && !is_map_owner(&r.owner)
             && let Some(receiver) = receiver
         {
-            let values = runtime_collection_values(self.host, receiver)?
-                .into_iter()
-                .map(|value| parse_collection_value(&value))
-                .collect::<Result<Vec<_>, _>>()?;
+            let values = runtime_collection_values(self.host, receiver)?;
             let stream = self.new_stream(class, method, values);
             // A fail-fast collection's stream binds late and checks for
             // modification (`stream_pipeline.rs`).
@@ -24928,7 +25013,6 @@ impl<H: Host> Runtime<'_, H> {
                                     || self.object_is_instance_of(marker, &wanted)
                                     || self.host.host_instance_of(marker, &wanted)
                                     || jdk_model::platform_instance_of(marker, &wanted)
-                                    || generic_type_instance_of(marker, &wanted)
                                     || (wanted == "java/lang/Class"
                                         && class_marker_like(marker, self.classes, &self.linked))
                             });
@@ -24984,6 +25068,8 @@ impl<H: Host> Runtime<'_, H> {
                                 // static of a class the jar does not declare
                                 // is the host's to answer (a strict host would
                                 // refuse the read otherwise).
+                                // A `ConstantValue` static is its constant
+                                // (never stored, `class_init.rs`).
                                 None if self.class(&field.owner).is_some_and(|file| {
                                     file.fields.iter().any(|declared| {
                                         declared.name == field.name
@@ -24991,7 +25077,12 @@ impl<H: Host> Runtime<'_, H> {
                                     })
                                 }) =>
                                 {
-                                    Value::default_for(&field.descriptor)
+                                    self.static_constant(
+                                        &field.owner,
+                                        &field.name,
+                                        &field.descriptor,
+                                    )?
+                                    .unwrap_or_else(|| Value::default_for(&field.descriptor))
                                 }
                                 None => self.host.get_static(&field)?,
                             }
@@ -33674,8 +33765,8 @@ mandatory = true
                 &[Value::Ref(Some("Hello".into()))],
             )
             .unwrap();
-        assert_eq!(
-            host.invoke_instance(
+        let appended = host
+            .invoke_instance(
                 &MethodRef {
                     owner: "net/minecraft/network/chat/MutableComponent".into(),
                     name: "append".into(),
@@ -33685,9 +33776,14 @@ mandatory = true
                 &literal,
                 &[Value::Ref(Some(" world".into()))],
             )
-            .unwrap(),
-            component_value("literal", "Hello world")
+            .unwrap();
+        // `return this`, the receiver changed in place.
+        assert_eq!(appended, literal);
+        assert_eq!(
+            facade_text::json_now(&literal, Some(&host.component_states)),
+            Some(serde_json::json!({"text": "Hello", "extra": [{"text": " world"}]}))
         );
+        assert_eq!(host.unknown_host_call_count(), 0);
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -37614,7 +37710,7 @@ mandatory = true
             .unwrap();
         assert_eq!(
             runtime_collection_values(runtime.host, &listed).unwrap(),
-            ["ralpha", "i2"]
+            [Value::Ref(Some("alpha".into())), Value::Int(2)]
         );
         let collector = Value::Ref(Some("collector/list".into()));
         let distinct = distinct_stream(&mut runtime);
@@ -37636,7 +37732,7 @@ mandatory = true
             .unwrap();
         assert_eq!(
             runtime_collection_values(runtime.host, &listed).unwrap(),
-            ["ralpha", "i2"]
+            [Value::Ref(Some("alpha".into())), Value::Int(2)]
         );
         let distinct = distinct_stream(&mut runtime);
         let array = runtime

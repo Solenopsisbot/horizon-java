@@ -134,7 +134,8 @@ const CASES: &[(&str, &str, Outcome)] = &[
     ("Rv", "b6IdHash", Counted),
     ("Rv", "idDifferentKeys", Exact("falsetruefalsefalse")),
     ("Rv", "idThroughList", Counted),
-    ("Rv", "idOfIntBox", Counted),
+    // #156 P14a: a list hands its stored element back (origin kept).
+    ("Rv", "idOfIntBox", Exact("true0")),
     ("Rv2", "t1", Counted),
     ("Rv2", "t2", Counted),
     ("Rv2", "t3", Counted),

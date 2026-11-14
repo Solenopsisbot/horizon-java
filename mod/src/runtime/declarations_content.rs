@@ -174,13 +174,13 @@ const ATTACHMENT_REGISTRY_CLASS: &str = "net/fabricmc/fabric/api/attachment/v1/A
 const ATTACHMENT_BUILDER: &str = "net/fabricmc/fabric/api/attachment/v1/AttachmentRegistry$Builder";
 const ATTACHMENT_TYPE: &str = "net/fabricmc/fabric/api/attachment/v1/AttachmentType";
 
-/// A codec argument's label: a non-null marker made of printable characters.
-/// An unmodelled codec answers the opaque `<type>#codec` marker, which names
-/// only the declared codec type, so the label is that type
-/// (`com/mojang/serialization/Codec`).
+/// A codec argument's label, printable text naming what the codec is
+/// (`host_codec.rs`): an unmodelled codec's declared type
+/// (`com/mojang/serialization/Codec`), `CompoundTag.CODEC` as
+/// `net/minecraft/nbt/CompoundTag#CODEC`, a modelled node's declared type, a
+/// jar's own codec object its `class#n` key. A String is no codec: no label.
 fn codec_label(value: Option<&Value>) -> Option<String> {
-    let label = value.and_then(expect_ref)?;
-    let label = label.strip_suffix("#codec").unwrap_or(label);
+    let label = crate::runtime::host_codec::codec_label(value?)?;
     (!label.is_empty()
         && label.len() <= MAX_CODEC_LABEL
         && label.bytes().all(|b| b.is_ascii_graphic()))
