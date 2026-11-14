@@ -7694,7 +7694,7 @@ impl Host for StdHost {
             };
             return match (r.name.as_str(), r.descriptor.as_str()) {
                 ("get", "()Ljava/lang/Object;") => Ok(Value::Ref(Some(provider.to_owned()))),
-                ("type", "()Ljava/lang/Class;") => Ok(host_class::class_value(provider)),
+                ("type", "()Ljava/lang/Class;") => Ok(host_class::class_value(&provider)),
                 _ => Err(NativeError::MissingMethod(format!(
                     "java/util/ServiceLoader$Provider#{}{}",
                     r.name, r.descriptor
