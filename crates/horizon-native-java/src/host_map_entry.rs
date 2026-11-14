@@ -896,7 +896,7 @@ impl StdHost {
         // successor's node instead, so a tree takes every node).
         let one_key = name == "remove"
             && matches!(args.len(), 1 | 2)
-            && self.red_black_trees.get(map).is_none()
+            && !self.red_black_trees.contains_key(map)
             && entry_mode(class_of_marker(map)).is_some_and(|(class, mode)| {
                 class != "java/util/TreeMap$Entry" && matches!(mode, Mode::Node { .. })
             });
