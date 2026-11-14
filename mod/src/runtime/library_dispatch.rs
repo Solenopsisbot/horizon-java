@@ -498,7 +498,8 @@ impl<H: Host> Runtime<'_, H> {
     pub(super) fn value_instance_of(&self, value: &Value, wanted: &str) -> bool {
         self.library_instance_of(value, wanted)
             || expect_ref(value).is_some_and(|marker| {
-                self.object_is_instance_of(marker, wanted)
+                self.live_stream_instance_of(marker, wanted) == Some(true)
+                    || self.object_is_instance_of(marker, wanted)
                     || self.host.host_instance_of(marker, wanted)
                     || crate::runtime::jdk_model::platform_instance_of(marker, wanted)
                     || generic_type_instance_of(marker, wanted)
@@ -564,13 +565,17 @@ impl<H: Host> Runtime<'_, H> {
                 self.count_cast(&value, &wanted)?;
                 return Ok(Some(value));
             }
+            Some(crate::runtime::checkcast::HostCast::FailsCounted) => {
+                self.count_cast(&value, &wanted)?;
+                return Err(crate::runtime::checkcast::cast_failed_counted());
+            }
             Some(crate::runtime::checkcast::HostCast::Fits) | None => {}
         }
-        // A stream's class is a pipeline stage's own: counted, its marker
-        // never put in a message.
+        // A stream's class is a pipeline stage's own: the cast fails (it is
+        // no `instance` above), counted, its marker never put in a message.
         if expect_ref(&value).is_some_and(|marker| self.is_live_stream(marker)) {
             self.count_cast(&value, &wanted)?;
-            return Ok(Some(value));
+            return Err(crate::runtime::checkcast::cast_failed_counted());
         }
         // Only a class the runtime can judge throws; anything else keeps the
         // value, as the opcode-level `checkcast` does.

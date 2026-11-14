@@ -366,6 +366,9 @@ pub(crate) struct Pipelines {
     /// copy: the map, its `modCount` and its entries when the stream was
     /// made.
     view_origins: BTreeMap<String, ViewOrigin>,
+    /// The live streams that are an `IntStream`/`LongStream`/`DoubleStream`
+    /// (`record_stream_kind`); any other is a `Stream`.
+    kinds: BTreeMap<String, &'static str>,
     /// Streams a stage or terminal has used (`linkedOrConsumed`).
     used: BTreeSet<String>,
 }
@@ -601,6 +604,46 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             || self.pipelines.links.contains_key(marker)
             || self.pipelines.concats.contains_key(marker)
             || self.pipelines.spliterators.contains_key(marker)
+    }
+
+    /// Record the stream interface a live stream is, from the declared
+    /// result of the call that made it (`Ljava/util/stream/IntStream;`). A
+    /// stream with no record is a `Stream`.
+    pub(crate) fn record_stream_kind(&mut self, stream: &Value, returns: &str) {
+        let interface = match returns {
+            "Ljava/util/stream/IntStream;" => "java/util/stream/IntStream",
+            "Ljava/util/stream/LongStream;" => "java/util/stream/LongStream",
+            "Ljava/util/stream/DoubleStream;" => "java/util/stream/DoubleStream",
+            _ => return,
+        };
+        if let Some(marker) = expect_ref(stream)
+            && self.is_live_stream(marker)
+        {
+            self.pipelines.kinds.insert(marker.clone(), interface);
+        }
+    }
+
+    /// `marker instanceof wanted` for a live stream: its class is a pipeline
+    /// stage of its stream interface (`ReferencePipeline$Head`,
+    /// `IntPipeline$3`...), which implements that interface, `BaseStream` and
+    /// `AutoCloseable` and nothing a jar names. `None` for any other text.
+    pub(crate) fn live_stream_instance_of(&self, marker: &str, wanted: &str) -> Option<bool> {
+        if !self.is_live_stream(marker) {
+            return None;
+        }
+        let interface = self
+            .pipelines
+            .kinds
+            .get(marker)
+            .copied()
+            .unwrap_or("java/util/stream/Stream");
+        Some(
+            wanted == interface
+                || matches!(
+                    wanted,
+                    "java/lang/Object" | "java/util/stream/BaseStream" | "java/lang/AutoCloseable"
+                ),
+        )
     }
 
     /// `text instanceof wanted` for a `stream/...` text that is no live

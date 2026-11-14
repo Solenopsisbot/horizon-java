@@ -23471,7 +23471,25 @@ impl<H: Host> Runtime<'_, H> {
         Value::Ref(Some(marker))
     }
 
+    /// [`Self::invoke_stream_calls`], recording which stream interface a
+    /// new stream is (its call's declared result: `IntStream.range` answers an
+    /// `IntStream`), for `instanceof` and casts (`stream_pipeline.rs`).
     fn invoke_stream(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        let result = self.invoke_stream_calls(r, receiver, args, class, method)?;
+        if let Some(stream) = &result {
+            self.record_stream_kind(stream, return_desc(&r.descriptor));
+        }
+        Ok(result)
+    }
+
+    fn invoke_stream_calls(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
@@ -24679,6 +24697,7 @@ impl<H: Host> Runtime<'_, H> {
                         || !wanted.starts_with('[')
                             && expect_ref(&value).is_some_and(|marker| {
                                 self.forged_stream_instance_of(marker, &wanted)
+                                    || self.live_stream_instance_of(marker, &wanted) == Some(true)
                                     || self.object_is_instance_of(marker, &wanted)
                                     || self.host.host_instance_of(marker, &wanted)
                                     || jdk_model::platform_instance_of(marker, &wanted)
