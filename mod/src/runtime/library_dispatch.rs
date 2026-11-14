@@ -566,6 +566,12 @@ impl<H: Host> Runtime<'_, H> {
             }
             Some(crate::runtime::checkcast::HostCast::Fits) | None => {}
         }
+        // A stream's class is a pipeline stage's own: counted, its marker
+        // never put in a message.
+        if expect_ref(&value).is_some_and(|marker| self.is_live_stream(marker)) {
+            self.count_cast(&value, &wanted)?;
+            return Ok(Some(value));
+        }
         // Only a class the runtime can judge throws; anything else keeps the
         // value, as the opcode-level `checkcast` does.
         if self.class(&wanted).is_some() {
@@ -1371,6 +1377,8 @@ impl<H: Host> Runtime<'_, H> {
                     values.push(path_value(&full(rest)));
                 }
                 values.extend(found.iter().map(|relative| path_value(&full(relative))));
+                // `spliteratorUnknownSize` over the directory iterator: not
+                // `SIZED` (never `mark_sized`).
                 self.new_stream(class, method, values)
             }
             _ => return Ok(None),

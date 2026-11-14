@@ -1,16 +1,16 @@
-//! `java.util.Comparator` values and the stream stages config and service
-//! code reaches beyond `map`/`filter`/`collect`.
+//! `java.util.Comparator` values and the stream sources and value-list
+//! terminals config and service code reaches beyond `map`/`filter`/`collect`.
 //!
-//! The runtime's streams are eager: a stream marker owns the list of its
-//! elements (`Runtime::streams`), and every stage answers a new marker. This
-//! module adds the sources and stages real jars stopped on:
+//! A stream source owns the list of its elements (`Runtime::streams`); the
+//! stages and the per-element terminals run lazily over it
+//! (`stream_pipeline.rs`). This module adds the sources and terminals real
+//! jars stopped on:
 //!
-//! * `IntStream.range`/`rangeClosed`/`of` and the `LongStream` ranges, with
-//!   `mapToObj`, `mapToInt`/`Long`/`Double`, `boxed` and `sum` (Xaero's
-//!   config options enumerate their indices with
+//! * `IntStream.range`/`rangeClosed`/`of` and the `LongStream` ranges, and
+//!   `sum` (Xaero's config options enumerate their indices with
 //!   `IntStream.rangeClosed(min, max).mapToObj(...)`).
-//! * `sorted`, `max`, `min`, `findFirst`, `findAny` and `reduce` (rrls picks
-//!   its highest-priority service with `stream.max(COMPARATOR)`).
+//! * The comparators `sorted`, `max` and `min` take (rrls picks its
+//!   highest-priority service with `stream.max(COMPARATOR)`).
 //!
 //! A comparator is a marker in the runtime's string vocabulary, built by the
 //! host from `Comparator`'s factories and combinators and evaluated here,
@@ -38,64 +38,15 @@ use crate::{Boxed, MethodRef, NativeError, Value, expect_ref};
 /// Prefix of a modelled `Comparator` marker.
 const COMPARATOR_PREFIX: &str = "@cmp:";
 
-/// Stream stages recorded instead of run, so a terminal operation that does
-/// not traverse never runs them (#166 F3).
-///
-/// JDK 25's `count()` on a SIZED pipeline answers the size without
-/// traversing (`ReduceOps.makeRefCounting`): no `peek` or `map` runs, and a
-/// `sorted()` never compares, so `Stream.of(new int[0], new int[0]).sorted()
-/// .count()` is `2`, not the `ClassCastException` of comparing two arrays.
-/// The stream model runs each stage eagerly. A stage that keeps SIZED
-/// (`map`, `peek`, `sorted`, `limit`, `skip`, `parallel`/`sequential`/
-/// `unordered`) is recorded here, and its stream gets a marker but no
-/// values. `count()` answers the size of a pipeline whose source reports
-/// SIZED. Any other operation replays the recorded stages first, in order.
+/// The streams whose JDK spliterator reports SIZED (#166 F3): the lazy
+/// pipeline (`stream_pipeline.rs`) reads it, so `count()` of a SIZED
+/// pipeline answers the size without traversing (JDK 25's
+/// `ReduceOps.makeRefCounting`): no `peek` or `map` runs, and a `sorted()`
+/// never compares, so `Stream.of(new int[0], new int[0]).sorted().count()`
+/// is `2`, not the `ClassCastException` of comparing two arrays.
 #[derive(Default)]
 pub(crate) struct StreamPlan {
-    /// Streams whose source reports SIZED and whose stages since all keep it.
     sized: std::collections::BTreeSet<String>,
-    deferred: std::collections::BTreeMap<String, Deferred>,
-    /// Set while a recorded stage runs: run it, do not record it again.
-    replaying: usize,
-}
-
-/// One recorded stage: the call, on its source stream.
-struct Deferred {
-    source: Value,
-    call: MethodRef,
-    args: Vec<Value>,
-    class: String,
-    method: String,
-    size: usize,
-}
-
-/// Whether a stream call is a stage the model runs that keeps SIZED.
-fn keeps_sized(r: &MethodRef) -> bool {
-    matches!(
-        (r.name.as_str(), r.descriptor.as_str()),
-        (
-            "map",
-            "(Ljava/util/function/Function;)Ljava/util/stream/Stream;"
-        ) | (
-            "peek",
-            "(Ljava/util/function/Consumer;)Ljava/util/stream/Stream;"
-        ) | ("sorted", "()Ljava/util/stream/Stream;")
-            | (
-                "sorted",
-                "(Ljava/util/Comparator;)Ljava/util/stream/Stream;"
-            )
-            | ("sorted", "()Ljava/util/stream/IntStream;")
-            | ("sorted", "()Ljava/util/stream/LongStream;")
-            | ("limit", "(J)Ljava/util/stream/Stream;")
-            | ("skip", "(J)Ljava/util/stream/Stream;")
-            | (
-                "parallel" | "sequential" | "unordered",
-                "()Ljava/util/stream/Stream;"
-                    | "()Ljava/util/stream/BaseStream;"
-                    | "()Ljava/util/stream/IntStream;"
-                    | "()Ljava/util/stream/LongStream;"
-            )
-    )
 }
 
 fn comparator(body: &str) -> Value {
@@ -366,26 +317,6 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         }
     }
 
-    /// Run a `Consumer` on one element: a jar callback, else the host's
-    /// `Consumer.accept`.
-    fn apply_consumer(&mut self, consumer: &Value, value: &Value) -> Result<(), NativeError> {
-        if self
-            .invoke_callback(consumer, std::slice::from_ref(value))?
-            .is_none()
-        {
-            self.host.invoke_instance(
-                &MethodRef {
-                    owner: "java/util/function/Consumer".into(),
-                    name: "accept".into(),
-                    descriptor: "(Ljava/lang/Object;)V".into(),
-                },
-                consumer,
-                std::slice::from_ref(value),
-            )?;
-        }
-        Ok(())
-    }
-
     /// `Comparator.compare(a, b)` called by jar code on a modelled marker.
     pub(crate) fn invoke_modelled_comparator(
         &mut self,
@@ -578,95 +509,15 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         Ok(Some(stream))
     }
 
-    /// The stream stages beyond the interpreter's core set, applied to the
-    /// receiver stream's `values`.
+    /// The value-list terminals beyond the interpreter's core set, applied to
+    /// the receiver stream's output `values` (the stages and per-element
+    /// terminals are `stream_pipeline.rs`'s).
     pub(crate) fn more_stream_stages(
         &mut self,
         r: &MethodRef,
         values: &[Value],
-        args: &[Value],
-        class: &str,
-        method: &str,
     ) -> Result<Option<Value>, NativeError> {
-        let argument = || args.first().cloned().unwrap_or(Value::Ref(None));
-        let returns = r.descriptor.rsplit_once(')').map_or("", |(_, ret)| ret);
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
-            ("sorted", "()Ljava/util/stream/Stream;") => {
-                let sorted = self.sort_values(values.to_vec(), &Value::Ref(None))?;
-                self.new_stream(class, method, sorted)
-            }
-            ("sorted", "(Ljava/util/Comparator;)Ljava/util/stream/Stream;") => {
-                let sorted = self.sort_values(values.to_vec(), &argument())?;
-                self.new_stream(class, method, sorted)
-            }
-            ("sorted", "()Ljava/util/stream/IntStream;" | "()Ljava/util/stream/LongStream;") => {
-                let sorted = self.sort_values(values.to_vec(), &Value::Ref(None))?;
-                self.new_stream(class, method, sorted)
-            }
-            // `BinaryOperator.maxBy`/`minBy`: the first of equal extremes wins.
-            ("max" | "min", "(Ljava/util/Comparator;)Ljava/util/Optional;") => {
-                let comparator = argument();
-                let mut best: Option<Value> = None;
-                for value in values {
-                    best = Some(match best {
-                        None => value.clone(),
-                        Some(current) => {
-                            let order = self.compare_with(&comparator, &current, value)?;
-                            let keep = if r.name == "max" {
-                                order >= 0
-                            } else {
-                                order <= 0
-                            };
-                            if keep { current } else { value.clone() }
-                        }
-                    });
-                }
-                best.map_or_else(super::empty_optional, super::optional_wrap)
-            }
-            ("findFirst" | "findAny", "()Ljava/util/Optional;") => values
-                .first()
-                .cloned()
-                .map_or_else(super::empty_optional, super::optional_wrap),
-            ("reduce", "(Ljava/util/function/BinaryOperator;)Ljava/util/Optional;") => {
-                let operator = argument();
-                let mut acc: Option<Value> = None;
-                for value in values {
-                    acc = Some(match acc {
-                        None => value.clone(),
-                        Some(current) => {
-                            self.apply_callback(&operator, &[current, value.clone()])?
-                        }
-                    });
-                }
-                acc.map_or_else(super::empty_optional, super::optional_wrap)
-            }
-            (
-                "reduce",
-                "(Ljava/lang/Object;Ljava/util/function/BinaryOperator;)Ljava/lang/Object;",
-            ) => {
-                let operator = args.get(1).cloned().unwrap_or(Value::Ref(None));
-                let mut acc = argument();
-                for value in values {
-                    acc = self.apply_callback(&operator, &[acc, value.clone()])?;
-                }
-                acc
-            }
-            (
-                "mapToObj" | "mapToInt" | "mapToLong" | "mapToDouble" | "boxed" | "asLongStream",
-                _,
-            ) if returns.starts_with("Ljava/util/stream/") => {
-                let mapped = if r.name == "boxed" || r.name == "asLongStream" {
-                    values.to_vec()
-                } else {
-                    let function = argument();
-                    let mut mapped = Vec::with_capacity(values.len());
-                    for value in values {
-                        mapped.push(self.apply_callback(&function, std::slice::from_ref(value))?);
-                    }
-                    mapped
-                };
-                self.new_stream(class, method, mapped)
-            }
             // The stream's elements through the host's iterator table, the
             // same iterator a `List.iterator()` over them answers.
             ("iterator", "()Ljava/util/Iterator;") => self.host.invoke_instance(
@@ -678,13 +529,6 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 &super::collection_value("list", values),
                 &[],
             )?,
-            ("forEachOrdered", "(Ljava/util/function/Consumer;)V") => {
-                let consumer = argument();
-                for value in values {
-                    self.apply_consumer(&consumer, value)?;
-                }
-                Value::Void
-            }
             ("sum", "()I") => Value::Int(
                 values
                     .iter()
@@ -716,110 +560,6 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// Whether a stream's pipeline reports SIZED.
     pub(crate) fn stream_is_sized(&self, marker: &str) -> bool {
         self.stream_plan.sized.contains(marker)
-    }
-
-    /// How many elements a stream holds (or will, once its recorded stages
-    /// run).
-    fn stream_size(&self, marker: &str) -> Option<usize> {
-        match self.stream_plan.deferred.get(marker) {
-            Some(deferred) => Some(deferred.size),
-            None => self.streams.get(marker).map(Vec::len),
-        }
-    }
-
-    /// Record a SIZED-keeping stage, answer `count()` of a SIZED pipeline
-    /// without traversal, or run every recorded stage of `receiver` before
-    /// any other call (`Ok(None)`: the caller runs the call as it is).
-    pub(crate) fn plan_stream_call(
-        &mut self,
-        r: &MethodRef,
-        receiver: &Value,
-        args: &[Value],
-        class: &str,
-        method: &str,
-    ) -> Result<Option<Value>, NativeError> {
-        if self.stream_plan.replaying > 0 {
-            return Ok(None);
-        }
-        let Some(marker) = expect_ref(receiver).filter(|marker| marker.starts_with("stream/"))
-        else {
-            return Ok(None);
-        };
-        let Some(size) = self.stream_size(marker) else {
-            return Ok(None);
-        };
-        if keeps_sized(r) {
-            let bound = |index: usize| match args.get(index) {
-                Some(Value::Long(n)) => usize::try_from((*n).max(0)).unwrap_or(usize::MAX),
-                Some(Value::Int(n)) => usize::try_from((*n).max(0)).unwrap_or(usize::MAX),
-                _ => 0,
-            };
-            let size = match r.name.as_str() {
-                "limit" => size.min(bound(0)),
-                "skip" => size.saturating_sub(bound(0)),
-                _ => size,
-            };
-            let sized = self.stream_plan.sized.contains(marker);
-            let stream = self.new_stream(class, method, Vec::new());
-            let Some(new_marker) = expect_ref(&stream).cloned() else {
-                return Ok(None);
-            };
-            self.streams.remove(&new_marker);
-            if sized {
-                self.stream_plan.sized.insert(new_marker.clone());
-            }
-            self.stream_plan.deferred.insert(
-                new_marker,
-                Deferred {
-                    source: receiver.clone(),
-                    call: r.clone(),
-                    args: args.to_vec(),
-                    class: class.to_owned(),
-                    method: method.to_owned(),
-                    size,
-                },
-            );
-            return Ok(Some(stream));
-        }
-        if (r.name.as_str(), r.descriptor.as_str()) == ("count", "()J")
-            && self.stream_plan.sized.contains(marker)
-        {
-            // As the model's own `count()` answers it.
-            return Ok(Some(Value::Int(size as i32)));
-        }
-        self.force_stream(receiver)?;
-        Ok(None)
-    }
-
-    /// Run the recorded stages of `stream`, so its values are in `streams`.
-    pub(crate) fn force_stream(&mut self, stream: &Value) -> Result<(), NativeError> {
-        let Some(marker) = expect_ref(stream).cloned() else {
-            return Ok(());
-        };
-        let Some(deferred) = self.stream_plan.deferred.remove(&marker) else {
-            return Ok(());
-        };
-        self.force_stream(&deferred.source)?;
-        self.stream_plan.replaying += 1;
-        let produced = self.invoke_stream(
-            &deferred.call,
-            Some(&deferred.source),
-            &deferred.args,
-            &deferred.class,
-            &deferred.method,
-        );
-        self.stream_plan.replaying -= 1;
-        let values = match produced? {
-            Some(Value::Ref(Some(produced))) => self.streams.remove(&produced).unwrap_or_default(),
-            _ => {
-                return Err(NativeError::Metadata(format!(
-                    "a recorded stream stage {}.{} answered no stream",
-                    deferred.call.owner, deferred.call.name
-                )));
-            }
-        };
-        self.streams.insert(marker, values);
-        Ok(())
     }
 }
 

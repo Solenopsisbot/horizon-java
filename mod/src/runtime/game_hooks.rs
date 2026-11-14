@@ -1407,6 +1407,7 @@ impl NativeJar {
             next_object: state.next_object.max(GAME_HOOK_OBJECT_BASE),
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
