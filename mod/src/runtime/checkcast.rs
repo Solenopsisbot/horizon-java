@@ -22,11 +22,9 @@
 //! - a bare jar class name (how `ServiceLoader` hands out a jar provider) is
 //!   read as an instance of that class, as `instanceof` already reads it; a
 //!   `Class` object of the same name is not told apart;
-//! - the exception message is `class A cannot be cast to class B` without the
-//!   JVM's module/loader clause (`(A is in module java.base of loader
-//!   'bootstrap'; B is in unnamed module of loader 'app')`), except when both
-//!   classes are in `java.base`, where it is the JVM's whole message
-//!   (`(A and B are in module java.base of loader 'bootstrap')`);
+//! - the exception message names a jar's or the game's class as in the
+//!   unnamed module of loader `app` (a plain `java -cp` run): in the game its
+//!   loader is Knot's, whose name carries an identity hash no run can know;
 //! - a lambda (an `@indy:` marker) cast to a jar *interface* passes uncounted:
 //!   the marker does not record which functional interface the lambda
 //!   implements, and javac only emits such a cast after an erased generic read.
@@ -59,39 +57,81 @@ pub(crate) enum HostCast {
     FailsCounted,
 }
 
-/// Whether the JDK class `class` is in module `java.base` (the packages a
-/// cast message can name; the few JDK packages outside it are excluded).
-fn in_java_base(class: &str) -> bool {
-    // An array class is in its element type's module; a primitive array in
-    // `java.base`.
-    if let Some(element) = class.strip_prefix('[') {
-        let element = element.trim_start_matches('[');
-        return match element.strip_prefix('L').and_then(|e| e.strip_suffix(';')) {
-            Some(element) => in_java_base(element),
-            None => true,
-        };
+/// The system modules Java 25's boot layer defines to the platform and the
+/// application class loaders (`Module.getClassLoader().getName()`); every
+/// other system module is the bootstrap loader's.
+const PLATFORM_MODULES: &[&str] = &[
+    "java.compiler",
+    "java.net.http",
+    "java.scripting",
+    "java.se",
+    "java.security.jgss",
+    "java.smartcardio",
+    "java.sql",
+    "java.sql.rowset",
+    "java.transaction.xa",
+    "java.xml.crypto",
+    "jdk.accessibility",
+    "jdk.charsets",
+    "jdk.crypto.cryptoki",
+    "jdk.dynalink",
+    "jdk.graal.compiler",
+    "jdk.graal.compiler.management",
+    "jdk.httpserver",
+    "jdk.jsobject",
+    "jdk.localedata",
+    "jdk.naming.dns",
+    "jdk.security.auth",
+    "jdk.security.jgss",
+    "jdk.xml.dom",
+    "jdk.zipfs",
+];
+const APP_MODULES: &[&str] = &[
+    "jdk.attach",
+    "jdk.compiler",
+    "jdk.crypto.ec",
+    "jdk.editpad",
+    "jdk.hotspot.agent",
+    "jdk.internal.ed",
+    "jdk.internal.jvmstat",
+    "jdk.internal.le",
+    "jdk.internal.md",
+    "jdk.internal.opt",
+    "jdk.jartool",
+    "jdk.javadoc",
+    "jdk.jcmd",
+    "jdk.jconsole",
+    "jdk.jdeps",
+    "jdk.jdi",
+    "jdk.jdwp.agent",
+    "jdk.jlink",
+    "jdk.jpackage",
+    "jdk.jshell",
+    "jdk.jstatd",
+    "jdk.unsupported.desktop",
+];
+
+/// Where the JVM says class `class` lives, as a cast message names it: its
+/// module (`module java.base`, or `unnamed module` for a jar's or the game's
+/// class) and its loader's name. An array class lives where its element
+/// class does; a primitive array in `java.base`. A jar's class is the
+/// application loader's, as in a plain `java -cp` run: in the game a mod's
+/// loader is Knot's, whose name carries an identity hash no run can know.
+fn module_and_loader(class: &str) -> (String, &'static str) {
+    let element = class.trim_start_matches('[');
+    let element = match element.strip_prefix('L').and_then(|e| e.strip_suffix(';')) {
+        Some(element) => element,
+        None if element.len() < class.len() => "java/lang/Object",
+        None => element,
+    };
+    match crate::runtime::jdk_closure::module_of(element) {
+        Some(module) if PLATFORM_MODULES.contains(&module) => {
+            (format!("module {module}"), "platform")
+        }
+        Some(module) if APP_MODULES.contains(&module) => (format!("module {module}"), "app"),
+        Some(module) => (format!("module {module}"), "bootstrap"),
+        None => ("unnamed module".to_owned(), "app"),
     }
-    const BASE: &[&str] = &[
-        "java/lang/",
-        "java/util/",
-        "java/io/",
-        "java/nio/",
-        "java/math/",
-        "java/net/",
-        "java/time/",
-        "java/text/",
-        // `sun.nio.fs.UnixPath`, the watch service's classes.
-        "sun/nio/",
-    ];
-    const ELSEWHERE: &[&str] = &[
-        "java/lang/instrument/",
-        "java/lang/management/",
-        "java/util/logging/",
-        "java/util/prefs/",
-        "java/net/http/",
-    ];
-    BASE.iter().any(|prefix| class.starts_with(prefix))
-        && !ELSEWHERE.iter().any(|prefix| class.starts_with(prefix))
 }
 
 /// The `ClassCastException` of a cast that fails where the runtime does not
@@ -110,17 +150,21 @@ pub(crate) fn cast_failed_counted(target: &str) -> NativeError {
 }
 
 /// The `ClassCastException` `checkcast target` throws for an object of
-/// `runtime_class` (internal names). Two `java.base` classes get the JVM's
-/// whole message (`SharedRuntime::generate_class_cast_message`); otherwise
-/// the module/loader clause is left out (a named departure, above).
+/// `runtime_class` (internal names), with the JVM's message
+/// (`SharedRuntime::generate_class_cast_message`): both classes, then where
+/// each lives ([`module_and_loader`]), once when they share it.
 pub(crate) fn class_cast_exception(runtime_class: &str, target: &str) -> NativeError {
     let (from, to) = (runtime_class.replace('/', "."), target.replace('/', "."));
-    let message = if in_java_base(runtime_class) && in_java_base(target) {
+    let (from_module, from_loader) = module_and_loader(runtime_class);
+    let (to_module, to_loader) = module_and_loader(target);
+    let message = if (&from_module, from_loader) == (&to_module, to_loader) {
         format!(
-            "class {from} cannot be cast to class {to} ({from} and {to} are in module java.base of loader 'bootstrap')"
+            "class {from} cannot be cast to class {to} ({from} and {to} are in {from_module} of loader '{from_loader}')"
         )
     } else {
-        format!("class {from} cannot be cast to class {to}")
+        format!(
+            "class {from} cannot be cast to class {to} ({from} is in {from_module} of loader '{from_loader}'; {to} is in {to_module} of loader '{to_loader}')"
+        )
     };
     NativeError::UncaughtException {
         class: "java/lang/ClassCastException".into(),
@@ -239,19 +283,34 @@ impl<H: Host> Runtime<'_, H> {
         }
         let Some(target_file) = self.class(target) else {
             // A plain `String` (`"hcoll:java/util/ArrayList#neutral0"`) cast
-            // to a JDK type: `String` is final and its supertypes are known,
-            // so Java's answer is exact (#208 review). A game target, and any
-            // text that may be a host marker, keep the previous behaviour.
-            // A `Class` is a handle (#156 P13c): `"int"` or a held class's
-            // name is that `String`.
+            // to a JDK type: `String` is final and its supertypes
+            // are known, so Java's answer is exact (#208 review, #167). A
+            // `Class` is a handle (#156 P13c): `"int"` or a held class's name
+            // is that `String`.
+            // The game's objects are handles or `game/`/`client/` markers,
+            // never plain text, and so are Brigadier's (`host_brigadier.rs`):
+            // a cast of a `String` to one of their classes is as exact.
             if let Value::Ref(Some(text)) = value
-                && crate::runtime::jdk_closure::in_jdk_package(target)
+                && (crate::runtime::jdk_closure::in_jdk_package(target)
+                    || target.starts_with("net/minecraft/")
+                    || target.starts_with("com/mojang/brigadier/"))
                 && crate::runtime::value_class::is_plain_string(text)
             {
                 if crate::runtime::value_class::string_instance_of(text, target) {
                     return Ok(());
                 }
                 return Err(class_cast_exception("java/lang/String", target));
+            }
+            // A library class (no class file here): the host still answers
+            // some of their objects as plain-looking text (Fabric Loader's
+            // `SemanticVersion`, a class name in jankson: ff926cd7), so a plain
+            // `String` cast to one is counted, never a silent pass nor a throw
+            // (#167).
+            if let Value::Ref(Some(text)) = value
+                && crate::runtime::value_class::is_plain_string(text)
+                && !crate::runtime::value_class::STRING_TYPES.contains(&target)
+            {
+                return self.count_cast(value, target);
             }
             return Ok(());
         };
@@ -476,8 +535,7 @@ impl<H: Host> Runtime<'_, H> {
             return false;
         }
         // `String` is final and in `java.base`, so a text `instanceof String`
-        // accepts is no jar, game or loader type. (`checkcast` still counts a
-        // string cast to a jar type: a departure there, not here.)
+        // accepts is no jar, game or loader type (`checkcast` agrees, #167).
         if matches!(value, Value::Ref(_)) && crate::runtime::value_class::is_plain_string(marker) {
             return false;
         }
@@ -607,6 +665,17 @@ impl<H: Host> Runtime<'_, H> {
             || crate::runtime::jar_object::value_marker_class(value).is_some_and(|class| class.starts_with("java/"));
         if jdk_kind {
             return (Verdict::No, class_of_value(value));
+        }
+        // A plain `String` (#167): final, with exactly its JDK supertypes, so
+        // no jar class or interface; a Mixin cannot add one to it. (A jar
+        // class's name, `ServiceLoader`'s provider, is read above.)
+        if matches!(value, Value::Ref(_)) && crate::runtime::value_class::is_plain_string(marker) {
+            let verdict = if crate::runtime::value_class::string_instance_of(marker, target) {
+                Verdict::Yes
+            } else {
+                Verdict::No
+            };
+            return (verdict, Some("java/lang/String".into()));
         }
         (Verdict::Unknown, None)
     }

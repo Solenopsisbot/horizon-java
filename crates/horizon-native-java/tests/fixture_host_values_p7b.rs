@@ -442,40 +442,15 @@ const EXACT: &[(&str, &str)] = &[
     ("forks", "falsetruefalse"),
     // A source kept past its run still answers for it.
     ("keptSourceName", "Server"),
+    // A string cast to a builder, a predicate, a node, a permission set or a
+    // source throws Java's `ClassCastException` at the cast: a `String` is no
+    // Brigadier, game or JDK object (#167).
+    ("used", "cceccecceccecce"),
 ];
 
 /// `(check, Java 25's answer, the calls counted instead)`.
 #[allow(clippy::type_complexity)]
 const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
-    // A string cast to a builder, a predicate, a node, a permission set or a
-    // source: Java throws `ClassCastException` at the cast. The runtime's
-    // cast to a game or library class keeps passing text (a stricter cast
-    // broke jars whose host values are plain-looking text), so each use is
-    // refused and counted, never taken for that object. The cast to the JDK's
-    // `Predicate` throws Java's exception (#156 P14c: a plain `String` cast to
-    // a JDK type), so `requires` is never reached.
-    (
-        "used",
-        "cceccecceccecce",
-        &[
-            (
-                "com/mojang/brigadier/CommandDispatcher#register(Lcom/mojang/brigadier/builder/LiteralArgumentBuilder;)Lcom/mojang/brigadier/tree/LiteralCommandNode;",
-                1,
-            ),
-            (
-                "com/mojang/brigadier/builder/LiteralArgumentBuilder#then(Lcom/mojang/brigadier/tree/CommandNode;)Lcom/mojang/brigadier/builder/ArgumentBuilder;",
-                1,
-            ),
-            (
-                "net/minecraft/commands/CommandSourceStack#getTextName()Ljava/lang/String;",
-                1,
-            ),
-            (
-                "net/minecraft/server/permissions/PermissionSet#hasPermission(Lnet/minecraft/server/permissions/Permission;)Z",
-                1,
-            ),
-        ],
-    ),
     // Two nodes of one literal, no children, no command: `CommandNode.equals`
     // compares their children and commands.
     (
