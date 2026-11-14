@@ -177,6 +177,8 @@ impl<H: Host> Runtime<'_, H> {
             Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {
                 return Equality::Platform;
             }
+            // An object runs its class's members, read below by its key.
+            Value::Host(handle) if crate::runtime::jar_object::is_object_handle(handle) => handle.key(),
             Value::Void | Value::Host(_) => return Equality::Host,
             Value::Ref(Some(marker)) => marker,
         };
@@ -199,7 +201,7 @@ impl<H: Host> Runtime<'_, H> {
         if self.enum_constants.contains_key(marker) {
             return Equality::Identity;
         }
-        if value_class::is_plain_string(marker) {
+        if matches!(value, Value::Ref(_)) && value_class::is_plain_string(marker) {
             return Equality::Platform;
         }
         Equality::Host
@@ -303,7 +305,9 @@ impl<H: Host> Runtime<'_, H> {
     fn host_value_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         // A handle's `hashCode` is its kind's row, a held value's own
         // `hashCode` run here (`host_ref.rs`).
-        if let Value::Host(handle) = value {
+        if let Value::Host(handle) = value
+            && !crate::runtime::jar_object::is_object_handle(handle)
+        {
             return handle.hash_code(&mut RuntimeNested::new(self));
         }
         let Some(marker) = expect_ref(value) else {
@@ -402,7 +406,9 @@ impl<H: Host> Runtime<'_, H> {
                 // give (two equal keys from different constructions of an
                 // identity-`equals` kind) is counted and never replaced by
                 // key equality: the two stay distinct (§2.1).
-                if let Value::Host(handle) = a {
+                if let Value::Host(handle) = a
+                    && !crate::runtime::jar_object::is_object_handle(handle)
+                {
                     return match handle.equals(b, &mut RuntimeNested::new(self))? {
                         Some(equal) => Ok(equal),
                         None => {
@@ -634,7 +640,8 @@ impl<H: Host> Runtime<'_, H> {
         let Some(Value::Host(handle)) = receiver else {
             return Ok(None);
         };
-        if !matches!(opcode, 0xb6 | 0xb9) {
+        // An object's methods are its class's: dispatched like any call.
+        if !matches!(opcode, 0xb6 | 0xb9) || crate::runtime::jar_object::is_object_handle(handle) {
             return Ok(None);
         }
         let mut nested = RuntimeNested {
@@ -910,7 +917,9 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
     }
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
-        if let Value::Host(handle) = value {
+        if let Value::Host(handle) = value
+            && !crate::runtime::jar_object::is_object_handle(handle)
+        {
             return handle.to_string(self);
         }
         self.runtime

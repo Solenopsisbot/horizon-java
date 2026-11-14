@@ -706,7 +706,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         // map, which the copy cannot; a write to the map before the
         // traversal ends is counted.
         if let Some(map) = self.host.view_copy_source(source) {
-            let map = Value::Ref(Some(map));
+            let map = crate::runtime::jar_object::stored_value(&map);
             let origin = ViewOrigin {
                 stamp: self.capture_mod_count(&map),
                 entries: crate::runtime::runtime_collection_values(self.host, &map).unwrap_or_default(),
@@ -715,7 +715,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             self.pipelines.view_origins.insert(marker.clone(), origin);
             return;
         }
-        let class = source.split_once('#').map_or("", |(class, _)| class);
+        let class = crate::runtime::jar_object::marker_class(source).unwrap_or("");
         if FAIL_FAST.contains(&class) && self.host.mutable_collection_values(collection).is_some() {
             self.pipelines.origins.insert(
                 marker.clone(),
@@ -777,9 +777,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             .host
             .view_copy_source(marker)
             .unwrap_or_else(|| marker.clone());
-        let class = source
-            .split_once('#')
-            .map_or(source.as_str(), |(class, _)| class);
+        let class = crate::runtime::jar_object::marker_class_or_text(&source);
         !class.starts_with("java/util/concurrent/")
             || matches!(
                 class,
@@ -1499,7 +1497,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let entries = crate::runtime::runtime_collection_values(self.host, &origin.map)?;
         if self.capture_mod_count(&origin.map) != origin.stamp || entries != origin.entries {
             let map = expect_ref(&origin.map).map_or("", String::as_str);
-            let class = map.split_once('#').map_or(map, |(class, _)| class);
+            let class = crate::runtime::jar_object::marker_class_or_text(map);
             self.host.unknown_operand_call(&MethodRef {
                 owner: class.to_owned(),
                 name: "spliterator".into(),

@@ -355,9 +355,12 @@ pub(crate) const IDENTIFIER_METHODS: Methods = Methods {
     hash_code: |handle, _| Ok(Some(crate::hash_map_order::identifier_hash(handle.key()))),
     equals: |handle, other, _| {
         Ok(match other {
-            Value::Host(other) => Some(other == handle),
             // An object a `new ResourceLocation(..)` built (pre-1.21): its id
             // lives in the host's table, which no `Nested` reaches.
+            other if crate::jar_object::is_object(other) => crate::jar_object::object_class(other)
+                .is_none_or(|class| class != RESOURCE_LOCATION && class != IDENTIFIER)
+                .then_some(false),
+            Value::Host(other) => Some(other == handle),
             Value::Ref(Some(marker)) => crate::jar_object::packaged_key_class(marker)
                 .is_none_or(|class| class != RESOURCE_LOCATION && class != IDENTIFIER)
                 .then_some(false),

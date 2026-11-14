@@ -241,7 +241,7 @@ impl<H: Host> Runtime<'_, H> {
                         codec,
                     });
                 }
-                Ok(Some(Value::Ref(Some(builder))))
+                Ok(Some(crate::jar_object::stored_value(&builder)))
             }
             ATTACHMENT_REGISTRY_CLASS => self.attachment_registry_call(r, args),
             ATTACHMENT_BUILDER => {
@@ -280,7 +280,7 @@ impl<H: Host> Runtime<'_, H> {
                         codec,
                     });
                 }
-                Ok(Some(Value::Ref(Some(builder))))
+                Ok(Some(crate::jar_object::stored_value(&builder)))
             }
             _ => Ok(None),
         }

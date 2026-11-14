@@ -86,6 +86,8 @@ impl<H: Host> Runtime<'_, H> {
         let map = is_map_owner(&r.owner);
         let receiver = match receiver {
             Some(receiver @ Value::Ref(Some(_))) => receiver,
+            // A collection a jar `new`ed (`jar_object.rs`).
+            Some(receiver) if crate::runtime::jar_object::is_object(receiver) => receiver,
             _ => return Ok(None),
         };
         let values = match runtime_collection_values(self.host, receiver) {

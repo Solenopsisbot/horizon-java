@@ -46,14 +46,19 @@ impl StdHost {
             }
             _ => return None,
         };
-        let Some(Value::Ref(Some(wrapped))) = args.first() else {
+        // The wrapped collection: a host marker, or a collection a jar
+        // `new`ed (an object, `jar_object.rs`).
+        let Some(wrapped) = args.first().filter(|value| expect_ref(value).is_some()) else {
             return Some(Err(NativeError::UncaughtException {
                 class: "java/lang/NullPointerException".into(),
                 message: None,
                 frame: None,
             }));
         };
-        let wrapped = self.synchronized_target(wrapped).to_owned();
+        // A view of a view wraps the innermost collection.
+        let wrapped = self
+            .synchronized_receiver(wrapped)
+            .unwrap_or_else(|| wrapped.clone());
         let view = self.empty_collection(kind);
         if let Some(marker) = expect_ref(&view) {
             self.synchronized_views.insert(marker.to_owned(), wrapped);
@@ -65,14 +70,13 @@ impl StdHost {
     pub(crate) fn synchronized_target<'a>(&'a self, marker: &'a str) -> &'a str {
         self.synchronized_views
             .get(marker)
+            .and_then(expect_ref)
             .map_or(marker, String::as_str)
     }
 
     /// The wrapped collection when `receiver` is a synchronized view.
     pub(crate) fn synchronized_receiver(&self, receiver: &Value) -> Option<Value> {
         let marker = expect_ref(receiver)?;
-        self.synchronized_views
-            .get(marker)
-            .map(|wrapped| Value::Ref(Some(wrapped.clone())))
+        self.synchronized_views.get(marker).cloned()
     }
 }

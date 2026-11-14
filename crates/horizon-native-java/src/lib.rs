@@ -73,6 +73,7 @@ mod host_entry;
 mod host_events;
 mod host_executors;
 mod host_fabric_loader;
+mod host_fabric_runtime;
 mod host_game_event;
 mod host_guava;
 mod host_ids;
@@ -2488,6 +2489,11 @@ pub trait Host {
     /// no declaration table ignores it.
     fn note_content_builder(&mut self, _event: ContentBuilderEvent) {}
 
+    /// The runtime constructed the entrypoint instance of `class` (internal
+    /// name) and runs its method on it: the object a loader's own
+    /// `getEntrypoints` answers for that entry (`host_fabric_runtime.rs`).
+    fn note_entrypoint_constructed(&mut self, _class: &str) {}
+
     /// Sibling-jar classes this host lets the executing jar link against.
     ///
     /// `None` keeps single-jar behavior exactly as before: a symbol the
@@ -2811,6 +2817,9 @@ pub struct StdHost {
     /// Entries are seeded by the loaded jar, so this query never scans a host
     /// classpath or invents providers.
     fabric_entrypoint_containers: Vec<FabricEntrypointContainer>,
+    /// The entrypoint classes (internal names) the runtime constructed: their
+    /// instances are the run's own entrypoint objects.
+    constructed_entrypoints: BTreeSet<String>,
     /// Identifiers retained by `CustomPacketPayload.Type` values created by
     /// the bounded networking façade.
     packet_types: BTreeMap<String, String>,
@@ -2852,7 +2861,7 @@ pub struct StdHost {
     charset_decoders: BTreeMap<String, charset_decoder::DecoderState>,
     /// `Collections.synchronized*` views and the collection each wraps
     /// (`synchronized_views.rs`).
-    synchronized_views: BTreeMap<String, String>,
+    synchronized_views: BTreeMap<String, Value>,
     /// `List.reversed()` views: view marker → (its list, whether it writes
     /// through) (`sequenced.rs`).
     reversed_views: BTreeMap<String, (String, bool)>,
@@ -3003,6 +3012,7 @@ impl StdHost {
             incoming_payloads: Vec::new(),
             payload_bytes: BTreeMap::new(),
             fabric_entrypoint_containers: Vec::new(),
+            constructed_entrypoints: BTreeSet::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
             deferred_registers: BTreeMap::new(),
@@ -3151,6 +3161,41 @@ impl StdHost {
     /// path answer `get(2)` with `IndexOutOfBoundsException: Index 2 out of
     /// bounds for length 2`. A jar's own `new ArrayList()` was never limited,
     /// and the execution budget bounds how many either kind a run can make.
+    /// A new `ArrayList` holding `values`: its own object, compared by
+    /// content (`List.equals`), never by its text.
+    fn fresh_list(&mut self, values: Vec<Value>) -> Value {
+        let list = self.empty_collection("list");
+        if let Some(marker) = expect_ref(&list) {
+            self.mutable_collections.insert(marker.clone(), values);
+        }
+        list
+    }
+
+    /// The object Fabric's `getEntrypoints(kind, requested)` and a
+    /// container's `getEntrypoint()` answer for the entry `class` (as
+    /// `fabric.mod.json` names it): `Entry.getOrCreate(requested)` caches one
+    /// instance per requested type, and the loader's own `invokeEntrypoints`
+    /// made the one for the kind's initializer interface, which is the
+    /// object the runtime constructed and ran (`this` in its
+    /// `onInitialize*`). Any other type (a fresh instance, or Fabric's
+    /// `EntrypointException` when the class is not one), a `Class::member`
+    /// entry (a proxy), or an entry the runtime has not constructed: `None`,
+    /// counted by the caller.
+    fn fabric_entrypoint_object(
+        &self,
+        kind: &str,
+        class: &str,
+        requested: Option<&str>,
+    ) -> Option<Value> {
+        if class.contains("::") || requested.is_none() {
+            return None;
+        }
+        let internal = class.replace('.', "/");
+        (requested == host_fabric_runtime::invocation_type(kind)
+            && self.constructed_entrypoints.contains(&internal))
+        .then_some(Value::Ref(Some(internal)))
+    }
+
     fn empty_collection(&mut self, kind: &str) -> Value {
         let class = match kind {
             "map" => "java/util/LinkedHashMap",
@@ -3698,10 +3743,7 @@ impl StdHost {
         self.payload_registrations
             .iter()
             .filter_map(|registration| {
-                let marker = match &registration.payload_type {
-                    Value::Ref(Some(marker)) => marker,
-                    _ => return None,
-                };
+                let marker = jar_object::object_key(&registration.payload_type)?;
                 let id = self.packet_types.get(marker)?.clone();
                 let codec = match &registration.codec {
                     Value::Ref(Some(codec)) => codec.strip_prefix("codec/").map(str::to_owned),
@@ -3965,20 +4007,12 @@ impl StdHost {
             if !r.descriptor.starts_with("()") {
                 return None;
             }
-            let direction = match r.name.as_str() {
-                "clientboundPlay" => "playToClient",
-                "serverboundPlay" => "playToServer",
-                "clientboundConfiguration" => "configurationToClient",
-                "serverboundConfiguration" => "configurationToServer",
-                _ => return None,
-            };
-            return Some(Value::Ref(Some(format!(
-                "fabric-payload-types/{direction}"
-            ))));
+            let (_, direction) = host_fabric_runtime::PAYLOAD_DIRECTIONS
+                .iter()
+                .find(|(factory, _)| *factory == r.name)?;
+            return Some(host_fabric_runtime::payload_types(direction));
         };
-        let direction = expect_ref(receiver)?
-            .strip_prefix("fabric-payload-types/")?
-            .to_owned();
+        let direction = host_fabric_runtime::payload_types_direction(receiver)?;
         if !matches!(r.name.as_str(), "register" | "registerLarge") || args.len() < 2 {
             return None;
         }
@@ -4387,6 +4421,10 @@ impl Host for StdHost {
             return Ok(value);
         }
         self.get_static(r)
+    }
+
+    fn note_entrypoint_constructed(&mut self, class: &str) {
+        self.constructed_entrypoints.insert(class.to_owned());
     }
 
     fn note_content_builder(&mut self, event: ContentBuilderEvent) {
@@ -4859,12 +4897,11 @@ impl Host for StdHost {
                 Ok(Value::Ref(Some("locale/ENGLISH".into())))
             }
 
-            ("net/fabricmc/api/EnvType", "CLIENT", "Lnet/fabricmc/api/EnvType;") => {
-                Ok(Value::Ref(Some("CLIENT".into())))
-            }
-            ("net/fabricmc/api/EnvType", "SERVER", "Lnet/fabricmc/api/EnvType;") => {
-                Ok(Value::Ref(Some("SERVER".into())))
-            }
+            (
+                "net/fabricmc/api/EnvType",
+                name @ ("CLIENT" | "SERVER"),
+                "Lnet/fabricmc/api/EnvType;",
+            ) => Ok(host_fabric_runtime::env_type(name).unwrap_or(Value::Ref(None))),
             // Item rarity is a bounded set of constants. The marker names the
             // value so a recorded builder chain can name it back.
             (
@@ -5967,7 +6004,19 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/FabricLoader",
                 "getInstance",
                 "()Lnet/fabricmc/loader/api/FabricLoader;",
-            ) => Ok(Value::Ref(Some("fabric-loader".into()))),
+            ) => Ok(host_fabric_runtime::loader()),
+            // `EnvType.valueOf(name)`: the constant; another name throws, which
+            // is counted here.
+            (
+                "net/fabricmc/api/EnvType",
+                "valueOf",
+                "(Ljava/lang/String;)Lnet/fabricmc/api/EnvType;",
+            ) => match Self::argument(r, args, 0)? {
+                Value::Ref(Some(name)) if host_fabric_runtime::env_type(name).is_some() => {
+                    Ok(host_fabric_runtime::env_type(name).unwrap_or(Value::Ref(None)))
+                }
+                _ => self.unknown_host_call(r),
+            },
             // The loader singletons the façade's instance members answer for
             // (`getModEventBus`, `getModContainerById`). These arms used to sit
             // in `get_static`, where a method descriptor never matches, so the
@@ -6057,7 +6106,8 @@ impl Host for StdHost {
         }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
-        if matches!(receiver, Value::Host(_))
+        // An object's are its class's: the models below answer them.
+        if matches!(receiver, Value::Host(handle) if !jar_object::is_object_handle(handle))
             && (matches!(
                 (r.name.as_str(), r.descriptor.as_str()),
                 ("toString", "()Ljava/lang/String;")
@@ -6281,7 +6331,10 @@ impl Host for StdHost {
             // are `java/lang/Thread#<n>` markers.
             let marker = match receiver {
                 receiver if host_jdk::is_main_thread(receiver) => "main".to_owned(),
-                Value::Ref(Some(marker)) => marker.clone(),
+                // A thread a jar constructed (`jar_object.rs`).
+                receiver if jar_object::is_object(receiver) => jar_object::object_key(receiver)
+                    .unwrap_or_default()
+                    .to_owned(),
                 _ => {
                     return Err(NativeError::Metadata(
                         "malformed java/lang/Thread marker".into(),
@@ -7530,7 +7583,8 @@ impl Host for StdHost {
                     return Ok(Value::Int(stable_hash(id)));
                 }
                 ("equals", "(Ljava/lang/Object;)Z") => {
-                    let other = expect_ref(Self::argument(r, args, 0)?)
+                    // Only a type object: a `String` spelling one's key is not equal.
+                    let other = jar_object::object_key(Self::argument(r, args, 0)?)
                         .and_then(|other| self.packet_types.get(other));
                     return Ok(Value::Int((self.packet_types.get(marker) == other) as i32));
                 }
@@ -8515,9 +8569,8 @@ impl Host for StdHost {
                 if crate::jar_object::packaged_object_class(receiver).is_some() =>
             {
                 // `Object`'s own model is this arm: asking it would recurse.
-                let modelled = expect_ref(receiver)
-                    .and_then(|marker| java_tostring::owner(marker))
-                    .is_some_and(|owner| owner != "java/lang/Object");
+                let modelled =
+                    java_tostring::owner(receiver).is_some_and(|owner| owner != "java/lang/Object");
                 match modelled
                     .then(|| self.modelled_to_string(receiver))
                     .flatten()
@@ -8544,6 +8597,19 @@ impl Host for StdHost {
                     }
                     _ => "null".into(),
                 })))
+            }
+            // `EnvType`'s own members on its constant handles
+            // (`host_fabric_runtime.rs`): `Enum`'s too, whichever class the
+            // call names.
+            ("net/fabricmc/api/EnvType" | "java/lang/Enum", "name" | "ordinal" | "isClient", _)
+                if host_fabric_runtime::env_type_name(receiver).is_some() =>
+            {
+                let name = host_fabric_runtime::env_type_name(receiver).unwrap_or_default();
+                Ok(match r.name.as_str() {
+                    "name" => Value::Ref(Some(name)),
+                    "isClient" => Value::Int(i32::from(name == "CLIENT")),
+                    _ => Value::Int(host_fabric_runtime::env_type_ordinal(receiver).unwrap_or(0)),
+                })
             }
             // A jar constant the runtime has no name for (`class#n`): its
             // marker's tail is not its name.
@@ -8605,19 +8671,13 @@ impl Host for StdHost {
                 uuid_text(receiver)
                     .ok_or_else(|| NativeError::Metadata("malformed UUID marker".into()))?,
             ))),
-            ("net/fabricmc/api/EnvType", "isClient", "()Z") => {
-                Ok(Value::Int((expect_string(receiver) == "CLIENT") as i32))
-            }
-            ("net/fabricmc/api/EnvType", "toString", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(enum_name(receiver).to_owned())))
-            }
             // A handle's `toString`/`hashCode`/`equals` are its kind's row in the
             // kind table (`host_ref.rs`), whatever class the call names.
             // A host `null` typed as an optional reads as the empty one.
             (owner, "toString", "()Ljava/lang/String;")
             | (owner, "hashCode", "()I")
             | (owner, "equals", "(Ljava/lang/Object;)Z")
-                if matches!(receiver, Value::Host(_))
+                if matches!(receiver, Value::Host(handle) if !jar_object::is_object_handle(handle))
                     || (*receiver == Value::Ref(None) && HostKind::of_class(owner).is_some()) =>
             {
                 self.host_object_method(r, receiver, args)
@@ -8961,6 +9021,14 @@ impl Host for StdHost {
                     None => self.unknown_host_call(r),
                 }
             }
+            // A `String` is no `FabricLoader` (Java's cast throws; #156 P17's
+            // cast still passes text): its calls are counted, never answered
+            // as the loader's.
+            ("net/fabricmc/loader/api/FabricLoader", _, _)
+                if expect_ref(receiver).is_some_and(|text| value_class::is_plain_string(text)) =>
+            {
+                self.unknown_host_call(r)
+            }
             ("net/fabricmc/loader/api/FabricLoader", "isModLoaded", "(Ljava/lang/String;)Z") => {
                 let id = match Self::argument(r, args, 0)? {
                     Value::Ref(Some(id)) => id,
@@ -9051,19 +9119,45 @@ impl Host for StdHost {
                 "(Ljava/lang/String;)Ljava/util/List;"
                 | "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;",
             ) => {
-                let kind = expect_string(Self::argument(r, args, 0)?);
-                let values = self
+                // `EntrypointStorage`: no entries is the shared
+                // `Collections.emptyList()`; otherwise every call builds a new
+                // `ArrayList`. `getEntrypointContainers` holds a new container
+                // per entry (whose lazy `getEntrypoint` checks the type);
+                // `getEntrypoints` creates each instance eagerly for the type.
+                let kind = expect_string(Self::argument(r, args, 0)?).to_owned();
+                let requested = args.get(1).and_then(expect_ref).cloned();
+                let entries = self
                     .fabric_entrypoint_containers
                     .iter()
                     .filter(|entry| entry.kind == kind)
-                    .map(|entry| {
-                        Value::Ref(Some(format!(
-                            "fabric-entrypoint/{}/{}/{}",
-                            entry.kind, entry.class, entry.provider
-                        )))
-                    })
+                    .cloned()
                     .collect::<Vec<_>>();
-                Ok(collection_value("list", &values))
+                if entries.is_empty() {
+                    return Ok(collection_value("list", &[]));
+                }
+                let mut values = Vec::new();
+                for entry in entries {
+                    if r.name == "getEntrypointContainers" {
+                        values.push(host_fabric_runtime::entrypoint_container(
+                            &host_fabric_runtime::ContainerParts {
+                                kind: entry.kind,
+                                class: entry.class,
+                                provider: entry.provider,
+                                requested: requested.clone(),
+                            },
+                        ));
+                    } else {
+                        match self.fabric_entrypoint_object(
+                            &kind,
+                            &entry.class,
+                            requested.as_deref(),
+                        ) {
+                            Some(object) => values.push(object),
+                            None => return self.unknown_host_call(r),
+                        }
+                    }
+                }
+                Ok(self.fresh_list(values))
             }
             ("net/fabricmc/loader/api/FabricLoader", "getGameDir", "()Ljava/nio/file/Path;") => {
                 Ok(path_value("/horizon/game"))
@@ -9078,12 +9172,15 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/FabricLoader",
                 "getEnvironmentType",
                 "()Lnet/fabricmc/api/EnvType;",
-            ) => Ok(Value::Ref(Some(self.environment_type.clone()))),
+            ) => {
+                Ok(host_fabric_runtime::env_type(&self.environment_type)
+                    .unwrap_or(Value::Ref(None)))
+            }
             (
                 "net/fabricmc/loader/api/FabricLoader",
                 "getMappingResolver",
                 "()Lnet/fabricmc/loader/api/MappingResolver;",
-            ) => Ok(Value::Ref(Some("fabric-mapping-resolver".into()))),
+            ) => Ok(host_fabric_runtime::mapping_resolver()),
             ("net/fabricmc/loader/api/FabricLoader", "isDevelopmentEnvironment", "()Z") => {
                 Ok(Value::Int(self.development_environment as i32))
             }
@@ -9113,24 +9210,36 @@ impl Host for StdHost {
                 "getEntrypointClass",
                 "()Ljava/lang/Class;",
             ) => Ok(Value::Ref(
-                fabric_entrypoint_part(expect_ref(receiver), 2)
-                    .map(|class| class.replace('/', ".")),
+                host_fabric_runtime::entrypoint_container_parts(receiver)
+                    .map(|parts| parts.class.replace('/', ".")),
             )),
             (
-                "net/fabricmc/loader/api/EntrypointContainer",
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getEntrypoint",
                 "()Ljava/lang/Object;",
-            ) => Ok(Value::Ref(
-                fabric_entrypoint_part(expect_ref(receiver), 2)
-                    .map(|class| format!("fabric-entrypoint-instance/{class}")),
-            )),
+            ) => {
+                let object =
+                    host_fabric_runtime::entrypoint_container_parts(receiver).and_then(|parts| {
+                        self.fabric_entrypoint_object(
+                            &parts.kind,
+                            &parts.class,
+                            parts.requested.as_deref(),
+                        )
+                    });
+                match object {
+                    Some(object) => Ok(object),
+                    None => self.unknown_host_call(r),
+                }
+            }
             (
-                "net/fabricmc/loader/api/EntrypointContainer",
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getProvider",
                 "()Lnet/fabricmc/loader/api/ModContainer;",
-            ) => Ok(fabric_entrypoint_part(expect_ref(receiver), 3)
-                .map_or(Value::Ref(None), |provider| {
-                    self.fabric_container(&provider)
+            ) => Ok(host_fabric_runtime::entrypoint_container_parts(receiver)
+                .map_or(Value::Ref(None), |parts| {
+                    self.fabric_container(&parts.provider)
                 })),
             // A container's own metadata, origin and root.
             (
@@ -9522,9 +9631,15 @@ fn expect_int(r: &MethodRef, value: &Value) -> Result<i32, NativeError> {
     }
 }
 
+/// A reference's text: a `String`'s, a host marker's, or an allocated
+/// object's key (`jar_object.rs`), which is the text the object used to be,
+/// so every table keyed by it keeps its rows. A reader that decides what the
+/// value *is* (a class, a string) reads the `Value`, never this text: a
+/// `String` may spell a key.
 fn expect_ref(value: &Value) -> Option<&String> {
     match value {
         Value::Ref(value) => value.as_ref(),
+        Value::Host(handle) if jar_object::is_object_handle(handle) => Some(handle.key_text()),
         _ => None,
     }
 }
@@ -9719,8 +9834,8 @@ fn builder_append_text<H: Host>(
         | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;" => match value {
             // `append(Object)` is `String.valueOf`: an object a model owns
             // prints its `toString`, and a box prints its value.
-            Value::Ref(Some(value)) => {
-                crate::java_tostring::modelled_marker(host, value).unwrap_or_else(|| value.clone())
+            Value::Ref(Some(text)) => {
+                crate::java_tostring::modelled_marker(host, value).unwrap_or_else(|| text.clone())
             }
             Value::Boxed(boxed) => boxed.text(),
             Value::Host(_) => {
@@ -10050,11 +10165,6 @@ fn canonical_uuid(text: &str) -> Result<String, NativeError> {
         )));
     }
     Ok(text.to_ascii_lowercase())
-}
-
-fn fabric_entrypoint_part(value: Option<&String>, index: usize) -> Option<String> {
-    let marker = value?.strip_prefix("fabric-entrypoint/")?;
-    marker.split('/').nth(index - 1).map(str::to_owned)
 }
 
 fn enum_name(value: &Value) -> &str {
@@ -10600,6 +10710,8 @@ impl host_ref::Nested for MarkerText {
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         Ok(Some(match value {
+            // An object prints its key, as its marker did.
+            Value::Host(handle) if jar_object::is_object_handle(handle) => handle.key().to_owned(),
             Value::Host(handle) => return handle.to_string(self),
             other => value_text(other),
         }))
@@ -10616,6 +10728,8 @@ struct HostNested<'a>(Option<&'a mut StdHost>);
 impl host_ref::Nested for HostNested<'_> {
     fn hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         Ok(match value {
+            // An object's own `hashCode` is jar code (or an identity hash).
+            Value::Host(handle) if jar_object::is_object_handle(handle) => None,
             Value::Host(handle) => return handle.hash_code(self),
             Value::Ref(Some(text)) if value_class::is_plain_string(text) => Some(stable_hash(text)),
             Value::Ref(Some(_)) | Value::Void => None,
@@ -10626,6 +10740,8 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError> {
         Ok(match a {
+            // `a == b` answers for any object; its own `equals` is jar code.
+            Value::Host(handle) if jar_object::is_object_handle(handle) => (a == b).then_some(true),
             Value::Host(handle) => return handle.equals(b, self),
             // `a == b` answers `Objects.equals` for any object; otherwise an
             // object's own `equals` is not the host's to run.
@@ -10638,6 +10754,11 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         Ok(match (value, self.0.as_deref_mut()) {
+            // An object prints what its class's model prints, if one does.
+            (Value::Host(handle), Some(host)) if jar_object::is_object_handle(handle) => {
+                host.modelled_to_string(value)
+            }
+            (Value::Host(handle), None) if jar_object::is_object_handle(handle) => None,
             (Value::Host(handle), _) => return handle.to_string(self),
             (Value::Ref(Some(text)), _) if value_class::is_plain_string(text) => Some(text.clone()),
             (Value::Ref(Some(_)), Some(host)) => host.modelled_to_string(value),
@@ -11123,8 +11244,12 @@ fn thrown_from_supplied(value: Value) -> NativeError {
             message: Some("Optional.orElseThrow supplier returned null".into()),
             frame: None,
         },
-        Value::Ref(Some(marker)) => {
-            let class = jar_object::marker_class_or_text(marker);
+        // A throwable object the supplier built (`jar_object.rs`), or a
+        // host marker.
+        value if jar_object::instance_key(value).is_some() => {
+            let class = jar_object::value_marker_class(value)
+                .or_else(|| jar_object::instance_key(value))
+                .unwrap_or_default();
             if class == "java/lang/Throwable"
                 || jdk_exception_superclass(class).is_some()
                 || class.starts_with("java/")
@@ -16352,6 +16477,7 @@ impl NativeJar {
                     neoforge_imc::set_active(runtime.host, previous.as_deref());
                 }
                 constructed?;
+                runtime.host.note_entrypoint_constructed(&class_name);
             }
             if method != "<init>" {
                 // The loader constructs the entrypoint instance and then calls
@@ -20394,6 +20520,8 @@ impl<H: Host> Runtime<'_, H> {
             // The supplied object itself is thrown (`jar_throwables.rs`).
             return Err(match supplied {
                 Value::Ref(Some(_)) => self.throw_object(&supplied, None),
+                // A throwable a jar `new`ed (`jar_object.rs`).
+                ref object if jar_object::is_object(object) => self.throw_object(object, None),
                 other => thrown_from_supplied(other),
             });
         }
@@ -20475,10 +20603,19 @@ impl<H: Host> Runtime<'_, H> {
         self.new_array_value(class, values)
     }
 
+    /// A new object of `class`: a [`HostKind::JarObject`] handle keyed by a
+    /// fresh allocation number (`jar_object.rs`).
     fn new_object(&mut self, class: &str) -> Value {
-        let marker = format!("{class}#{}", self.next_object);
+        let key = self.new_object_key(class);
+        jar_object::handle(key)
+    }
+
+    /// A fresh allocation key `class#n`, for a model whose object is a handle
+    /// of its own kind (an executor, a cache builder) kept under the key.
+    fn new_object_key(&mut self, class: &str) -> String {
+        let key = format!("{class}#{}", self.next_object);
         self.next_object = self.next_object.saturating_add(1);
-        Value::Ref(Some(marker))
+        key
     }
 
     /// Resolve `Class.forName` against the running jar's classes and the
@@ -20671,10 +20808,18 @@ impl<H: Host> Runtime<'_, H> {
         if self.class(&name).is_none() && HostKind::owning_class(&name).is_some() {
             return None;
         }
-        let interfaces = self
-            .class(&name)
-            .map(ClassFile::interface_names)
-            .unwrap_or_default();
+        // A JDK class: Java 25's table (`jdk_closure.rs`); one outside it is
+        // left to the host, which counts it.
+        let interfaces = match (self.class(&name), crate::jdk_closure::class(&name)) {
+            (Some(file), _) => file.interface_names(),
+            (None, Some(row)) => row
+                .interfaces
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            (None, None) if crate::jdk_closure::in_jdk_package(&name) => return None,
+            (None, None) => Vec::new(),
+        };
         let values = interfaces
             .into_iter()
             .map(|interface| Value::Ref(Some(interface)))
@@ -21101,6 +21246,10 @@ impl<H: Host> Runtime<'_, H> {
                     None => self.host.unknown_operand_call(r).map(Some),
                 };
             }
+            // A JDK class outside the table: its supertypes are not known here.
+            if crate::jdk_closure::in_jdk_package(&source) {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
         }
         if let Some(value) = self.invoke_reflect_enum(r, receiver)? {
             return Ok(Some(value));
@@ -21131,6 +21280,16 @@ impl<H: Host> Runtime<'_, H> {
             // one is the direct superclass. Counted.
             if self.class(&class).is_none() && HostKind::owning_class(&class).is_some() {
                 return self.host.unknown_operand_call(r).map(Some);
+            }
+            // A JDK class: Java 25's table (an interface's is null); one
+            // outside it is counted, never a made-up `Object`.
+            if self.class(&class).is_none() {
+                if let Some(row) = crate::jdk_closure::class(&class) {
+                    return Ok(Some(Value::Ref(row.superclass.map(str::to_owned))));
+                }
+                if crate::jdk_closure::in_jdk_package(&class) {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
             }
             let parent = self
                 .class(&class)
@@ -21764,6 +21923,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A loader enum whose constants are host handles (`ModConfig.Type`).
         if let Some(values) = crate::host_neoforge_loader::enum_values(&r.owner)
+            .or_else(|| crate::host_fabric_runtime::enum_values(&r.owner))
             && r.descriptor == format!("()[L{};", r.owner)
         {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
@@ -22497,7 +22657,8 @@ impl<H: Host> Runtime<'_, H> {
                             .map(|value| java_value_text(value, descriptor))
                             .unwrap_or_default();
                         self.io_write(&marker, &text);
-                        Value::Ref(Some(marker))
+                        // `return this`: the writer itself.
+                        jar_object::stored_value(&marker)
                     }
                     ("newLine", "()V") => {
                         self.io_write(&marker, "\n");
@@ -25077,7 +25238,10 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         // `new String(char[]|int[], ..)` (`string_constructors.rs`):
                         // the allocation marker becomes the text it built.
-                        if let Some(marker @ Value::Ref(Some(_))) = receiver.as_ref() {
+                        if let Some(marker) = receiver
+                            .as_ref()
+                            .filter(|value| jar_object::is_object(value))
+                        {
                             let built = Value::Ref(Some(text));
                             for slot in stack.iter_mut().chain(locals.iter_mut()) {
                                 if slot == marker {
@@ -25570,13 +25734,9 @@ impl<H: Host> Runtime<'_, H> {
                         // builder's object marker.
                         let captured = captured
                             .into_iter()
-                            .map(|value| {
-                                match expect_ref(&value)
-                                    .and_then(|marker| self.string_builders.get(marker))
-                                {
-                                    Some(text) => Value::Ref(Some(text.clone())),
-                                    None => value,
-                                }
+                            .map(|value| match self.builder_text(&value) {
+                                Some(text) => Value::Ref(Some(text.clone())),
+                                None => value,
                             })
                             .collect::<Vec<_>>();
                         // An object a library model answers `toString` for (a
@@ -29208,10 +29368,9 @@ pub fn dispatch_payload_frame_with(
     // has a handler (the payload type registry records the others).
     let Some(registration) = registrations.iter().find(|registration| {
         matches!(registration.handler, Value::Ref(Some(_)))
-            && matches!(
-                &registration.payload_type,
-                Value::Ref(Some(marker)) if host.packet_types.get(marker).is_some_and(|known| known == id)
-            )
+            // The `CustomPacketPayload.Type` object the jar built.
+            && jar_object::object_key(&registration.payload_type)
+                .is_some_and(|marker| host.packet_types.get(marker).is_some_and(|known| known == id))
     }) else {
         return Ok(false);
     };
@@ -31810,7 +31969,7 @@ mandatory = true
             ..NativeJar::default()
         };
         let mut host = jar.seed_host(StdHost::new());
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let loaded = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "isModLoaded".into(),
@@ -35592,7 +35751,7 @@ mandatory = true
     #[test]
     fn standard_host_maps_fabric_loader_metadata_and_paths() {
         let mut host = StdHost::new().with_mod("demo", "1.2.3");
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let environment = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getEnvironmentType".into(),
@@ -35600,7 +35759,7 @@ mandatory = true
         };
         assert_eq!(
             host.invoke_instance(&environment, &loader, &[]).unwrap(),
-            Value::Ref(Some("CLIENT".into()))
+            host_fabric_runtime::env_type("CLIENT").unwrap()
         );
         let resolver_method = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
@@ -35610,7 +35769,7 @@ mandatory = true
         let resolver = host
             .invoke_instance(&resolver_method, &loader, &[])
             .unwrap();
-        assert_eq!(resolver, Value::Ref(Some("fabric-mapping-resolver".into())));
+        assert_eq!(resolver, host_fabric_runtime::mapping_resolver());
         let map_class = MethodRef {
             owner: "net/fabricmc/loader/api/MappingResolver".into(),
             name: "mapClassName".into(),
@@ -35653,7 +35812,7 @@ mandatory = true
                 .clone()
                 .invoke_instance(&environment, &loader, &[])
                 .unwrap(),
-            Value::Ref(Some("SERVER".into()))
+            host_fabric_runtime::env_type("SERVER").unwrap()
         );
         let development = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
@@ -35950,7 +36109,7 @@ mandatory = true
             descriptor: "Lnet/fabricmc/api/EnvType;".into(),
         };
         let client = host.get_static(&client).unwrap();
-        assert_eq!(client, Value::Ref(Some("CLIENT".into())));
+        assert_eq!(client, host_fabric_runtime::env_type("CLIENT").unwrap());
         let is_client = MethodRef {
             owner: "net/fabricmc/api/EnvType".into(),
             name: "isClient".into(),
@@ -35975,8 +36134,12 @@ mandatory = true
             descriptor: "()I".into(),
         };
         assert_eq!(
-            host.invoke_instance(&ordinal, &Value::Ref(Some("SERVER".into())), &[])
-                .unwrap(),
+            host.invoke_instance(
+                &ordinal,
+                &host_fabric_runtime::env_type("SERVER").unwrap(),
+                &[]
+            )
+            .unwrap(),
             Value::Int(1)
         );
     }
@@ -38982,8 +39145,8 @@ mandatory = true
     #[test]
     fn standard_host_preserves_bounded_throwable_metadata() {
         let mut host = StdHost::new();
-        let error = Value::Ref(Some("java/lang/IllegalStateException#0".into()));
-        let cause = Value::Ref(Some("java/lang/IllegalArgumentException#1".into()));
+        let error = jar_object::handle("java/lang/IllegalStateException#0".into());
+        let cause = jar_object::handle("java/lang/IllegalArgumentException#1".into());
         let init = MethodRef {
             owner: "java/lang/IllegalStateException".into(),
             name: "<init>".into(),
@@ -40051,7 +40214,7 @@ mandatory = true
     #[test]
     fn unknown_collection_accessors_answer_an_empty_modelled_collection() {
         let mut host = StdHost::new();
-        let config = Value::Ref(Some("demo/Config#0".into()));
+        let config = jar_object::handle("demo/Config#0".into());
         let map = host
             .invoke_instance(
                 &MethodRef {
@@ -41237,27 +41400,55 @@ mandatory = true
             .with_mod("demo", "1.2.3")
             .with_fabric_entrypoint("main", "demo.Main", "demo")
             .with_fabric_entrypoint("client", "demo.Client", "demo");
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let entries = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getEntrypoints".into(),
-            descriptor: "(Ljava/lang/String;)Ljava/util/List;".into(),
+            descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
         };
+        let initializer = Value::Ref(Some("net/fabricmc/api/ModInitializer".into()));
+        let size = MethodRef {
+            owner: "java/util/List".into(),
+            name: "size".into(),
+            descriptor: "()I".into(),
+        };
+        // Before the runtime constructed `demo.Main`, Fabric would construct
+        // it here: counted.
+        host.invoke_instance(
+            &entries,
+            &loader,
+            &[Value::Ref(Some("main".into())), initializer.clone()],
+        )
+        .unwrap();
+        assert!(host.unknown_host_calls().iter().any(|(call, _)| {
+            call.starts_with("net/fabricmc/loader/api/FabricLoader#getEntrypoints")
+        }));
+        // Once it did, the loader's own `ModInitializer` instance is that
+        // object; another type is a fresh instance (or a mismatch): counted.
+        host.note_entrypoint_constructed("demo/Main");
         let main = host
-            .invoke_instance(&entries, &loader, &[Value::Ref(Some("main".into()))])
+            .invoke_instance(
+                &entries,
+                &loader,
+                &[Value::Ref(Some("main".into())), initializer.clone()],
+            )
             .unwrap();
+        assert_eq!(
+            host.invoke_instance(&size, &main, &[]).unwrap(),
+            Value::Int(1)
+        );
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
                     owner: "java/util/List".into(),
-                    name: "size".into(),
-                    descriptor: "()I".into(),
+                    name: "get".into(),
+                    descriptor: "(I)Ljava/lang/Object;".into(),
                 },
                 &main,
-                &[],
+                &[Value::Int(0)],
             )
             .unwrap(),
-            Value::Int(1)
+            Value::Ref(Some("demo/Main".into()))
         );
         let typed_entries = host
             .invoke_instance(
@@ -41267,10 +41458,7 @@ mandatory = true
                     descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
                 },
                 &loader,
-                &[
-                    Value::Ref(Some("main".into())),
-                    Value::Ref(Some("class/net.fabricmc.api.ModInitializer".into())),
-                ],
+                &[Value::Ref(Some("main".into())), initializer.clone()],
             )
             .unwrap();
         assert_eq!(
@@ -41294,7 +41482,7 @@ mandatory = true
                     name: "get".into(),
                     descriptor: "(I)Ljava/lang/Object;".into(),
                 },
-                &main,
+                &typed_entries,
                 &[Value::Int(0)],
             )
             .unwrap();
@@ -41324,20 +41512,23 @@ mandatory = true
             .unwrap(),
             host_fabric_loader::container("demo", Some("1.2.3"))
         );
+        let containers = MethodRef {
+            owner: "net/fabricmc/loader/api/FabricLoader".into(),
+            name: "getEntrypointContainers".into(),
+            descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
+        };
         let client = host
-            .invoke_instance(&entries, &loader, &[Value::Ref(Some("client".into()))])
+            .invoke_instance(
+                &containers,
+                &loader,
+                &[
+                    Value::Ref(Some("client".into())),
+                    Value::Ref(Some("net/fabricmc/api/ClientModInitializer".into())),
+                ],
+            )
             .unwrap();
         assert_eq!(
-            host.invoke_instance(
-                &MethodRef {
-                    owner: "java/util/List".into(),
-                    name: "size".into(),
-                    descriptor: "()I".into(),
-                },
-                &client,
-                &[],
-            )
-            .unwrap(),
+            host.invoke_instance(&size, &client, &[]).unwrap(),
             Value::Int(1)
         );
         assert!(host.fabric_entrypoint_containers().iter().any(|entry| {
@@ -42818,7 +43009,7 @@ mandatory = true
     #[test]
     fn concrete_collection_classes_reach_the_mutable_table() {
         let mut host = StdHost::new();
-        let map = Value::Ref(Some("java/util/TreeMap#0".into()));
+        let map = jar_object::handle("java/util/TreeMap#0".into());
         host.invoke_instance(
             &MethodRef {
                 owner: "java/util/TreeMap".into(),
@@ -42853,7 +43044,7 @@ mandatory = true
             Value::Int(7)
         );
 
-        let list = Value::Ref(Some("java/util/concurrent/CopyOnWriteArrayList#1".into()));
+        let list = jar_object::handle("java/util/concurrent/CopyOnWriteArrayList#1".into());
         host.invoke_instance(
             &MethodRef {
                 owner: "java/util/concurrent/CopyOnWriteArrayList".into(),
@@ -42950,7 +43141,7 @@ mandatory = true
     #[test]
     fn object_get_class_names_the_marker_class() {
         assert_eq!(
-            class_of_value(&Value::Ref(Some("demo/Model#3".into()))),
+            class_of_value(&jar_object::handle("demo/Model#3".into())),
             Some("demo/Model".into())
         );
         assert_eq!(
@@ -43096,7 +43287,7 @@ mandatory = true
                     name: "getClass".into(),
                     descriptor: "()Ljava/lang/Class;".into(),
                 },
-                &Value::Ref(Some("demo/Model#3".into())),
+                &jar_object::handle("demo/Model#3".into()),
                 &[],
             )
             .unwrap();
