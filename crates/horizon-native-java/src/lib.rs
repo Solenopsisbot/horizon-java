@@ -80,6 +80,7 @@ mod host_invoke;
 mod host_jdk;
 mod host_list_iterator;
 mod host_mixin;
+mod host_neoforge_loader;
 mod host_optional;
 mod host_path;
 mod host_ref;
@@ -193,6 +194,7 @@ pub use class_precedence::RunLoader;
 pub use declarations_content::{ATTACHMENT_REGISTRY, ContentBuilderEvent, ContentBuilderKind};
 pub use heap::{CallLogMark, JavaHeap};
 pub use host_events::posted_event;
+pub use host_neoforge_loader::neoforge_mod_container;
 pub(crate) use host_optional::{
     empty_optional, empty_optional_for, is_optional, optional_double, optional_double_value,
     optional_int, optional_int_value, optional_long, optional_long_value, optional_payload,
@@ -2748,6 +2750,10 @@ pub struct StdHost {
     /// clock read.  Keeping the value seeded makes bootstrap replayable.
     current_time_millis: i32,
     mods: BTreeMap<String, String>,
+    /// Each mod of a linked NeoForge jar: its own version, its file's first
+    /// mod and that mod's version (`ModList`, `LoadingModList.getModFileById`,
+    /// `neoforge_loader.rs`).
+    neoforge_mod_files: BTreeMap<String, neoforge_loader::LinkedMod>,
     /// The loader this run is on and the running jar's own loader-namespace
     /// classes, for class precedence (`class_precedence.rs`).
     run_loader: class_precedence::RunLoader,
@@ -2968,6 +2974,7 @@ impl StdHost {
             service_providers: BTreeMap::new(),
             current_time_millis: 0,
             mods: BTreeMap::new(),
+            neoforge_mod_files: BTreeMap::new(),
             run_loader: class_precedence::RunLoader::default(),
             own_loader_classes: BTreeSet::new(),
             fabric_metadata: BTreeMap::new(),
@@ -3321,6 +3328,20 @@ impl StdHost {
     /// `ModList.isLoaded`, declared as a dependency or not.
     fn record_loaded_mod(&mut self, jar: &NativeJar) {
         self.record_fabric_metadata(jar);
+        if let Some(toml) = neoforge_loader::mods_toml(&jar.resource_bytes) {
+            let entries = neoforge_loader::mod_file_entries(toml, jar.neoforge_version.as_deref());
+            if let Some((first, first_version)) = entries.first().cloned() {
+                for (id, version) in entries {
+                    self.neoforge_mod_files.entry(id).or_insert_with(|| {
+                        neoforge_loader::LinkedMod {
+                            version,
+                            file: first.clone(),
+                            file_version: first_version.clone(),
+                        }
+                    });
+                }
+            }
+        }
         if let Some(id) = jar.fabric_id.as_deref().or(jar.neoforge_id.as_deref()) {
             let version = jar
                 .fabric_version
@@ -4644,11 +4665,9 @@ impl Host for StdHost {
         crate::java_tostring::modelled(self, value)
     }
 
-    /// Host markers that answer `instanceof` for their loader and vanilla
-    /// types (the command surface's objects are handles: `host_brigadier.rs`).
-    fn host_instance_of(&self, marker: &str, wanted: &str) -> bool {
-        self.mod_container_instance_of(marker, wanted)
-    }
+    // No host marker answers `instanceof` any more: the command surface
+    // (#188) and the NeoForge loader objects (#189) are handles, so the
+    // trait's default (`false`) stands.
 
     /// Read back what the bounded `Throwable.<init>` surface recorded, so an
     /// `athrow` diagnostic names the same message `getMessage` would return.
@@ -8955,8 +8974,9 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Int(0)),
                 };
+                // `indexedMods.containsKey(id)`: what `getModContainerById` finds.
                 Ok(Value::Int(
-                    (self.mods.contains_key(id) || is_always_loaded_mod(id)) as i32,
+                    (self.neoforge_mod_version(id).is_some() || is_always_loaded_mod(id)) as i32,
                 ))
             }
             (
@@ -8968,23 +8988,22 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(Value::Ref(self.neoforge_mod_version(id).map(|version| {
-                    format!("neoforge-mod-container/{id}/{version}")
-                })))
+                // `Optional.ofNullable(indexedMods.get(id))`: the one container.
+                let present = self.neoforge_mod_version(id).is_some();
+                let id = id.clone();
+                Ok(optional_wrap(if present {
+                    self.neoforge_container(&id)
+                } else {
+                    Value::Ref(None)
+                }))
             }
             (
                 "net/neoforged/fml/ModList" | "net/minecraftforge/fml/ModList",
                 "getMods",
                 "()Ljava/util/List;",
             ) => {
-                let values = self
-                    .mods
-                    .iter()
-                    .map(|(id, version)| {
-                        Value::Ref(Some(format!("neoforge-mod-container/{id}/{version}")))
-                    })
-                    .collect::<Vec<_>>();
-                Ok(collection_value("list", &values))
+                // `sortedList`: each mod's `IModInfo` (not its container).
+                Ok(self.neoforge_mod_infos(r))
             }
             (
                 "net/fabricmc/loader/api/FabricLoader",
@@ -9139,11 +9158,6 @@ impl Host for StdHost {
                     &[path_value(&format!("/horizon/mods/{id}"))],
                 ))
             }
-            (
-                "net/neoforged/fml/ModContainer" | "net/minecraftforge/fml/ModContainer",
-                "getModId",
-                "()Ljava/lang/String;",
-            ) => Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1)))),
             // The metadata of a mod with no `fabric.mod.json` and no built-in
             // model (`fabric_mods.rs` answers the rest): its id, and the
             // version the run's mod list has for it.
@@ -10035,13 +10049,6 @@ fn canonical_uuid(text: &str) -> Result<String, NativeError> {
 fn fabric_entrypoint_part(value: Option<&String>, index: usize) -> Option<String> {
     let marker = value?.strip_prefix("fabric-entrypoint/")?;
     marker.split('/').nth(index - 1).map(str::to_owned)
-}
-
-fn metadata_part(value: Option<&String>, index: usize) -> String {
-    value
-        .and_then(|value| value.split('/').nth(index))
-        .unwrap_or("unknown")
-        .to_owned()
 }
 
 fn enum_name(value: &Value) -> &str {
@@ -21712,6 +21719,12 @@ impl<H: Host> Runtime<'_, H> {
     fn invoke_game_enum_values(&mut self, r: &MethodRef) -> Option<Value> {
         if r.name != "values" {
             return None;
+        }
+        // A loader enum whose constants are host handles (`ModConfig.Type`).
+        if let Some(values) = crate::host_neoforge_loader::enum_values(&r.owner)
+            && r.descriptor == format!("()[L{};", r.owner)
+        {
+            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
         let constants = game_enum_constants(&r.owner)?;
         if r.descriptor != format!("()[L{};", r.owner) {
@@ -35921,11 +35934,11 @@ mandatory = true
             name: "getModContainerById".into(),
             descriptor: "(Ljava/lang/String;)Ljava/util/Optional;".into(),
         };
-        assert_eq!(
-            host.invoke_instance(&container, &list, &[Value::Ref(Some("demo".into()))])
-                .unwrap(),
-            Value::Ref(Some("neoforge-mod-container/demo/1.2.3".into()))
-        );
+        // `Optional.ofNullable(indexedMods.get(id))`: the mod's one container.
+        let found = host
+            .invoke_instance(&container, &list, &[Value::Ref(Some("demo".into()))])
+            .unwrap();
+        assert_eq!(found, optional_wrap(host.neoforge_container("demo")));
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -35933,18 +35946,31 @@ mandatory = true
                     name: "getModId".into(),
                     descriptor: "()Ljava/lang/String;".into(),
                 },
-                &Value::Ref(Some("neoforge-mod-container/demo/1.2.3".into())),
+                &optional_payload(&found).unwrap(),
                 &[],
             )
             .unwrap(),
             Value::Ref(Some("demo".into()))
+        );
+        assert_eq!(
+            host.invoke_instance(&container, &list, &[Value::Ref(Some("missing".into()))])
+                .unwrap(),
+            empty_optional()
         );
         let mods = MethodRef {
             owner: "net/neoforged/fml/ModList".into(),
             name: "getMods".into(),
             descriptor: "()Ljava/util/List;".into(),
         };
+        // `getMods()` is counted (the host cannot know the whole game's
+        // list) and holds every mod it knows: `demo` and `neoforge` (no game
+        // version was seeded, so no `minecraft`).
         let mods_value = host.invoke_instance(&mods, &list, &[]).unwrap();
+        assert!(
+            host.unknown_host_calls()
+                .iter()
+                .any(|(call, _)| call == "net/neoforged/fml/ModList#getMods()Ljava/util/List;")
+        );
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -35956,7 +35982,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Int(1)
+            Value::Int(2)
         );
     }
 
@@ -35985,10 +36011,8 @@ mandatory = true
                 &[Value::Ref(Some("legacy".into()))],
             )
             .unwrap();
-        assert_eq!(
-            container,
-            Value::Ref(Some("neoforge-mod-container/legacy/2.0".into()))
-        );
+        let container = optional_payload(&container).unwrap();
+        assert_eq!(container, host.neoforge_container("legacy"));
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {

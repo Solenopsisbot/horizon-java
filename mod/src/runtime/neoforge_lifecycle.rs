@@ -32,7 +32,7 @@
 //! what the loader's classes answer:
 //!
 //! * `ModLifecycleEvent#getContainer`: the container the event was built for, the same
-//!   `neoforge-mod-container/<id>/<version>` the `@Mod` constructor received;
+//!   container handle the `@Mod` constructor received (the event's key holds its mod id);
 //! * `ParallelDispatchEvent#enqueueWork(Runnable|Supplier)`: `DeferredWorkQueue#enqueueWork`
 //!   appends the work to the step's queue and answers its `CompletableFuture`. `runTasks` runs the
 //!   queue in enqueue order once every container's event was posted; a task that throws is
@@ -157,7 +157,7 @@ pub(crate) fn delivered(class: &str, server: bool) -> bool {
 /// One piece of work `enqueueWork` queued.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DeferredTask {
-    /// The container that queued it (`TaskInfo.owner`).
+    /// The mod id of the container that queued it (`TaskInfo.owner`).
     pub container: String,
     /// The `Runnable` or `Supplier`.
     pub work: Value,
@@ -177,7 +177,7 @@ impl StdHost {
         let container = container.unwrap_or_default();
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("getContainer", "()Lnet/neoforged/fml/ModContainer;") if !container.is_empty() => {
-                Some(Value::Ref(Some(container)))
+                Some(self.neoforge_container(&container))
             }
             (
                 "enqueueWork",
@@ -213,16 +213,6 @@ pub(crate) fn count_unrouted_payloads(host: &mut StdHost, why: &str) {
 }
 
 impl NativeJar {
-    /// The container marker FML hands this jar's container `id` (`entry_constructor_args`).
-    fn container_marker(&self, id: &str) -> String {
-        let version = if self.neoforge_id.as_deref() == Some(id) {
-            self.neoforge_version.as_deref().unwrap_or("unknown")
-        } else {
-            "unknown"
-        };
-        format!("neoforge-mod-container/{id}/{version}")
-    }
-
     /// Posts `stage`'s event to this jar's containers. Answers one line per post a listener ended
     /// by throwing (that container's post stops there, as `EventBus#post` rethrows).
     pub fn run_loading_stage(
@@ -255,8 +245,7 @@ impl NativeJar {
             return failures;
         }
         for id in &containers {
-            let event =
-                crate::runtime::host_game_event::lifecycle_event(class, Some(&self.container_marker(id)));
+            let event = crate::runtime::host_game_event::lifecycle_event(class, Some(id));
             let listeners = self.posted_listeners(host, class, id, None);
             if let Err(failure) = self.post(stage, id, &listeners, &event, host, budget) {
                 failures.push(failure);
@@ -360,11 +349,7 @@ impl NativeJar {
                     .or_default() += 1;
                 continue;
             };
-            let container = task
-                .container
-                .strip_prefix("neoforge-mod-container/")
-                .and_then(|rest| rest.split('/').next())
-                .unwrap_or(&task.container);
+            let container = &task.container;
             // `DeferredWorkQueue.lambda$makeRunnable$0` runs a task with its owner active.
             let previous = crate::runtime::neoforge_imc::set_active(host, Some(container));
             let ran = self.invoke_listener_callback(&callback, Vec::new(), host, budget);

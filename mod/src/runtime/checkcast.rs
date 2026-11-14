@@ -340,8 +340,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // An object a library model built itself: the model knows its whole
         // type, so its `false` is an answer.
-        if crate::runtime::gson_tree::is_tree(marker) || crate::runtime::neoforge_loader::container_type_known(marker)
-        {
+        if crate::runtime::gson_tree::is_tree(marker) {
             return false;
         }
         if self.class(target).is_some() {

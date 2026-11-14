@@ -366,9 +366,8 @@ const EXPECTED: &[(&str, &str)] = &[
     ),
 ];
 
-/// The mod container the probe's methods receive: the loader's marker for
-/// the mod `demo`.
-const CONTAINER: &str = "neoforge-mod-container/demo/1.0.0";
+/// The mod the probe's methods receive the container of.
+const CONTAINER: &str = "demo";
 
 fn fixture(test: &str) -> javac_fixture::Fixture {
     javac_fixture::Fixture::build(
@@ -408,7 +407,9 @@ fn run(
             method,
             "(Lnet/neoforged/fml/ModContainer;)Ljava/lang/String;",
             None,
-            &[Value::Ref(Some(CONTAINER.into()))],
+            &[horizon_native_java::neoforge_mod_container(
+                CONTAINER, false,
+            )],
             &mut host,
         )
         .unwrap_or_else(|error| panic!("{method} failed: {error}"))
