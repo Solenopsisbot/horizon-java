@@ -549,3 +549,145 @@ public final class Main {
     let java: String = (0..40).map(|i| i.to_string()).collect();
     assert_eq!(result, Some(horizon_native_java::Value::Ref(Some(java))));
 }
+
+/// The entrypoint's own `java/util/HashMap`s are empty when made, even after a
+/// refused plugin session made maps of its own (#213). servercore's two Mixin
+/// plugins stop in `onLoad` and are rolled back. Rolling back once rewound
+/// the allocation counter, so the entrypoint's `new HashMap<>()` got a number
+/// a session map had had, and with it that map's host hash table: DazzleConf's
+/// `ValueSerialiserMap.of(Map)` then found an `ImmutableCollections$List12`
+/// among its serialisers and threw a `ClassCastException` Java never throws.
+/// `demo.Main` is DazzleConf 1.3.0-M2's shape (its copy, `entrySet()` walk,
+/// `checkcast` of each value and key check); Java 25 (Temurin 25.0.5,
+/// `javac --release 21`, the same on two runs) answers [`DAZZLECONF_JAVA`]
+/// for its body, which a refused session must not change.
+#[test]
+fn a_rolled_back_sessions_maps_never_reach_the_entrypoints_maps() {
+    let filling = "package demo;
+import java.util.*;
+public class FillingPlugin extends Base {
+    public void onLoad(String mixinPackage) {
+        List<Map<Class<?>, Object>> kept = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            Map<Class<?>, Object> m = new HashMap<>();
+            m.put(String.class, List.of(\"x\", \"y\"));
+            kept.add(m);
+        }
+        Unmodelled.call();
+    }
+}
+";
+    let base = "package demo;
+import java.util.*;
+import org.objectweb.asm.tree.ClassNode;
+import org.spongepowered.asm.mixin.extensibility.*;
+public abstract class Base implements IMixinConfigPlugin {
+    public String getRefMapperConfig() { return null; }
+    public boolean shouldApplyMixin(String target, String mixin) { return true; }
+    public void acceptTargets(Set<String> mine, Set<String> others) {}
+    public List<String> getMixins() { return null; }
+    public void preApply(String t, ClassNode n, String m, IMixinInfo i) {}
+    public void postApply(String t, ClassNode n, String m, IMixinInfo i) {}
+}
+";
+    // servercore has two configs, each with a plugin that stops.
+    let fixture = Fixture::build(
+        "rollback-maps",
+        &[
+            ("demo/Base.java", base),
+            ("demo/FillingPlugin.java", filling),
+        ],
+        &[
+            (
+                "first.mixins.json",
+                "demo.FillingPlugin",
+                &["StoppedDeclined"],
+            ),
+            ("second.mixins.json", "demo.FillingPlugin", &["LeaveMixin"]),
+        ],
+        DAZZLECONF_MAIN,
+    );
+    let jar = fixture.load();
+    let mut host = jar.seed_host(
+        StdHost::new()
+            .with_environment_type("SERVER")
+            .with_strict_unknown_host_calls(),
+    );
+    use horizon_native_java::Host as _;
+    jar.execute("demo.Main", None, "main", &mut host).unwrap();
+    let result = host
+        .persistent_class_state()
+        .0
+        .get("demo/Main#RESULTLjava/lang/String;")
+        .cloned();
+    assert_eq!(
+        result,
+        Some(horizon_native_java::Value::Ref(Some(
+            DAZZLECONF_JAVA.into()
+        )))
+    );
+}
+
+/// What Java 25 printed for `DAZZLECONF_MAIN`'s `onInitialize` (`RESULT`).
+const DAZZLECONF_JAVA: &str = "0[];2[java.lang.Integer=ints, java.lang.Long=longs]";
+
+/// DazzleConf's `ConfigurationOptions.Builder` → `ValueSerialiserMap.of(Map)`.
+const DAZZLECONF_MAIN: &str = r#"package demo;
+
+import java.util.*;
+
+/**
+ * DazzleConf 1.3.0-M2's shape (servercore, #213): `ConfigurationOptions.Builder` keeps its serialisers in a
+ * `HashMap<Class<?>, ValueSerialiser<?>>`, and `ValueSerialiserMap.of(Map)` copies it with `new HashMap<>(map)`,
+ * walks the copy's `entrySet()`, casts each value to `ValueSerialiser` and checks it sits at its own target class.
+ */
+public final class Main {
+    public static String RESULT;
+
+    interface Serialiser<T> {
+        Class<T> getTargetClass();
+    }
+
+    static final class Ints implements Serialiser<Integer> {
+        public Class<Integer> getTargetClass() { return Integer.class; }
+        public String toString() { return "ints"; }
+    }
+
+    static final class Longs implements Serialiser<Long> {
+        public Class<Long> getTargetClass() { return Long.class; }
+        public String toString() { return "longs"; }
+    }
+
+    /** `ValueSerialiserMap.of(Map)`. */
+    static String of(Map<Class<?>, ? extends Serialiser<?>> serialisers) {
+        Map<Class<?>, Serialiser<?>> copy = new HashMap<>(serialisers);
+        List<String> seen = new ArrayList<>();
+        for (Map.Entry<Class<?>, Serialiser<?>> entry : copy.entrySet()) {
+            Class<?> key = entry.getKey();
+            Serialiser<?> serialiser = entry.getValue();
+            Objects.requireNonNull(serialiser, "serialiser");
+            if (key != serialiser.getTargetClass()) {
+                throw new IllegalArgumentException(serialiser + " is at a mismatched key " + key.getName());
+            }
+            seen.add(key.getName() + "=" + serialiser);
+        }
+        Collections.sort(seen);
+        return copy.size() + "" + seen;
+    }
+
+    public void onInitialize() {
+        // DazzleConf's defaults first (an empty builder), then the jar's own serialisers.
+        Map<Class<?>, Serialiser<?>> defaults = new HashMap<>();
+        Map<Class<?>, Serialiser<?>> mine = new HashMap<>();
+        mine.put(Integer.class, new Ints());
+        mine.put(Long.class, new Longs());
+        String result;
+        try {
+            result = of(defaults) + ";" + of(mine);
+        } catch (RuntimeException e) {
+            result = e.getClass().getName() + ": " + e.getMessage();
+        }
+        RESULT = result;
+    }
+}
+"#;
