@@ -99,7 +99,15 @@ fn run(method: &str) -> (String, Vec<(String, usize)>) {
 
 #[test]
 fn every_producer_answers_one_object_per_class() {
-    assert_eq!(run("identity"), ("111111111111".to_owned(), Vec::new()));
+    // `Foo.class.hashCode() == byName.hashCode()`: `Class`'s identity hash,
+    // which no run can reproduce, is counted (both calls).
+    assert_eq!(
+        run("identity"),
+        (
+            "111111111111".to_owned(),
+            vec![("java/lang/Object#hashCode()I".to_owned(), 2)]
+        )
+    );
 }
 
 #[test]

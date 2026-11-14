@@ -57,7 +57,21 @@ fn types_answer_as_java_25() {
     for method in ["texts", "structure", "equality"] {
         let (text, unknown) = run(method);
         assert_eq!(text, expected(method), "{method}: {unknown:?}");
-        assert_eq!(unknown, Vec::<(String, usize)>::new(), "{method}");
+        // `structure` compares type nodes that are classes (`getRawType()`,
+        // arguments, bounds, `getGenericDeclaration()`, a field's generic
+        // type) with `X.class` 10 times with `==`. Since #156 P13b1 the
+        // literal is a `Class` handle while a type node is still the class's
+        // marker text (P13b2 moves it), so each `==` is counted (the answer
+        // stays Java's); P13b2 makes them exact again.
+        let counted = if method == "structure" {
+            vec![(
+                "java/lang/Object#if_acmp(Ljava/lang/Object;Ljava/lang/Object;)Z".to_owned(),
+                10,
+            )]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(unknown, counted, "{method}");
     }
     // `annotated` compares a type argument with `String.class`: two class
     // markers of one spelling, which may be one `Class` or a `Class` and a

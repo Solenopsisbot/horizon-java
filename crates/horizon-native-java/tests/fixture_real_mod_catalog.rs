@@ -389,9 +389,10 @@ version = "1.0"
     let payloads = host.payload_registrations();
     assert_eq!(payloads.len(), 2);
     assert_eq!(payloads[0].direction, "playToServer");
-    assert_eq!(
-        payloads[0].payload_type,
-        Value::Ref(Some("java/lang/Object".into()))
+    assert!(
+        is_class(&payloads[0].payload_type, "java/lang/Object"),
+        "{:?}",
+        payloads[0].payload_type
     );
     assert_eq!(payloads[0].codec, Value::Ref(Some("catalog:codec".into())));
     assert!(matches!(payloads[0].handler, Value::Ref(Some(_))));
@@ -549,9 +550,10 @@ version = "1.0"
     let payloads = host.payload_registrations();
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0].direction, "playBidirectional");
-    assert_eq!(
-        payloads[0].payload_type,
-        Value::Ref(Some("java/lang/Object".into()))
+    assert!(
+        is_class(&payloads[0].payload_type, "java/lang/Object"),
+        "{:?}",
+        payloads[0].payload_type
     );
 
     let _ = fs::remove_dir_all(root);
@@ -757,4 +759,10 @@ fn fabric_entrypoint_without_on_initialize_reports_missing_method() {
     );
 
     let _ = fs::remove_dir_all(root);
+}
+
+/// Whether `value` is the `Class` object of `name` (`Object.class` a mod
+/// passes as a payload type, #156 P13b1).
+fn is_class(value: &Value, name: &str) -> bool {
+    matches!(value, Value::Host(handle) if handle.kind() == horizon_native_java::HostKind::Class && handle.key() == name)
 }

@@ -6194,6 +6194,18 @@ impl Host for StdHost {
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
         }
+        // `equals` between a `Class` and class-marker text of its name (either
+        // side the receiver), until #156 P13c (`host_class.rs`): counted, the
+        // old answer (equal markers) kept.
+        if r.name == "equals"
+            && r.descriptor == "(Ljava/lang/Object;)Z"
+            && args
+                .first()
+                .is_some_and(|other| host_class::handle_against_same_text(receiver, other))
+        {
+            self.unknown_host_call(r)?;
+            return Ok(Value::Int(1));
+        }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
         // An object's are its class's: the models below answer them.
@@ -20957,10 +20969,8 @@ impl<H: Host> Runtime<'_, H> {
                 // The copy is an array of the original's class, or of the
                 // `Class<? extends T[]> newType` the last argument names.
                 let class = if r.descriptor.contains("Ljava/lang/Class;") {
-                    match args.last() {
-                        Some(Value::Ref(Some(class))) if class.starts_with('[') => {
-                            class.replace('.', "/")
-                        }
+                    match args.last().and_then(host_class::class_name) {
+                        Some(class) if class.starts_with('[') => class.replace('.', "/"),
                         _ => return Ok(None),
                     }
                 } else {
@@ -32656,7 +32666,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&load, &loader, &[Value::Ref(Some("demo.Provider".into()))],)
                 .unwrap(),
-            Value::Ref(Some("demo/Provider".into()))
+            host_class::class_value("demo/Provider")
         );
         let missing = host
             .invoke_instance(
@@ -38099,7 +38109,7 @@ mandatory = true
                     &[Value::Ref(Some("demo.Reflective".into()))]
                 )
                 .unwrap(),
-            Value::Ref(Some("demo/Reflective".into()))
+            host_class::class_value("demo/Reflective")
         );
         // The JVM throws for an absent class; a platform probe catches the
         // exception and tries its next loader.
@@ -43487,7 +43497,7 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(class, Value::Ref(Some("demo/Model".into())));
+        assert_eq!(class, host_class::class_value("demo/Model"));
     }
 
     /// Every site names one distinct vanilla method, a position the hook can
