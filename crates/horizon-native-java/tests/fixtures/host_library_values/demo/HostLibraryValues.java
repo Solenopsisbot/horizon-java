@@ -181,4 +181,81 @@ public final class HostLibraryValues {
     }
     return out.toString();
   }
+
+  static Map.Entry<String, Integer> entry;
+  static Map<String, Integer> msi;
+
+  /** #209 B1: a Gson type and the equal JDK type find each other in hash collections. */
+  public static String gsonInHashes() {
+    Type gson = new com.google.gson.reflect.TypeToken<List<String>>() {}.getType();
+    Map<Type, String> m = new HashMap<>();
+    m.put(field("ls"), "jdk");
+    Set<Object> s = new HashSet<>();
+    s.add(gson);
+    s.add(field("ls"));
+    Map<Type, String> m2 = new HashMap<>();
+    m2.put(gson, "g");
+    return m.get(gson) + "|" + s.size() + "|" + m2.get(field("ls"));
+  }
+
+  /** #209 B2: a jar's Gson subclass token equals by type on every path. */
+  public static String gsonSubclassEquality() {
+    com.google.gson.reflect.TypeToken<List<String>> a = new com.google.gson.reflect.TypeToken<List<String>>() {};
+    com.google.gson.reflect.TypeToken<?> f = com.google.gson.reflect.TypeToken.get(field("ls"));
+    return "" + Objects.equals(a, f) + Objects.equals(f, a) + List.of(f).contains(a) + List.of(a).contains(f)
+        + new ArrayList<>(List.of(f)).contains(a);
+  }
+
+  /** #209 B3: Gson's owner of a member type (counted, as the JDK side is). */
+  public static String gsonOwner() {
+    ParameterizedType p = (ParameterizedType) new com.google.gson.reflect.TypeToken<Map.Entry<String, Integer>>() {}.getType();
+    return p.getOwnerType() + "|" + (p.getOwnerType() == Map.class);
+  }
+
+  /** #209 B4: Guava `of(t)` and a subclass token of an equal type are equal, every path. */
+  public static String guavaSubclassEquality() {
+    TypeToken<Map<String, Integer>> tt = new TypeToken<Map<String, Integer>>() {};
+    TypeToken<?> of = TypeToken.of(field("msi"));
+    TypeToken<String> s1 = TypeToken.of(String.class);
+    TypeToken<String> s2 = new TypeToken<String>() {};
+    return "" + of.equals(tt) + tt.equals(of) + s1.equals(s2) + s2.equals(s1) + Objects.equals(of, tt)
+        + Objects.equals(tt, of) + List.of(of).contains(tt) + List.of(tt).contains(of);
+  }
+
+  /** #209 B5: SimpleTypeToken's superclass chain. */
+  public static String guavaChain() {
+    Class<?> c = TypeToken.of(String.class).getClass();
+    return c.getSuperclass().getSuperclass().getName() + "|" + TypeToken.class.getSuperclass().getName() + "|"
+        + java.io.Serializable.class.isAssignableFrom(c);
+  }
+
+  /** #209 B6: Guava takes any Type, Gson's too. */
+  public static String guavaOfGson() {
+    Type t = new com.google.gson.reflect.TypeToken<List<String>>() {}.getType();
+    TypeToken<?> g = TypeToken.of(t);
+    return g + "|" + (g.getType() == t) + g.getRawType().getName();
+  }
+
+  /** #209 S1: Guava prints a class by `getName()`. */
+  public static String guavaArrayText() {
+    return TypeToken.of(int[].class) + "|" + TypeToken.of(String[].class) + "|"
+        + List.of(TypeToken.of(int[][].class), TypeToken.of(String[].class));
+  }
+
+  /** #209 P3: FormattingStyle's input checks. */
+  public static String styleChecks() {
+    StringBuilder out = new StringBuilder();
+    for (Runnable r : new Runnable[] {
+        () -> FormattingStyle.PRETTY.withNewline("x"), () -> FormattingStyle.PRETTY.withIndent("x"),
+        () -> FormattingStyle.PRETTY.withNewline(null), () -> FormattingStyle.PRETTY.withIndent(null),
+        () -> FormattingStyle.PRETTY.withNewline("\r\n").withIndent("\t ")}) {
+      try {
+        r.run();
+        out.append("ok|");
+      } catch (RuntimeException x) {
+        out.append(x.getClass().getSimpleName()).append(':').append(x.getMessage()).append('|');
+      }
+    }
+    return out.toString();
+  }
 }

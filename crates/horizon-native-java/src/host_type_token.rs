@@ -27,6 +27,8 @@ use crate::host_ref::{
 use crate::{NativeError, Value};
 
 pub(crate) const SIMPLE_TYPE_TOKEN: &str = "com/google/common/reflect/TypeToken$SimpleTypeToken";
+const TYPE_TOKEN: &str = "com/google/common/reflect/TypeToken";
+const TYPE_CAPTURE: &str = "com/google/common/reflect/TypeCapture";
 const SUPERTYPES: [&str; 4] = [
     "com/google/common/reflect/TypeToken",
     "com/google/common/reflect/TypeCapture",
@@ -73,22 +75,40 @@ pub(crate) fn token_class(_: &str) -> &str {
 /// `None` where it cannot be told.
 pub(crate) fn types_equal(a: &Value, b: &Value) -> Option<bool> {
     let (a, b) = (
-        crate::host_reflect_type::type_node(a)?,
-        crate::host_reflect_type::type_node(b)?,
+        crate::host_gson_type::any_node(a)?,
+        crate::host_gson_type::any_node(b)?,
     );
     crate::host_reflect_type::nodes_equal(&a, &b)
 }
 
 /// `Types.toString(type)`: a class's name, a generic type as the JDK prints it.
 pub(crate) fn type_text(inner: &Value) -> Option<String> {
-    Some(crate::generic_type_display(
-        &crate::host_reflect_type::type_node(inner)?,
-    ))
+    Some(guava_type_text(&crate::host_gson_type::any_node(inner)?))
+}
+
+/// `Types.toString(type)`: `Class.getName()` for a class (`[I` for `int[]`), the type's own
+/// `toString` otherwise (a Gson type's text is Gson's).
+pub(crate) fn guava_type_text(node: &crate::GenericType) -> String {
+    match node {
+        crate::GenericType::Class(name) => name.replace('/', "."),
+        other => crate::generic_type_display(other),
+    }
+}
+
+/// The supertypes of each class in `SimpleTypeToken`'s chain (guava 33.6.0, `javap`):
+/// `SimpleTypeToken extends TypeToken extends TypeCapture extends Object`, and `TypeToken
+/// implements Serializable`.
+fn supertypes(class: &str) -> &'static [&'static str] {
+    match class {
+        SIMPLE_TYPE_TOKEN => &SUPERTYPES,
+        TYPE_TOKEN => &SUPERTYPES,
+        _ => &[TYPE_CAPTURE, "java/lang/Object"],
+    }
 }
 
 fn class_instance_of(class: &str, wanted: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
     if wanted == class
-        || SUPERTYPES.contains(&wanted)
+        || supertypes(class).contains(&wanted)
         || hierarchy.is_instance(class, wanted) == Some(true)
     {
         return Some(true);
@@ -100,11 +120,17 @@ fn class_instance_of(class: &str, wanted: &str, hierarchy: &dyn ClassHierarchy) 
 fn token_equals(
     handle: &HostRef,
     other: &Value,
-    _: &mut dyn Nested,
+    nested: &mut dyn Nested,
 ) -> Result<Option<bool>, NativeError> {
     let Some(own) = handle_type(handle) else {
         return Ok(None);
     };
+    // A jar's `new TypeToken<T>() {}`: its captured type, where this context reads it.
+    if crate::jar_object::object_key(other).is_some() {
+        return Ok(nested
+            .guava_token_type(other)
+            .and_then(|theirs| types_equal(&own, &theirs)));
+    }
     Ok(match other {
         Value::Host(other) if other.kind() == HostKind::TypeToken => {
             handle_type(other).and_then(|theirs| types_equal(&own, &theirs))
@@ -132,10 +158,25 @@ pub(crate) const TOKEN_METHODS: Methods = Methods {
     compare_to: None,
 };
 
+/// `SimpleTypeToken`, `TypeToken` and `TypeCapture`: a `getClass()` walk up the chain stays
+/// exact (#209).
 pub(crate) const TOKEN_CLASS_SIDE: ClassSide = ClassSide {
-    owns: |class| class == SIMPLE_TYPE_TOKEN,
+    owns: |class| [SIMPLE_TYPE_TOKEN, TYPE_TOKEN, TYPE_CAPTURE].contains(&class),
     instance_of: class_instance_of,
-    superclass: |_| Some(SUPERTYPES[0].to_owned()),
+    superclass: |class| {
+        Some(
+            match class {
+                SIMPLE_TYPE_TOKEN => TYPE_TOKEN,
+                TYPE_TOKEN => TYPE_CAPTURE,
+                _ => "java/lang/Object",
+            }
+            .to_owned(),
+        )
+    },
     is_interface: |_| Some(false),
-    classes: || vec![SIMPLE_TYPE_TOKEN.to_owned()],
+    classes: || {
+        [SIMPLE_TYPE_TOKEN, TYPE_TOKEN, TYPE_CAPTURE]
+            .map(str::to_owned)
+            .to_vec()
+    },
 };

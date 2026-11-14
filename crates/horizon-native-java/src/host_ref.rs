@@ -484,6 +484,12 @@ pub(crate) trait Nested {
         let _ = value;
         None
     }
+    /// The type a jar's `new com.google.common.reflect.TypeToken<T>() {}` captured
+    /// (`guava_model.rs`); `None` where this context cannot read jar objects' fields.
+    fn guava_token_type(&mut self, value: &Value) -> Option<Value> {
+        let _ = value;
+        None
+    }
 }
 
 /// `toString()` of a handle.

@@ -166,6 +166,42 @@ fn styles_and_tokens_answer_as_java_25_or_count() {
         ),
         // No natural order (Java `CCECCECCE`): counted.
         ("sorted", Counted),
+        // #209's review. A Gson type and the equal JDK type meet in hash collections.
+        ("gsonInHashes", Exact("jdk|1|g")),
+        // A jar's subclass token equals by type on every path.
+        ("gsonSubclassEquality", Exact("truetruetruetruetrue")),
+        // A member type's owner the node does not hold (Java `interface java.util.Map|true`):
+        // counted, as the JDK side is.
+        ("gsonOwner", Counted),
+        // Guava: `of(t)` and a subclass token of an equal type, every path.
+        (
+            "guavaSubclassEquality",
+            Exact("truetruetruetruetruetruetruetrue"),
+        ),
+        // `SimpleTypeToken` → `TypeToken` → `TypeCapture`.
+        (
+            "guavaChain",
+            Exact(
+                "com.google.common.reflect.TypeCapture|com.google.common.reflect.TypeCapture|true",
+            ),
+        ),
+        // Guava takes Gson's type, as it is.
+        (
+            "guavaOfGson",
+            Exact("java.util.List<java.lang.String>|truejava.util.List"),
+        ),
+        // `Types.toString` prints a class by `getName()`.
+        (
+            "guavaArrayText",
+            Exact("[I|[Ljava.lang.String;|[[[I, [Ljava.lang.String;]"),
+        ),
+        // `FormattingStyle`'s constructor checks.
+        (
+            "styleChecks",
+            Exact(
+                "IllegalArgumentException:Only combinations of \\n and \\r are allowed in newline.|IllegalArgumentException:Only combinations of spaces and tabs are allowed in indent.|NullPointerException:newline == null|NullPointerException:indent == null|ok|",
+            ),
+        ),
         // An interface a library class could gain is counted; Java's case is `F`.
         ("typeSwitch", CountedAs("F")),
     ];

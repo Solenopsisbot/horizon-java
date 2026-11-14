@@ -36,6 +36,21 @@ impl<H: Host> Runtime<'_, H> {
         {
             return self.gson_type_member(r, receiver, &node);
         }
+        // A jar's `new com.google.common.reflect.TypeToken<T>() {}`: a member its
+        // class does not declare is Guava `TypeToken`'s, whose `equals`/`hashCode`/
+        // `toString` would otherwise run as `Object`'s (#209).
+        if let Some(receiver) = receiver
+            && matches!(r.name.as_str(), "equals" | "hashCode" | "toString")
+            && crate::runtime::jar_object::object_key(receiver).is_some()
+            && self.gson_token_type(receiver).is_none()
+            && self.token_type(receiver).is_some()
+            && crate::runtime::jar_object::object_class(receiver).is_some_and(|class| {
+                self.member_owner(class, &r.name, &r.descriptor)
+                    .is_none_or(|(_, jar)| !jar)
+            })
+        {
+            return self.invoke_type_token(r, Some(receiver), args);
+        }
         let token_call = r.owner == TOKEN
             || receiver.is_some_and(|receiver| {
                 token_type(receiver).is_some()
@@ -69,6 +84,13 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(value) = args.first().filter(|value| **value != Value::Ref(None)) else {
                     return Err(npe());
                 };
+                // Text is a `Type` only as a class marker (a String cast to `Type` is
+                // Java's `ClassCastException`): counted otherwise.
+                if matches!(value, Value::Ref(Some(_)))
+                    && !crate::runtime::host_class::is_class(value, self.classes, &self.linked)
+                {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
                 return Ok(match canonicalize(value) {
                     Some(canonical) => Some(token(canonical)),
                     None => Some(self.host.unknown_operand_call(r)?),
@@ -175,10 +197,14 @@ impl<H: Host> Runtime<'_, H> {
             (
                 "getOwnerType",
                 "()Ljava/lang/reflect/Type;",
-                GenericType::Parameterized { owner, .. },
+                GenericType::Parameterized { owner, raw, .. },
             ) => match owner {
                 Some(owner) => part(receiver, 0, owner),
-                None => Value::Ref(None),
+                // A top-level class has no owner. A member type's owner the node does
+                // not hold (Gson copies the JDK's `getOwnerType()`, the declaring
+                // class): counted, as the JDK side is.
+                None if !raw.contains('$') => Value::Ref(None),
+                None => return self.host.unknown_operand_call(r).map(Some),
             },
             (
                 "getActualTypeArguments",

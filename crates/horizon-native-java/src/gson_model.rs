@@ -461,9 +461,15 @@ impl<H: Host> Runtime<'_, H> {
                         Value::Int(i32::from(style.space_after_separators))
                     }
                     ("withNewline", "(Ljava/lang/String;)Lcom/google/gson/FormattingStyle;") => {
+                        // `FormattingStyle`'s constructor checks (gson 2.14.0).
                         let Some(newline) = args.first().and_then(expect_ref) else {
-                            return Err(npe());
+                            return Err(npe_with("newline == null"));
                         };
+                        if !newline.chars().all(|c| matches!(c, '\r' | '\n')) {
+                            return Err(illegal_argument(
+                                "Only combinations of \\n and \\r are allowed in newline.",
+                            ));
+                        }
                         Formatting {
                             newline: newline.clone(),
                             ..style
@@ -472,8 +478,13 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     ("withIndent", "(Ljava/lang/String;)Lcom/google/gson/FormattingStyle;") => {
                         let Some(indent) = args.first().and_then(expect_ref) else {
-                            return Err(npe());
+                            return Err(npe_with("indent == null"));
                         };
+                        if !indent.chars().all(|c| matches!(c, ' ' | '\t')) {
+                            return Err(illegal_argument(
+                                "Only combinations of spaces and tabs are allowed in indent.",
+                            ));
+                        }
                         Formatting {
                             indent: indent.clone(),
                             ..style
@@ -1002,6 +1013,22 @@ impl<H: Host> Runtime<'_, H> {
 
 /// `java.lang.NullPointerException`, as Gson's `Objects.requireNonNull` raises
 /// it for a null builder argument.
+fn npe_with(message: &str) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/NullPointerException".into(),
+        message: Some(message.into()),
+        frame: None,
+    }
+}
+
+fn illegal_argument(message: &str) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/IllegalArgumentException".into(),
+        message: Some(message.into()),
+        frame: None,
+    }
+}
+
 fn npe() -> NativeError {
     NativeError::UncaughtException {
         class: "java/lang/NullPointerException".into(),

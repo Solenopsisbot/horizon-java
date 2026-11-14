@@ -299,7 +299,10 @@ impl<H: Host> Runtime<'_, H> {
                 let mut unknown = false;
                 for stored in table.order() {
                     let stored = parse_collection_value(&stored)?;
-                    if !matches!(&stored, Value::Host(other) if other.kind() == handle.kind()) {
+                    // Any handle: two kinds may be equal (Gson's canonical
+                    // `ParameterizedType` and the JDK's, #209). The key's row
+                    // answers for every other kind (`false`) quickly.
+                    if !matches!(&stored, Value::Host(_)) {
                         continue;
                     }
                     match handle.equals(&stored, &mut object_methods::RuntimeNested::new(self))? {

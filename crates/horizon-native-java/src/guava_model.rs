@@ -389,14 +389,14 @@ impl<H: Host> Runtime<'_, H> {
 
     /// The `Type` marker a token names: a `TypeToken.of` handle's
     /// (`host_type_token.rs`), or the type a jar subclass object captured.
-    fn token_type(&self, token: &Value) -> Option<Value> {
+    pub(crate) fn token_type(&self, token: &Value) -> Option<Value> {
         if let Some(inner) = crate::host_type_token::token_type(token) {
             return Some(inner);
         }
         let marker = crate::jar_object::object_key(token)?;
         self.fields
             .get(&format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"))
-            .filter(|inner| crate::host_reflect_type::type_node(inner).is_some())
+            .filter(|inner| crate::host_gson_type::any_node(inner).is_some())
             .cloned()
     }
 
@@ -428,7 +428,7 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    fn invoke_type_token(
+    pub(crate) fn invoke_type_token(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
@@ -440,12 +440,20 @@ impl<H: Host> Runtime<'_, H> {
                 "(Ljava/lang/Class;)Lcom/google/common/reflect/TypeToken;"
                 | "(Ljava/lang/reflect/Type;)Lcom/google/common/reflect/TypeToken;",
             ) => {
-                let Some(inner) = args
-                    .first()
-                    .filter(|value| crate::host_reflect_type::type_node(value).is_some())
-                else {
+                let Some(inner) = args.first().filter(|value| **value != Value::Ref(None)) else {
                     return Err(thrown("java/lang/NullPointerException", None));
                 };
+                // A `Type` the model holds: a class marker, a JDK or a Gson node;
+                // anything else (a String cast to `Type`, a jar's own `Type`) counted.
+                let modelled = match inner {
+                    Value::Ref(Some(_)) => {
+                        crate::host_class::is_class(inner, self.classes, &self.linked)
+                    }
+                    _ => crate::host_gson_type::any_node(inner).is_some(),
+                };
+                if !modelled {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
                 return Ok(Some(Self::token_value(inner)));
             }
             // `new TypeToken<T>() {}`: the anonymous subclass's generic
@@ -493,7 +501,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(inner) = receiver.and_then(|token| self.token_type(token)) else {
             return Ok(None);
         };
-        let Some(node) = crate::host_reflect_type::type_node(&inner) else {
+        let Some(node) = crate::host_gson_type::any_node(&inner) else {
             return Ok(None);
         };
         let class = match &node {
@@ -555,7 +563,9 @@ impl<H: Host> Runtime<'_, H> {
             }
             // `runtimeType.hashCode()`: a class's identity hash.
             ("hashCode", "()I") => return self.host.unknown_operand_call(r).map(Some),
-            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(generic_type_display(&node))),
+            ("toString", "()Ljava/lang/String;") => {
+                Value::Ref(Some(crate::host_type_token::guava_type_text(&node)))
+            }
             (
                 "isSubtypeOf" | "isSupertypeOf",
                 "(Lcom/google/common/reflect/TypeToken;)Z" | "(Ljava/lang/reflect/Type;)Z",
@@ -563,7 +573,7 @@ impl<H: Host> Runtime<'_, H> {
                 let other = args
                     .first()
                     .and_then(|value| self.token_type(value).or_else(|| Some(value.clone())))
-                    .and_then(|value| crate::host_reflect_type::type_node(&value))
+                    .and_then(|value| crate::host_gson_type::any_node(&value))
                     .ok_or_else(|| thrown("java/lang/NullPointerException", None))?;
                 let (sub, sup) = if r.name == "isSubtypeOf" {
                     (Self::raw_class(&node), Self::raw_class(&other))
