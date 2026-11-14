@@ -134,7 +134,7 @@ fn server_values_answer_as_java() {
     jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
         .unwrap();
     let listeners = host.game_listeners(jar, true).listeners;
-    let mut fire = |host: &mut StdHost, event: GameEvent, context: EventContext| {
+    let fire = |host: &mut StdHost, event: GameEvent, context: EventContext| {
         let mut firing = EventFiring::new(event, Arc::new(EventFacade::default()), context);
         for listener in listeners.iter().filter(|l| l.event == event) {
             jar.run_game_listener(listener, &mut firing, host, &ExecutionBudget::UNBOUNDED)
