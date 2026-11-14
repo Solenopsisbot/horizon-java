@@ -29,11 +29,7 @@ pub(crate) fn owner(value: &Value) -> Option<String> {
     }
     // Prefix families the host models before any class marker.
     let prefix = [
-        ("regex-pattern/", "java/util/regex/Pattern"),
         ("charset/", "java/nio/charset/Charset"),
-        ("coding-error-action/", "java/nio/charset/CodingErrorAction"),
-        ("locale/", "java/util/Locale"),
-        ("unicode-block/", "java/lang/Character$UnicodeBlock"),
         // `key + "=" + value` (`Map.entry`, an entry from `entrySet()`).
         ("map-entry/", "java/util/Map$Entry"),
     ];

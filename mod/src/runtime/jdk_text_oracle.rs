@@ -164,10 +164,13 @@ fn answered(result: Option<Result<Value, NativeError>>) -> Json {
         None => Json::from("unmodelled"),
         Some(Ok(Value::Int(value))) => Json::from(value),
         Some(Ok(Value::Ref(None))) => Json::Null,
-        Some(Ok(Value::Ref(Some(marker)))) => match marker.strip_prefix("unicode-block/") {
-            Some(block) => serde_json::json!({ "block": block }),
-            None => serde_json::json!({ "text": marker }),
-        },
+        Some(Ok(value @ Value::Host(_))) => {
+            match crate::runtime::host_jdk_constant::unicode_block_name(&value) {
+                Some(block) => serde_json::json!({ "block": block }),
+                None => serde_json::json!({ "text": crate::runtime::value_text(&value) }),
+            }
+        }
+        Some(Ok(Value::Ref(Some(marker)))) => serde_json::json!({ "text": marker }),
         Some(Err(NativeError::UncaughtException { class, message, .. })) => {
             serde_json::json!({ "throws": { "class": class, "message": message } })
         }
