@@ -788,35 +788,64 @@ impl<H: Host> Runtime<'_, H> {
             let equal = self.java_equals(receiver, other)?;
             return Ok(Some(Value::Int(i32::from(equal))));
         }
-        // `o.equals(x)` on a host collection typed `Object` (`Object o =
-        // List.of(1)`): the collection's own `equals` (`AbstractList`,
-        // `AbstractSet`, `AbstractMap`, an unmodifiable one's), which the call
-        // site's `Object` owner hid: it answered `Object.equals`, `==`. Asked
-        // again through the collection's interface, as a call site typed
-        // `List`/`Set`/`Map` asks it. A jar subclass with its own `equals`
-        // runs that instead (`equality_of`).
-        if r.owner == "java/lang/Object"
-            && r.name == "equals"
+        // `c.equals(x)` on a host collection: its real class's `equals`
+        // (#208 review B1). A list, set or map answers its interface's
+        // contract (`AbstractList`/`AbstractSet`/`AbstractMap`, and the
+        // immutable and unmodifiable ones that keep it), which is `false` for
+        // an argument of another family (`List.of(1).equals(Set.of(1))`);
+        // every other collection (`ArrayDeque`, `PriorityQueue`,
+        // `HashMap.values()`) keeps `Object.equals`, `==`. A call site typed
+        // `Object` reaches the family's models through its interface. A jar
+        // subclass with its own `equals` runs that instead (`equality_of`).
+        if r.name == "equals"
             && r.descriptor == EQUALS
             && matches!(opcode, 0xb6 | 0xb9)
-            && let Some(receiver) = receiver
+            && let (Some(receiver), [other]) = (receiver, args)
             && self.equality_of(receiver) == Equality::Host
-            && let Some(kind) = self.host_collection_kind(receiver)
+            && let Some(contract) = self.equality_contract(receiver)
         {
-            let typed = MethodRef {
-                owner: match kind {
-                    CollectionKind::List => "java/util/List",
-                    CollectionKind::Set => "java/util/Set",
-                    CollectionKind::Map => "java/util/Map",
+            let interface = match contract {
+                Contract::Identity => {
+                    return Ok(Some(Value::Int(i32::from(identical(receiver, other)))));
                 }
-                .into(),
-                name: r.name.clone(),
-                descriptor: r.descriptor.clone(),
+                Contract::List => "java/util/List",
+                Contract::Set => "java/util/Set",
+                Contract::Map => "java/util/Map",
             };
-            if let Some(answer) = self.invoke_list_equality(&typed, 0xb9, Some(receiver), args)? {
-                return Ok(Some(answer));
+            let same_family = match self.equality_contract(other) {
+                Some(theirs) => theirs == contract,
+                None if *other == Value::Ref(None) => false,
+                // A string, a box, a host model's other object: no collection.
+                None if !matches!(self.equality_of(other), Equality::Jar { .. })
+                    && !crate::jar_object::is_object(other) =>
+                {
+                    false
+                }
+                // A jar object: a `List` only if its class is one.
+                None => match self.known_instance_of(other, interface) {
+                    Some(is) => is,
+                    None => {
+                        self.host.unknown_operand_call(r)?;
+                        return Ok(Some(Value::Int(0)));
+                    }
+                },
+            };
+            if !same_family {
+                return Ok(Some(Value::Int(0)));
             }
-            return self.host.invoke_instance(&typed, receiver, args).map(Some);
+            if r.owner == "java/lang/Object" {
+                let typed = MethodRef {
+                    owner: interface.into(),
+                    name: r.name.clone(),
+                    descriptor: r.descriptor.clone(),
+                };
+                if let Some(answer) =
+                    self.invoke_list_equality(&typed, 0xb9, Some(receiver), args)?
+                {
+                    return Ok(Some(answer));
+                }
+                return self.host.invoke_instance(&typed, receiver, args).map(Some);
+            }
         }
         self.invoke_list_equality(r, opcode, receiver, args)
     }
@@ -840,6 +869,15 @@ fn platform_equal(a: &Value, b: &Value) -> bool {
         }
         (a, b) => a == b,
     }
+}
+
+/// Whose `equals` a collection runs ([`Runtime::equality_contract`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Contract {
+    List,
+    Set,
+    Map,
+    Identity,
 }
 
 /// The JDK collection families [`Runtime::host_collection_kind`] tells apart.
@@ -888,6 +926,38 @@ impl<H: Host> Runtime<'_, H> {
         }
         (class.starts_with("java/util/") && self.host.mutable_collection_values(value).is_some())
             .then_some(class)
+    }
+
+    /// Whose `equals` a host collection runs, by its real class: a list's,
+    /// a set's or a map's contract, or `Object`'s identity (`ArrayDeque`,
+    /// `PriorityQueue`, a map's `values()`). `None` for a value that is no
+    /// host collection, or one whose class's family is not known.
+    pub(crate) fn equality_contract(&self, value: &Value) -> Option<Contract> {
+        let class = self.host_collection_class(value)?;
+        // A map's view copy stands in for its view (`hash_collections.rs`):
+        // `keySet()`/`entrySet()` are `AbstractSet`s, `values()` an
+        // `AbstractCollection` (identity).
+        if let Some(marker) = expect_ref(value)
+            && let Some(kind) = self.host.view_copy_kind(marker)
+        {
+            return Some(match kind.as_str() {
+                "values" => Contract::Identity,
+                _ => Contract::Set,
+            });
+        }
+        let is = |wanted: &str| crate::jdk_model::class_instance_of(&class, wanted);
+        if is("java/util/List") {
+            Some(Contract::List)
+        } else if is("java/util/Set") {
+            Some(Contract::Set)
+        } else if is("java/util/Map") {
+            Some(Contract::Map)
+        } else if crate::jdk_closure::class(&class).is_some() {
+            // A JDK collection of Java 25's table that is none of the three.
+            Some(Contract::Identity)
+        } else {
+            None
+        }
     }
 
     /// Whether a host collection is a list, a set or a map.

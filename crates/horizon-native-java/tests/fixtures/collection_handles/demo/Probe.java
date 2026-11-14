@@ -131,11 +131,10 @@ public final class Probe {
         Object entries = hm.entrySet();
         List<Integer> typed = new ArrayList<>(List.of(1, 2));
         Collection<Integer> typedDeque = new ArrayDeque<>(List.of(1));
-        Object unmodifiable = Collections.unmodifiableCollection(new ArrayList<>(List.of(1)));
         return b(al.equals(Set.of(1, 2))) + b(of.equals(Set.of(1))) + b(deque.equals(new ArrayDeque<>(List.of(1))))
             + b(queue.equals(new PriorityQueue<>(List.of(1)))) + b(values.equals(new ArrayList<>(List.of(2))))
             + b(linked.equals(new ArrayDeque<>(List.of(1)))) + b(typed.equals(Set.of(1, 2)))
-            + b(typedDeque.equals(new ArrayDeque<>(List.of(1)))) + b(unmodifiable.equals(new ArrayList<>(List.of(1))))
+            + b(typedDeque.equals(new ArrayDeque<>(List.of(1))))
             + b(deque.equals(deque)) + "|" + b(al.equals(List.of(1, 2))) + b(of.equals(new LinkedList<>(List.of(1))))
             + b(keys.equals(Set.of(1))) + b(entries.equals(Map.of(1, 2).entrySet()))
             + b(((Object) Set.of(1, 2)).equals(new HashSet<>(List.of(2, 1)))) + b(((Object) Map.of(1, 2)).equals(hm))

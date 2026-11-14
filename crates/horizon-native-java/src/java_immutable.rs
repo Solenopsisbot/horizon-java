@@ -93,9 +93,11 @@ fn made_class(owner: &str, name: &str, kind: &str, size: usize) -> &'static str 
         ("com/google/common/collect/ImmutableSet", _, _) => {
             "com/google/common/collect/RegularImmutableSet"
         }
-        ("java/util/List", "of" | "copyOf", _) if matches!(size, 1 | 2) => {
-            "java/util/ImmutableCollections$List12"
-        }
+        (
+            "java/util/List" | "java/util/stream/Collectors",
+            "of" | "copyOf" | "toUnmodifiableList",
+            _,
+        ) if matches!(size, 1 | 2) => "java/util/ImmutableCollections$List12",
         ("java/util/Set", "of" | "copyOf", _) if matches!(size, 1 | 2) => {
             "java/util/ImmutableCollections$Set12"
         }
@@ -106,24 +108,29 @@ fn made_class(owner: &str, name: &str, kind: &str, size: usize) -> &'static str 
     }
 }
 
-/// Whether the factory `owner.name` answers one shared object when empty:
-/// the JDK's `ImmutableCollections.EMPTY_*` and `Collections.EMPTY_*`, and
-/// Guava's `RegularImmutableList.EMPTY`/`RegularImmutableSet.EMPTY`. Not
-/// `Stream.toList()`, which makes a new `ListN` each time.
-fn shares_empty(owner: &str, name: &str) -> bool {
-    matches!(
-        (owner, name),
-        (
-            "java/util/List" | "java/util/Set" | "java/util/Map",
-            "of" | "copyOf"
-        ) | (
-            "java/util/Collections",
-            "emptyList" | "emptySet" | "emptyMap"
-        ) | (
-            "com/google/common/collect/ImmutableList" | "com/google/common/collect/ImmutableSet",
-            "of" | "copyOf"
-        )
-    )
+/// The shared object the factory `owner.name` answers when empty, by the
+/// field Java 25 keeps it in: `List.of()`, `List.copyOf` of an empty one and
+/// `Collectors.toUnmodifiableList()` are `ImmutableCollections.EMPTY_LIST`
+/// (one object); `Stream.toList()` is the nulls-allowed `EMPTY_LIST_NULLS`,
+/// another (`Stream.of().toList() != List.of()`); `Collections.empty*()` are
+/// `Collections.EMPTY_*`; Guava's are `RegularImmutableList.EMPTY` and
+/// `RegularImmutableSet.EMPTY`. `None` for a factory that makes a new one.
+fn shared_empty(owner: &str, name: &str, kind: &str) -> Option<&'static str> {
+    Some(match (owner, name, kind) {
+        ("java/util/List", "of" | "copyOf", _)
+        | ("java/util/stream/Collectors", "toUnmodifiableList", _) => {
+            "ImmutableCollections.EMPTY_LIST"
+        }
+        ("java/util/Set", "of" | "copyOf", _) => "ImmutableCollections.EMPTY_SET",
+        ("java/util/Map", "of" | "copyOf", _) => "ImmutableCollections.EMPTY_MAP",
+        ("java/util/stream/Stream", "toList", _) => "ImmutableCollections.EMPTY_LIST_NULLS",
+        ("java/util/Collections", "emptyList", _) => "Collections.EMPTY_LIST",
+        ("java/util/Collections", "emptySet", _) => "Collections.EMPTY_SET",
+        ("java/util/Collections", "emptyMap", _) => "Collections.EMPTY_MAP",
+        ("com/google/common/collect/ImmutableList", _, _) => "RegularImmutableList.EMPTY",
+        ("com/google/common/collect/ImmutableSet", _, _) => "RegularImmutableSet.EMPTY",
+        _ => return None,
+    })
 }
 
 /// The class `Collections.unmodifiable{List,Set,Map}(source)` makes: a
@@ -143,6 +150,39 @@ fn view_class(kind: &str, source_class: Option<&str>) -> &'static str {
         "set" => "java/util/Collections$UnmodifiableSet",
         _ => "java/util/Collections$UnmodifiableMap",
     }
+}
+
+/// The nested JDK classes the host's collections are made as (above, the
+/// reversed views of `sequenced.rs`): each a static member class, so its
+/// `getSimpleName()` is the part after the `$` and its `getCanonicalName()`
+/// the binary name with `.` for `$` (`java.util.ImmutableCollections.List12`),
+/// as Java 25 answers. `None` for any other class name (dotted, as
+/// `Class.getName` gives it).
+pub(crate) fn member_class_names(name: &str) -> Option<(String, String)> {
+    const MEMBERS: &[&str] = &[
+        "java.util.ImmutableCollections$ListN",
+        "java.util.ImmutableCollections$List12",
+        "java.util.ImmutableCollections$SetN",
+        "java.util.ImmutableCollections$Set12",
+        "java.util.ImmutableCollections$MapN",
+        "java.util.ImmutableCollections$Map1",
+        "java.util.Collections$EmptyList",
+        "java.util.Collections$EmptySet",
+        "java.util.Collections$EmptyMap",
+        "java.util.Collections$SingletonList",
+        "java.util.Collections$SingletonSet",
+        "java.util.Collections$SingletonMap",
+        "java.util.Collections$UnmodifiableList",
+        "java.util.Collections$UnmodifiableRandomAccessList",
+        "java.util.Collections$UnmodifiableSet",
+        "java.util.Collections$UnmodifiableMap",
+        "java.util.ReverseOrderListView$Rand",
+        "java.util.LinkedList$ReverseOrderLinkedListView",
+    ];
+    MEMBERS.contains(&name).then(|| {
+        let simple = name.rsplit('$').next().unwrap_or(name).to_owned();
+        (simple, name.replace('$', "."))
+    })
 }
 
 /// The supertypes `instanceof` sees for one of the classes above, the
@@ -242,7 +282,7 @@ impl StdHost {
 
     /// What the factory `owner.name` answers for `values`: the class Java
     /// makes ([`made_class`]), and for an empty one a factory shares
-    /// ([`shares_empty`]) that one object, made once per class.
+    /// ([`shared_empty`]) that one object, made once.
     fn unmodifiable_from(
         &mut self,
         owner: &str,
@@ -256,22 +296,41 @@ impl StdHost {
             values.len()
         };
         let class = made_class(owner, name, kind, size);
-        if size == 0 && shares_empty(owner, name) {
-            if let Some(shared) = self.shared_empties.get(class) {
+        if size == 0
+            && let Some(field) = shared_empty(owner, name, kind)
+        {
+            if let Some(shared) = self.shared_empties.get(field) {
                 return crate::jar_object::collection(shared.clone());
             }
             let made = self.unmodifiable_as(class, values);
             if let Some(key) = expect_ref(&made) {
-                self.shared_empties.insert(class, key.clone());
+                self.shared_empties.insert(field, key.clone());
             }
             return made;
         }
         self.unmodifiable_as(class, values)
     }
 
+    /// [`Self::unmodifiable_from`] for a collector's result
+    /// (`Host::factory_collection`): `Collectors.toUnmodifiableList()` builds
+    /// the JDK's null-hostile `List.of` list.
+    pub(crate) fn factory_unmodifiable(
+        &mut self,
+        owner: &str,
+        name: &str,
+        kind: &str,
+        values: Vec<Value>,
+    ) -> Value {
+        let made = self.unmodifiable_from(owner, name, kind, values);
+        if owner == "java/util/stream/Collectors" {
+            self.mark_jdk_list_of(&made);
+        }
+        made
+    }
+
     /// An unmodifiable `kind` for the stream terminals
-    /// (`Host::unmodifiable_list`): `Stream.toList()`'s `ListN`, new each
-    /// time.
+    /// (`Host::unmodifiable_list`): `Stream.toList()`'s nulls-allowed `ListN`,
+    /// new each time but for the one shared empty one.
     pub(crate) fn unmodifiable_values(&mut self, kind: &str, values: Vec<Value>) -> Value {
         self.unmodifiable_from("java/util/stream/Stream", "toList", kind, values)
     }
@@ -281,6 +340,59 @@ impl StdHost {
         crate::host_collection_values(self, value)
     }
 
+    /// Whether `owner.name(arg)` answers `arg` itself, as Java 25 does for a
+    /// collection that already is what it would make: `List.copyOf` of a
+    /// `List.of` list (`List12`, or a `ListN` that rejects `null`, not
+    /// `Stream.toList()`'s), `Set.copyOf`/`Map.copyOf` of a `Set.of`/`Map.of`
+    /// one, `Collections.unmodifiable{List,Set,Map}` of a view of exactly that
+    /// class, and Guava's `copyOf` of its own immutable list or set.
+    fn returns_argument(&self, owner: &str, name: &str, arg: &Value) -> bool {
+        let Value::Host(handle) = arg else {
+            return false;
+        };
+        if handle.kind() != crate::host_ref::HostKind::Collection {
+            return false;
+        }
+        let class = crate::jar_object::collection_class(handle.key());
+        match (owner, name) {
+            ("java/util/List", "copyOf") => {
+                class == "java/util/ImmutableCollections$List12"
+                    || (class == "java/util/ImmutableCollections$ListN"
+                        && self.jdk_list_of.contains(handle.key()))
+            }
+            ("java/util/Set", "copyOf") => matches!(
+                class,
+                "java/util/ImmutableCollections$Set12" | "java/util/ImmutableCollections$SetN"
+            ),
+            ("java/util/Map", "copyOf") => matches!(
+                class,
+                "java/util/ImmutableCollections$Map1" | "java/util/ImmutableCollections$MapN"
+            ),
+            ("java/util/Collections", "unmodifiableList") => matches!(
+                class,
+                "java/util/Collections$UnmodifiableList"
+                    | "java/util/Collections$UnmodifiableRandomAccessList"
+            ),
+            ("java/util/Collections", "unmodifiableSet") => {
+                class == "java/util/Collections$UnmodifiableSet"
+            }
+            ("java/util/Collections", "unmodifiableMap") => {
+                class == "java/util/Collections$UnmodifiableMap"
+            }
+            ("com/google/common/collect/ImmutableList", "copyOf") => matches!(
+                class,
+                "com/google/common/collect/RegularImmutableList"
+                    | "com/google/common/collect/SingletonImmutableList"
+            ),
+            ("com/google/common/collect/ImmutableSet", "copyOf") => matches!(
+                class,
+                "com/google/common/collect/RegularImmutableSet"
+                    | "com/google/common/collect/SingletonImmutableSet"
+            ),
+            _ => false,
+        }
+    }
+
     /// The unmodifiable factories, or `None` for any other static call.
     pub(crate) fn unmodifiable_factory(
         &mut self,
@@ -288,6 +400,12 @@ impl StdHost {
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
         let varargs = r.descriptor.starts_with("([");
+        if let Some(arg) = args.first()
+            && args.len() == 1
+            && self.returns_argument(&r.owner, &r.name, arg)
+        {
+            return Some(Ok(arg.clone()));
+        }
         let kind = match (r.owner.as_str(), r.name.as_str()) {
             ("java/util/List", "of") | ("com/google/common/collect/ImmutableList", "of")
                 if !varargs =>

@@ -2646,6 +2646,20 @@ pub trait Host {
         None
     }
 
+    /// The unmodifiable `kind` the factory `owner.name` answers for `values`
+    /// (`Collectors.toUnmodifiableList()`, Guava's `toImmutableList()`): its
+    /// class and, when empty, the factory's one shared object
+    /// (`java_immutable.rs`), for a host that models one.
+    fn factory_collection(
+        &mut self,
+        _owner: &str,
+        _name: &str,
+        _kind: &str,
+        _values: Vec<Value>,
+    ) -> Option<Value> {
+        None
+    }
+
     /// How many unknown host calls this host has counted (each answered with
     /// a neutral value), for a model that must not build a verdict on one.
     fn counted_unknown_calls(&self) -> usize {
@@ -2891,10 +2905,10 @@ pub struct StdHost {
     /// `Collections.emptyList()`/`emptySet()`/`emptyMap()` markers, whose
     /// mutators JDK 25 does not all refuse (`java_immutable.rs`).
     empty_collections: std::collections::BTreeSet<String>,
-    /// The one object each factory with a shared empty answers for it
-    /// (`List.of()` is `ImmutableCollections.EMPTY_LIST`,
-    /// `Collections.emptyList()` is `Collections.EMPTY_LIST`): its key, by
-    /// class (`java_immutable.rs`).
+    /// The JDK's (and Guava's) shared empty collections, by the field each
+    /// is (`ImmutableCollections.EMPTY_LIST` for `List.of()`, `Collections.
+    /// EMPTY_LIST` for `Collections.emptyList()`): its key, made on first use
+    /// (`java_immutable.rs`).
     shared_empties: BTreeMap<&'static str, String>,
     /// The JDK's own `List.of`/`List.copyOf` lists among the unmodifiable
     /// ones (`java_immutable.rs`); `list_equality.rs` runs their
@@ -4741,6 +4755,16 @@ impl Host for StdHost {
         Some(self.unmodifiable_values("list", values))
     }
 
+    fn factory_collection(
+        &mut self,
+        owner: &str,
+        name: &str,
+        kind: &str,
+        values: Vec<Value>,
+    ) -> Option<Value> {
+        Some(self.factory_unmodifiable(owner, name, kind, values))
+    }
+
     fn payload_type_id(&self, marker: &str) -> Option<String> {
         self.packet_types.get(marker).cloned()
     }
@@ -5477,18 +5501,19 @@ impl Host for StdHost {
                 "toUnmodifiableSet",
                 "()Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some("collector/unmodifiable-set".into()))),
-            // An unmodifiable list that rejects `null` (`List.of`'s
-            // `ListN`; Guava's `ImmutableList` is the host's same shape).
+            // An unmodifiable list that rejects `null`: `List.of`'s
+            // (`List12`/`ListN`, `List.of()` itself when empty), and Guava's
+            // `ImmutableList` (`java_immutable.rs`).
             (
                 "java/util/stream/Collectors",
                 "toUnmodifiableList",
                 "()Ljava/util/stream/Collector;",
-            )
-            | (
+            ) => Ok(Value::Ref(Some("collector/unmodifiable-list".into()))),
+            (
                 "com/google/common/collect/ImmutableList",
                 "toImmutableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/unmodifiable-list".into()))),
+            ) => Ok(Value::Ref(Some("collector/immutable-list".into()))),
             (
                 "com/google/common/collect/ImmutableSet",
                 "toImmutableSet",
@@ -7885,12 +7910,23 @@ impl Host for StdHost {
                     .map_or(Value::Ref(None), |(parent, _)| path_value(parent)))
             }
             ("java/lang/Class", "getName", "()Ljava/lang/String;")
-            | ("java/lang/Class", "getTypeName", "()Ljava/lang/String;")
-            | ("java/lang/Class", "getCanonicalName", "()Ljava/lang/String;") => {
+            | ("java/lang/Class", "getTypeName", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some(class_binary_name(receiver))))
+            }
+            // A nested class the host's collections are made as answers its
+            // exact names (`java_immutable::member_class_names`).
+            ("java/lang/Class", "getCanonicalName", "()Ljava/lang/String;") => {
+                let name = class_binary_name(receiver);
+                Ok(Value::Ref(Some(
+                    java_immutable::member_class_names(&name)
+                        .map_or(name, |(_, canonical)| canonical),
+                )))
             }
             ("java/lang/Class", "getSimpleName", "()Ljava/lang/String;") => {
                 let name = class_binary_name(receiver);
+                if let Some((simple, _)) = java_immutable::member_class_names(&name) {
+                    return Ok(Value::Ref(Some(simple)));
+                }
                 Ok(Value::Ref(Some(
                     name.rsplit('.').next().unwrap_or(&name).to_owned(),
                 )))
@@ -23949,7 +23985,7 @@ impl<H: Host> Runtime<'_, H> {
                 match collector.as_str() {
                     // `ArrayList::new`, `List::add`: a list of its own.
                     "collector/list" => self.new_array_list(values),
-                    "collector/unmodifiable-list" => {
+                    collector @ ("collector/unmodifiable-list" | "collector/immutable-list") => {
                         if values.contains(&Value::Ref(None)) {
                             return Err(NativeError::UncaughtException {
                                 class: "java/lang/NullPointerException".into(),
@@ -23957,7 +23993,15 @@ impl<H: Host> Runtime<'_, H> {
                                 frame: None,
                             });
                         }
-                        self.unmodifiable_list(values)
+                        let (owner, name) = if collector == "collector/unmodifiable-list" {
+                            ("java/util/stream/Collectors", "toUnmodifiableList")
+                        } else {
+                            ("com/google/common/collect/ImmutableList", "toImmutableList")
+                        };
+                        let fallback = collection_value("list", &values);
+                        self.host
+                            .factory_collection(owner, name, "list", values)
+                            .unwrap_or(fallback)
                     }
                     // `HashSet::new` (`hash_bulk.rs`).
                     "collector/set" => self.hash_set_collect(&values)?,
