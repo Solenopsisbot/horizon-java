@@ -367,7 +367,7 @@ impl<H: Host> Runtime<'_, H> {
             | "(Ljava/io/Reader;Ljava/lang/reflect/Type;)Ljava/lang/Object;" => true,
             _ => return Ok(None),
         };
-        let Some(class) = args.get(1).and_then(expect_ref).cloned() else {
+        let Some(class) = args.get(1).and_then(crate::runtime::host_class::class_name).map(str::to_owned) else {
             return Ok(None);
         };
         if !tree_class(&class) {

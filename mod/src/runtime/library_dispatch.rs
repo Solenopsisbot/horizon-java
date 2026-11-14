@@ -510,7 +510,7 @@ impl<H: Host> Runtime<'_, H> {
                     || self.host.host_instance_of(marker, wanted)
                     || crate::runtime::jdk_model::platform_instance_of(marker, wanted)
                     || (wanted == "java/lang/Class"
-                        && class_marker_like(marker, self.classes, &self.linked))
+                        && crate::runtime::host_class::is_class(value, self.classes, &self.linked))
             })
     }
 

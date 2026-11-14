@@ -21157,7 +21157,7 @@ impl<H: Host> Runtime<'_, H> {
             let Some(node) = receiver.and_then(host_reflect_type::handle_node) else {
                 // A type that is a class is an ordinary class marker; only its
                 // name is a `Type` question this surface owns.
-                let marker = receiver.and_then(expect_ref);
+                let marker = receiver.and_then(host_class::class_name);
                 if r.name == "getTypeName" && r.descriptor == "()Ljava/lang/String;" {
                     return Ok(marker
                         .filter(|marker| !marker.is_empty())
@@ -21170,15 +21170,23 @@ impl<H: Host> Runtime<'_, H> {
                 // (text until P13): counted, never `true` from the text.
                 if r.name == "equals"
                     && r.descriptor == "(Ljava/lang/Object;)Z"
+                    && let Some(receiver) = receiver
+                        .filter(|receiver| host_class::is_class(receiver, self.classes, &self.linked))
                     && let Some(marker) = marker
-                        .filter(|marker| class_marker_like(marker, self.classes, &self.linked))
                 {
                     let other = args.first().unwrap_or(&Value::Ref(None));
                     return Ok(match other {
-                        Value::Ref(Some(other))
-                            if class_marker_like(other, self.classes, &self.linked) =>
-                        {
-                            (other != marker).then_some(Value::Int(0))
+                        other if host_class::is_class(other, self.classes, &self.linked) => {
+                            let both_handles = matches!(
+                                (receiver, other),
+                                (Value::Host(_), Value::Host(_))
+                            );
+                            match host_class::class_name(other) {
+                                Some(name) if name != marker => Some(Value::Int(0)),
+                                // Two `Class` handles of one name: one object.
+                                _ if both_handles => Some(Value::Int(1)),
+                                _ => None,
+                            }
                         }
                         Value::Ref(None) | Value::Host(_) => Some(Value::Int(0)),
                         // A string or a jar object: no class marker.
@@ -24985,7 +24993,11 @@ impl<H: Host> Runtime<'_, H> {
                                     || self.host.host_instance_of(marker, &wanted)
                                     || jdk_model::platform_instance_of(marker, &wanted)
                                     || (wanted == "java/lang/Class"
-                                        && class_marker_like(marker, self.classes, &self.linked))
+                                        && host_class::is_class(
+                                            &value,
+                                            self.classes,
+                                            &self.linked,
+                                        ))
                             });
                     // A `false` no model can stand behind is counted
                     // (`checkcast.rs`), and the host's answer is the result.

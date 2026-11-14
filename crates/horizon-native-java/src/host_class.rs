@@ -56,14 +56,6 @@ pub(crate) fn class_name(value: &Value) -> Option<&str> {
     }
 }
 
-/// [`class_name`] of a `Class` handle only.
-pub(crate) fn handle_class_name(value: &Value) -> Option<&str> {
-    match value {
-        Value::Host(handle) if handle.kind() == HostKind::Class => Some(handle.key()),
-        _ => None,
-    }
-}
-
 /// Whether `value` is a `Class`: a handle, or (until #156 P13c) text shaped
 /// like a class marker (`class_marker_like`: a held or linked class, a
 /// primitive, an array descriptor, an internal name that is no host marker).
@@ -114,10 +106,8 @@ mod tests {
         assert_eq!(left.same_object(right), Some(true));
         assert_eq!(left.class(), Some(CLASS));
         assert_eq!(class_name(&a), Some("demo/Foo"));
-        assert_eq!(handle_class_name(&a), Some("demo/Foo"));
         let text = Value::Ref(Some("demo/Foo".into()));
         assert_eq!(class_name(&text), Some("demo/Foo"));
-        assert_eq!(handle_class_name(&text), None);
         assert_eq!(class_name(&Value::Int(1)), None);
         assert_eq!(
             class_name(&class_value("[Ljava/lang/String;")),
