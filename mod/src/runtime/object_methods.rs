@@ -924,8 +924,7 @@ impl<H: Host> Runtime<'_, H> {
                 None => break,
             }
         }
-        (class.starts_with("java/util/") && self.host.mutable_collection_values(value).is_some())
-            .then_some(class)
+        (class.starts_with("java/util/") && self.host.holds_collection(value)).then_some(class)
     }
 
     /// Whose `equals` a host collection runs, by its real class: a list's,
