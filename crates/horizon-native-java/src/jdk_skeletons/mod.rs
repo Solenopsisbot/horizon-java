@@ -552,8 +552,21 @@ impl<H: Host> Runtime<'_, H> {
                 &other,
                 &[],
             )?;
-            let equal = mine == theirs
-                || (mine != Value::Ref(None) && self.virtual_equals(&mine, &theirs)?);
+            // `IdentityHashMap.EntryIterator.Entry.equals` compares `e.getKey() == key` and
+            // `e.getValue() == value` (#221 review B1): by reference, counted where this model
+            // keeps no identity (two texts or boxes).
+            let equal = if crate::host_map_entry::is_identity_entry(this) {
+                match crate::host_map_entry::same_reference(&mine, &theirs) {
+                    Some(equal) => equal,
+                    None => {
+                        self.host.unknown_operand_call(r)?;
+                        return Ok(Some(boolean(false)));
+                    }
+                }
+            } else {
+                mine == theirs
+                    || (mine != Value::Ref(None) && self.virtual_equals(&mine, &theirs)?)
+            };
             if !equal {
                 return Ok(Some(boolean(false)));
             }

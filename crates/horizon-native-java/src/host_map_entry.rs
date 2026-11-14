@@ -149,6 +149,37 @@ fn entry_mode(map_class: &str) -> Option<(&'static str, Mode)> {
     })
 }
 
+/// What two readings of one mapping of a map this model does not follow are (Java 25 and the
+/// libraries' own classes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpaqueReading {
+    /// A new entry per `next()`: `Collections.unmodifiableMap`'s `UnmodifiableEntry` and
+    /// `checkedMap`'s `CheckedEntry` wrap the map's entry afresh.
+    New,
+    /// The map's stored entry, one object while the map has no structural change:
+    /// `Collections.singletonMap`'s cached `SimpleImmutableEntry`, a host literal (Guava's
+    /// `ImmutableMap.of`, whose `ImmutableMapEntry` array `entrySet()` walks), Gson's
+    /// `LinkedTreeMap` node.
+    Stored,
+    /// Not known: one key per mapping, a fresh origin per reading (`==` counted).
+    Unknown,
+}
+
+fn opaque_reading(map: &str, view: bool) -> OpaqueReading {
+    let class = class_of_marker(map);
+    if view || class.starts_with("java/util/Collections$Checked") {
+        OpaqueReading::New
+    } else if class == "java/util/Collections$SingletonMap"
+        || class == crate::gson_tree::TREE_MAP
+        // A host literal (`map/k,v...`): an immutable map the host keeps no row for.
+        || (!map.is_empty() && !map.contains('#'))
+    {
+        OpaqueReading::Stored
+    } else {
+        OpaqueReading::Unknown
+    }
+}
+
 fn class_of_marker(marker: &str) -> &str {
     marker.rsplit_once('#').map_or("", |(class, _)| class)
 }
@@ -198,9 +229,20 @@ struct EntryState {
 #[derive(Clone, Debug, PartialEq)]
 struct Before {
     stamp: ModStamp,
-    /// Each live node's key and value, for a call that may remove keys; `None` for one that only
-    /// reads, inserts or replaces values (`put`, `get`...), after which every node is still there.
-    taken: Option<Vec<(String, Value, Value)>>,
+    /// The live nodes the call may remove, with the key and value each held (what a removed node
+    /// keeps); `None` for a call that only reads, inserts or replaces values (`put`, `get`...),
+    /// after which every node is still there.
+    taken: Option<Taken>,
+}
+
+/// The nodes a removing call may remove.
+#[derive(Clone, Debug, PartialEq)]
+enum Taken {
+    /// Any of them (`clear`, `removeIf`, a `TreeMap`'s `deleteEntry`...): every live node.
+    All(HashMap<String, (Value, Value)>),
+    /// Only the node of the one key `remove(key)` names, if it has one (#221 review B3: a
+    /// `remove` after an `entrySet()` walk looks at that node, never every node the walk made).
+    Key(Option<(String, Value, Value)>),
 }
 
 /// The entries the host made, by handle key.
@@ -467,19 +509,50 @@ impl StdHost {
             // the map it wraps (`UnmodifiableEntry` delegates to that map's entry).
             let source = crate::Host::unmodifiable_view_source(self, &map);
             let view = source.is_some();
-            let watched = source.unwrap_or(map);
+            let reading = opaque_reading(&map, view);
+            let watched = source.unwrap_or_else(|| map.clone());
             let stamp = self.mod_stamp_of(&watched);
+            let life = Life::Opaque {
+                map: watched,
+                stamp,
+                view,
+            };
+            // One key per mapping (#221 review B4): a stored entry is one object across
+            // readings, so a reading never makes a new key for it.
+            let name = format!("o{}", crate::value_marker(key));
+            let known = (reading != OpaqueReading::New)
+                .then(|| self.map_entries.nodes.get(&map)?.get(&name).cloned())
+                .flatten()
+                .filter(|entry_key| self.map_entries.states.contains_key(entry_key));
+            if let Some(entry_key) = known {
+                let known = self
+                    .map_entries
+                    .states
+                    .get_mut(&entry_key)
+                    .expect("checked");
+                let same = reading == OpaqueReading::Stored && known.life == life;
+                known.value = value.clone();
+                known.life = life;
+                // The stored entry while the map has had no structural change; otherwise (or
+                // for a class whose readings are not known) the same key with a fresh origin,
+                // so `==` with an earlier reading is counted.
+                if same {
+                    return known.handle.clone();
+                }
+                return Value::Host(HostRef::new(HostKind::OpaqueMapEntry, entry_key));
+            }
             let entry_key = self.mint_key(OPAQUE, true);
             let handle = Value::Host(HostRef::new(HostKind::OpaqueMapEntry, entry_key.clone()));
-            let opaque = state(
-                Life::Opaque {
-                    map: watched,
-                    stamp,
-                    view,
-                },
-                &handle,
-            );
-            self.map_entries.states.insert(entry_key, opaque);
+            self.map_entries
+                .states
+                .insert(entry_key.clone(), state(life, &handle));
+            if reading != OpaqueReading::New {
+                self.map_entries
+                    .nodes
+                    .entry(map)
+                    .or_default()
+                    .insert(name, entry_key);
+            }
             return handle;
         };
         let nulls = match mode {
@@ -800,9 +873,10 @@ impl StdHost {
         }
     }
 
-    /// Before the call `name` on `map`: where its live entries stand. A call that may remove a
-    /// key also takes each live node's key and value (what a removed node keeps).
-    pub(crate) fn entries_before_call(&mut self, map: &str, name: &str) {
+    /// Before the call `name(args)` on `map`: where its live entries stand. A call that may
+    /// remove a key also takes the key and value of each live node it may remove (what a removed
+    /// node keeps).
+    pub(crate) fn entries_before_call(&mut self, map: &str, name: &str, args: &[Value]) {
         if self
             .map_entries
             .by_map
@@ -817,16 +891,44 @@ impl StdHost {
             self.lose_live_of(map);
             return;
         }
+        // `remove(key)`/`remove(key, value)` on a hash map runs no callback and can remove only
+        // the node of `key`, found by the node index (a tree's `deleteEntry` may free its
+        // successor's node instead, so a tree takes every node).
+        let one_key = name == "remove"
+            && matches!(args.len(), 1 | 2)
+            && self.red_black_trees.get(map).is_none()
+            && entry_mode(class_of_marker(map)).is_some_and(|(class, mode)| {
+                class != "java/util/TreeMap$Entry" && matches!(mode, Mode::Node { .. })
+            });
         let taken = may_remove(name).then(|| {
-            self.map_entries
-                .live_of(map)
-                .into_iter()
-                .filter_map(|entry_key| {
-                    let handle = self.map_entries.states.get(&entry_key)?.handle.clone();
-                    let (key, value) = self.map_entry_now(&handle)?;
+            if one_key {
+                let node = args.first().and_then(|key| {
+                    let entry_key = self
+                        .map_entries
+                        .nodes
+                        .get(map)?
+                        .get(&format!("k{}", crate::value_marker(key)))?
+                        .clone();
+                    let state = self.map_entries.states.get(&entry_key)?;
+                    if !matches!(state.life, Life::Live { .. }) {
+                        return None;
+                    }
+                    let (key, value) = self.map_entry_now(&state.handle.clone())?;
                     Some((entry_key, key, value))
-                })
-                .collect()
+                });
+                return Taken::Key(node);
+            }
+            Taken::All(
+                self.map_entries
+                    .live_of(map)
+                    .into_iter()
+                    .filter_map(|entry_key| {
+                        let handle = self.map_entries.states.get(&entry_key)?.handle.clone();
+                        let (key, value) = self.map_entry_now(&handle)?;
+                        Some((entry_key, (key, value)))
+                    })
+                    .collect(),
+            )
         });
         self.map_entries
             .before
@@ -852,9 +954,30 @@ impl StdHost {
             self.lose_live_of(map);
             return;
         }
-        let Some(taken) = before.taken else {
-            self.map_entries.followed.insert(map.to_owned(), now);
-            return;
+        let taken = match before.taken {
+            None => {
+                self.map_entries.followed.insert(map.to_owned(), now);
+                return;
+            }
+            Some(Taken::Key(node)) => {
+                // Every other node is still there; only this one may be gone.
+                if let Some((entry_key, key, value)) = node
+                    && self.entry_map_value(map, &key, 0).is_none()
+                {
+                    if let Some(state) = self.map_entries.states.get_mut(&entry_key) {
+                        state.key = key.clone();
+                        state.value = value;
+                    }
+                    self.map_entries.set_life(&entry_key, Life::Detached);
+                    // Never handed out again: a later reading of its key is a new node.
+                    if let Some(nodes) = self.map_entries.nodes.get_mut(map) {
+                        nodes.remove(&format!("k{}", crate::value_marker(&key)));
+                    }
+                }
+                self.map_entries.followed.insert(map.to_owned(), now);
+                return;
+            }
+            Some(Taken::All(taken)) => taken,
         };
         // Where each key sits now, once: a node's check is then one lookup.
         let slots: std::collections::HashMap<String, usize> = self
@@ -879,7 +1002,7 @@ impl StdHost {
                 continue;
             };
             // What the node held before the call; one the host could not read then is lost.
-            let Some((_, key, value)) = taken.iter().find(|(held, _, _)| *held == entry_key) else {
+            let Some((key, value)) = taken.get(&entry_key) else {
                 self.map_entries.set_life(&entry_key, Life::Lost);
                 continue;
             };
@@ -954,13 +1077,18 @@ fn entry_text(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<String
 /// `IdentityHashMap.EntryIterator.Entry`), every other entry class by `equals`/`hashCode`.
 const IDENTITY_ENTRY: &str = "java/util/IdentityHashMap$EntryIterator$Entry";
 
+/// Whether `value` is an `IdentityHashMap` entry.
+pub(crate) fn is_identity_entry(value: &Value) -> bool {
+    matches!(value, Value::Host(handle) if identity_entry(handle))
+}
+
 fn identity_entry(handle: &HostRef) -> bool {
     handle.kind() == HostKind::MapEntry && entry_class(handle.key()) == IDENTITY_ENTRY
 }
 
 /// `a == b` where this model can tell: two handles by `same_object`, `null`s, a handle against
 /// any text or box (two objects). Two texts or boxes are `None`: their identity is not kept.
-fn same_reference(a: &Value, b: &Value) -> Option<bool> {
+pub(crate) fn same_reference(a: &Value, b: &Value) -> Option<bool> {
     match (a, b) {
         (Value::Ref(None), Value::Ref(None)) => Some(true),
         (Value::Ref(None), _) | (_, Value::Ref(None)) => Some(false),

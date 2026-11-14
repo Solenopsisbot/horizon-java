@@ -2369,7 +2369,7 @@ pub trait Host {
 
     /// Before and after a call on the map `marker`: its entries follow it
     /// (`host_map_entry.rs`).
-    fn entries_before_call(&mut self, _marker: &str, _name: &str) {}
+    fn entries_before_call(&mut self, _marker: &str, _name: &str, _args: &[Value]) {}
 
     fn entries_after_call(&mut self, _marker: &str) {}
 
@@ -5072,8 +5072,8 @@ impl Host for StdHost {
         StdHost::mint_map_entries(self, map, pairs, made)
     }
 
-    fn entries_before_call(&mut self, marker: &str, name: &str) {
-        StdHost::entries_before_call(self, marker, name);
+    fn entries_before_call(&mut self, marker: &str, name: &str, args: &[Value]) {
+        StdHost::entries_before_call(self, marker, name, args);
     }
 
     fn entries_after_call(&mut self, marker: &str) {

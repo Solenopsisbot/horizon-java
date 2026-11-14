@@ -1050,8 +1050,8 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.mint_map_entries(map, pairs, made)
     }
 
-    fn entries_before_call(&mut self, marker: &str, name: &str) {
-        self.inner.entries_before_call(marker, name);
+    fn entries_before_call(&mut self, marker: &str, name: &str, args: &[Value]) {
+        self.inner.entries_before_call(marker, name, args);
     }
 
     fn entries_after_call(&mut self, marker: &str) {

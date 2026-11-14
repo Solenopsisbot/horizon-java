@@ -404,7 +404,7 @@ impl<H: Host> Runtime<'_, H> {
             DequeStep::None
         };
         // A map's live entries follow the call (`host_map_entry.rs`).
-        self.host.entries_before_call(marker, name);
+        self.host.entries_before_call(marker, name, args);
         Ok(Some(ModToken {
             marker: marker.clone(),
             name: name.to_owned(),

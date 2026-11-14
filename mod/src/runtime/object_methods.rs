@@ -493,6 +493,11 @@ impl<H: Host> Runtime<'_, H> {
                 {
                     return self.list_equals(a, b);
                 }
+                if self.host_collection_kind(a) == Some(CollectionKind::Set)
+                    && self.host_collection_kind(b) == Some(CollectionKind::Set)
+                {
+                    return self.abstract_set_equals(a, b);
+                }
                 // `File.equals`: the same path text (`UnixFileSystem.compare`).
                 if let Some(path) = self.file_path(a) {
                     return Ok(self.file_path(b) == Some(path));
@@ -527,6 +532,44 @@ impl<H: Host> Runtime<'_, H> {
                 Ok(a == b)
             }
         }
+    }
+
+    /// `AbstractSet.equals` between two sets the host holds, wherever a collection compares
+    /// its elements (`List.contains`, a `HashSet`'s or `HashMap`'s bins, `Set.of`'s duplicate
+    /// check): `o == this`, then the sizes, then `containsAll(o)`, `this.contains(e)` run
+    /// through the dispatch for each of `o`'s elements, a `ClassCastException` or
+    /// `NullPointerException` answering `false`. Two sets with their own handles (two maps'
+    /// `entrySet()` views, #221 review B5) compare by contents, as a direct `equals` does.
+    fn abstract_set_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
+        if identical(a, b) {
+            return Ok(true);
+        }
+        let theirs = self.collection_elements(b)?;
+        if self.collection_elements(a)?.len() != theirs.len() {
+            return Ok(false);
+        }
+        for element in &theirs {
+            let found = self.call_virtual(
+                crate::runtime::jdk_call::Site::Interface,
+                "java/util/Set",
+                "contains",
+                "(Ljava/lang/Object;)Z",
+                a,
+                std::slice::from_ref(element),
+            );
+            match found {
+                Ok(Value::Int(0)) => return Ok(false),
+                Ok(_) => {}
+                Err(NativeError::UncaughtException { class, .. })
+                    if class == "java/lang/ClassCastException"
+                        || class == "java/lang/NullPointerException" =>
+                {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
     }
 
     /// `Objects.equals(a, b)`: `a == b || a != null && a.equals(b)`.
