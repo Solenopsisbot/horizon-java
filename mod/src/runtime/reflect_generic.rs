@@ -261,10 +261,10 @@ fn parse_method_signature(text: &str, scope: TypeScope) -> Option<(Vec<GenericTy
     Some((parameters, result))
 }
 
-/// The erased class marker of one descriptor (`I` is `int`, `[I` stays the
-/// array descriptor, `Ljava/util/List;` is `java/util/List`).
+/// The erased class of one descriptor (`I` is `int`, `[I` stays the array
+/// descriptor, `Ljava/util/List;` is `java/util/List`): its `Class` object.
 fn erased(descriptor: &str) -> Value {
-    Value::Ref(Some(erased_field_type(descriptor)))
+    crate::runtime::host_class::class_value(&erased_field_type(descriptor))
 }
 
 /// The `(class, name, descriptor)` a `Method` handle names, when it carries
@@ -469,7 +469,7 @@ impl<H: Host> Runtime<'_, H> {
                     .unwrap_or_else(erased_parameters);
                 self.generic_type_array(TYPE_ARRAY, &types)
             }
-            ("getDeclaringClass", "()Ljava/lang/Class;") => Value::Ref(Some(class)),
+            ("getDeclaringClass", "()Ljava/lang/Class;") => crate::runtime::host_class::class_value(&class),
             ("getModifiers", "()I") => {
                 let file = self.class(&class)?;
                 let method = file.method(&name, &descriptor)?;

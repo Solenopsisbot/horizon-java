@@ -10331,11 +10331,6 @@ fn bounded_captured_markers(values: &[Value]) -> String {
 fn collection_item_marker(value: &Value) -> String {
     match value {
         Value::Ref(Some(value)) => format!("r{value}"),
-        // A `Class` keys as the class marker it was until #156 P13c
-        // (`host_class.rs`): a collection a jar filled with `X.class` finds
-        // the class a producer not yet moved still answers as text (and a
-        // `String` spelled like it, as before).
-        Value::Host(host) if host.kind() == HostKind::Class => format!("r{}", host.key()),
         // A handle's own text form, unescaped like a reference's
         // (`HostRef::encode`).
         Value::Host(host) => host.encode(),
@@ -19358,6 +19353,13 @@ struct Runtime<'a, H> {
     /// [`BUDGET_CHECK_INSTRUCTIONS`] and in [`Runtime::invoke`].
     budget: &'a ExecutionBudget,
 }
+/// Whether `file` itself declares `field` (name and descriptor).
+fn declares_field(file: &ClassFile, field: &MethodRef) -> bool {
+    file.fields
+        .iter()
+        .any(|declared| declared.name == field.name && declared.descriptor == field.descriptor)
+}
+
 impl<H: Host> Runtime<'_, H> {
     fn static_field_key(field: &MethodRef) -> String {
         format!("{}#{}{}", field.owner, field.name, field.descriptor)
@@ -19382,10 +19384,15 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 break;
             };
-            if file.fields.iter().any(|declared| {
-                declared.name == field.name && declared.descriptor == field.descriptor
-            }) {
+            if declares_field(file, field) {
                 return current;
+            }
+            // JVMS 5.4.3.2: the direct superinterfaces, recursively, come
+            // before the superclass (`JsoncElement.INDENT` read through
+            // `JsoncObject`, a non-constant interface field).
+            let mut seen = BTreeSet::new();
+            if let Some(owner) = self.interface_field_owner(file, field, &mut seen) {
+                return owner;
             }
             if file.super_name.is_empty() || file.super_name == current {
                 break;
@@ -19393,6 +19400,32 @@ impl<H: Host> Runtime<'_, H> {
             current = file.super_name.clone();
         }
         field.owner.clone()
+    }
+
+    /// The superinterface of `file` that declares `field`, searched in
+    /// declaration order and depth first as JVMS 5.4.3.2 does, bounded by
+    /// [`MAX_SUPERCLASS_WALK`] interfaces.
+    fn interface_field_owner(
+        &self,
+        file: &ClassFile,
+        field: &MethodRef,
+        seen: &mut BTreeSet<String>,
+    ) -> Option<String> {
+        for interface in file.interface_names() {
+            if seen.len() >= MAX_SUPERCLASS_WALK || !seen.insert(interface.clone()) {
+                continue;
+            }
+            let Some(declared) = self.class(&interface) else {
+                continue;
+            };
+            if declares_field(declared, field) {
+                return Some(interface);
+            }
+            if let Some(owner) = self.interface_field_owner(declared, field, seen) {
+                return Some(owner);
+            }
+        }
+        None
     }
 
     /// Resolve a class this execution may link: the running jar's own classes
@@ -21213,12 +21246,12 @@ impl<H: Host> Runtime<'_, H> {
                 .and_then(|signature| parse_generic_signature(signature, scope))
                 .map_or_else(
                     || {
-                        Value::Ref(Some(
-                            descriptor
+                        host_class::class_value(
+                            &descriptor
                                 .as_deref()
                                 .map(erased_field_type)
                                 .unwrap_or_default(),
-                        ))
+                        )
                     },
                     |value| generic_type_value(&value),
                 );
@@ -21290,7 +21323,7 @@ impl<H: Host> Runtime<'_, H> {
                     "getRawType",
                     "()Ljava/lang/reflect/Type;",
                     GenericType::Parameterized { raw, .. },
-                ) => Some(Value::Ref(Some(raw))),
+                ) => Some(host_class::class_value(&raw)),
                 (
                     "getActualTypeArguments",
                     "()[Ljava/lang/reflect/Type;",
@@ -21337,7 +21370,7 @@ impl<H: Host> Runtime<'_, H> {
                         declaration: Some(TypeDeclaration::Class(class)),
                         ..
                     },
-                ) => Some(Value::Ref(Some(class))),
+                ) => Some(host_class::class_value(&class)),
                 (
                     "getUpperBounds",
                     "()[Ljava/lang/reflect/Type;",
@@ -38332,8 +38365,8 @@ mandatory = true
                 .invoke_instance(&field_type, &declared[0], &[])
                 .unwrap(),
             // A primitive field's class is the primitive's own class
-            // (`int.class`), whose marker is its name, not its descriptor.
-            Value::Ref(Some("int".into()))
+            // (`int.class`), keyed by its name, not its descriptor.
+            host_class::class_value("int")
         );
     }
 

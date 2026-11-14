@@ -57,39 +57,14 @@ fn types_answer_as_java_25() {
     for method in ["texts", "structure", "equality"] {
         let (text, unknown) = run(method);
         assert_eq!(text, expected(method), "{method}: {unknown:?}");
-        // `structure` compares type nodes that are classes (`getRawType()`,
-        // arguments, bounds, `getGenericDeclaration()`, a field's generic
-        // type) with `X.class` 10 times with `==`. Since #156 P13b1 the
-        // literal is a `Class` handle while a type node is still the class's
-        // marker text (P13b2 moves it), so each `==` is counted (the answer
-        // stays Java's); P13b2 makes them exact again.
-        let counted = if method == "structure" {
-            vec![(
-                "java/lang/Object#if_acmp(Ljava/lang/Object;Ljava/lang/Object;)Z".to_owned(),
-                10,
-            )]
-        } else {
-            Vec::new()
-        };
-        assert_eq!(unknown, counted, "{method}");
+        assert_eq!(unknown, Vec::<(String, usize)>::new(), "{method}");
     }
-    // `annotated` compares a type argument with `String.class`: two class
-    // markers of one spelling, which may be one `Class` or a `Class` and a
-    // `String` until #156 P13, so that one `Type.equals` is counted (#196's
-    // review). Every text after it is Java 25's.
+    // `annotated` compares a type argument with `String.class`: since #156
+    // P13b1 both are the `Class` object, so `Type.equals` is exact (it was
+    // counted while classes were text, #196's review).
     let (text, unknown) = run("annotated");
-    assert_eq!(
-        unknown,
-        vec![(
-            "java/lang/reflect/Type#equals(Ljava/lang/Object;)Z".to_owned(),
-            1
-        )]
-    );
-    let expected = expected("annotated");
-    assert_eq!(
-        text.split_once('|').map(|(_, texts)| texts),
-        expected.split_once('|').map(|(_, texts)| texts)
-    );
+    assert_eq!(text, expected("annotated"));
+    assert_eq!(unknown, Vec::<(String, usize)>::new());
 }
 
 /// Two lookups' types are two objects whose hashes hash `Class` identity
