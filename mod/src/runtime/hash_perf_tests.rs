@@ -48,9 +48,7 @@ fn jar() -> &'static NativeJar {
         let classes = scratch.join("classes");
         std::fs::create_dir_all(&classes).unwrap();
         let mut sources = Vec::new();
-        for part in ["hash_perf/demo"] {
-            java_files(&fixtures.join(part), &mut sources);
-        }
+        java_files(&fixtures.join("hash_perf/demo"), &mut sources);
         let javac = std::env::var_os("JAVA_HOME")
             .map(|home| PathBuf::from(home).join("bin/javac"))
             .unwrap_or_else(|| "javac".into());
