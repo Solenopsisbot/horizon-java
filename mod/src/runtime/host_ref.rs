@@ -1829,8 +1829,9 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::runtime::game_object::declared_types,
         },
-        // One object per entity: P16b keys incarnations.
-        canonical: always_canonical,
+        // One object per entity: P16b keys incarnations; the client's
+        // player is made again on each join and respawn (P16d).
+        canonical: crate::runtime::game_object::world_canonical,
         methods: &crate::runtime::game_object::IDENTITY_METHODS,
     },
     KindInfo {
@@ -1840,9 +1841,9 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::runtime::game_object::declared_types,
         },
-        // One level per dimension.
-        canonical: always_canonical,
-        methods: &crate::runtime::game_object::IDENTITY_METHODS,
+        // One level per dimension; the client's is made again on each join.
+        canonical: crate::runtime::game_object::world_canonical,
+        methods: &crate::runtime::game_object::LEVEL_METHODS,
     },
     KindInfo {
         kind: HostKind::GameSingleton,
@@ -1873,8 +1874,9 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::runtime::game_object::declared_types,
         },
-        // Each `new BlockPos(..)` is its own object; equal by fields.
-        canonical: never_canonical,
+        // Each `new BlockPos(..)` is its own object; equal by fields. The
+        // client's constants (`Style.EMPTY`, named colours) are one each.
+        canonical: crate::runtime::game_object::value_canonical,
         methods: &crate::runtime::game_object::VALUE_METHODS,
     },
     KindInfo {

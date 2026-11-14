@@ -40,25 +40,22 @@
 use crate::runtime::host_ref::{HostKind, HostRef, Methods, instance_of_class};
 use crate::runtime::{NativeError, Value};
 
-/// The client's service objects: one each, by name (`client/minecraft`).
+/// The client's service objects: one each for the life of the client, by
+/// name (`client/minecraft`). The connection, its packet sender, the game
+/// mode, the integrated server, the player's inventory and food data and the
+/// tooltip flag are made again on each join, life or toggle, so they are
+/// transient: `==` between two producers' handles is counted.
 const CLIENT_SINGLETONS: &[&str] = &[
     "minecraft",
     "camera",
     "chat",
-    "connection",
     "debug-overlay",
     "font",
-    "food-data",
-    "game-mode",
     "game-renderer",
     "gui",
     "hud",
-    "integrated-server",
-    "inventory",
     "options",
-    "packet-sender",
     "texture-manager",
-    "tooltip-flag",
     "user",
     "window",
 ];
@@ -129,7 +126,6 @@ pub(crate) fn is_game_kind(kind: HostKind) -> bool {
 
 /// The handle of the game object `marker` names (its kind by [`kind_of`]).
 /// `None` for text that names no game object.
-#[cfg_attr(not(test), allow(dead_code))] // P16b's producers
 pub(crate) fn value(marker: &str) -> Option<Value> {
     Some(Value::Host(HostRef::new(kind_of(marker)?, marker)))
 }
@@ -143,6 +139,25 @@ pub(crate) fn text(value: &Value) -> Option<&String> {
         Value::Host(handle) if is_game_kind(handle.kind()) => Some(handle.key_text()),
         other => crate::runtime::expect_ref(other),
     }
+}
+
+/// A client value of the game (#156 P16d): the handle of a `client/…` or
+/// `key-category/…` marker; any other text stays the text it was.
+pub(crate) fn client_value(marker: String) -> Value {
+    if (marker.starts_with("client/") || marker.starts_with(crate::runtime::client_values::CATEGORY))
+        && let Some(value) = value(&marker)
+    {
+        return value;
+    }
+    Value::Ref(Some(marker))
+}
+
+/// Whether two equal keys of a server or client object are one object: a
+/// server's player, entity and level keys name one object each (P16b), the
+/// client's `LocalPlayer` and `ClientLevel` are made again on each join and
+/// respawn, and their keys do not say which (counted).
+pub(crate) fn world_canonical(key: &str) -> bool {
+    !key.starts_with("client/")
 }
 
 /// The types each family surely is (its `ClassRule::Unknown` declared
@@ -180,6 +195,14 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         (true, "stack") => &["net/minecraft/world/item/ItemStack"],
         (true, "item") => &["net/minecraft/world/item/Item"],
         (true, "block") => &["net/minecraft/world/level/block/Block"],
+        (true, "style") => &["net/minecraft/network/chat/Style"],
+        (true, "text-color") => &["net/minecraft/network/chat/TextColor"],
+        (_, "key-category") => &["net/minecraft/client/KeyMapping$Category"],
+        (true, "vec3") => &["net/minecraft/world/phys/Vec3"],
+        (true, "awt-color") => &["java/awt/Color"],
+        (true, "options") => &["net/minecraft/client/Options"],
+        (true, "font") => &["net/minecraft/client/gui/Font"],
+        (true, "gui") => &["net/minecraft/client/gui/Gui"],
         // A family whose class P16b–e reads from its snapshot: only `Object`
         // is sure until then.
         _ => &[],
@@ -215,15 +238,34 @@ pub(crate) const IDENTITY_METHODS: Methods = Methods {
 };
 
 /// A value (`BlockPos`, `LevelResource`, `Style`...): `equals` by its fields,
-/// which its key spells exactly, so two handles of one key are equal (and two
-/// keys two values); `==` is per producer (the kind is never canonical).
+/// which its key spells exactly. The client's values answer Java's
+/// `equals`, `hashCode` and `toString` from their key (`client_values.rs`);
+/// the others compare keys, and count the rest until P16c.
 pub(crate) const VALUE_METHODS: Methods = Methods {
+    to_string: |handle, _| Ok(crate::runtime::client_values::to_string(handle.key())),
+    hash_code: |handle, _| Ok(crate::runtime::client_values::hash_code(handle.key())),
     equals: |handle, other, _| {
-        Ok(Some(matches!(
-            other,
-            Value::Host(other) if other.kind() == handle.kind() && other.key() == handle.key()
-        )))
+        let other_key = match other {
+            Value::Host(other) if other.kind() == handle.kind() => Some(other.key()),
+            _ => None,
+        };
+        Ok(crate::runtime::client_values::equals(handle.key(), other_key, other)
+            .unwrap_or_else(|| Some(other_key == Some(handle.key()))))
     },
+    ..IDENTITY_METHODS
+};
+
+/// Whether two handles of one value key are one object: the client's
+/// constants are (`client_values::canonical`), any other value is per
+/// producer.
+pub(crate) fn value_canonical(key: &str) -> bool {
+    crate::runtime::client_values::canonical(key)
+}
+
+/// A level: identity `equals`; `ClientLevel.toString()` is `ClientLevel`
+/// (vanilla 26.3), a `ServerLevel`'s needs the world's name (counted).
+pub(crate) const LEVEL_METHODS: Methods = Methods {
+    to_string: |handle, _| Ok((handle.key() == "client/level").then(|| "ClientLevel".to_owned())),
     ..IDENTITY_METHODS
 };
 

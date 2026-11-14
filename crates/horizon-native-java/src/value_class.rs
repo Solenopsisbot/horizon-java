@@ -44,6 +44,10 @@ const RETIRED_PREFIXES: &[&str] = &[
     "enumeration/",
     "list-iterator/",
     "collector/",
+    // The client's objects and values are game handles (#156 P16d,
+    // `client_values.rs`, `game_object::client_value`).
+    "client/",
+    "key-category/",
 ];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
@@ -137,7 +141,6 @@ const MARKER_HEADS: &[&str] = &[
     "capability",
     "charset",
     "classloader",
-    "client",
     "codec",
     "collector",
     "component",
@@ -160,7 +163,6 @@ const MARKER_HEADS: &[&str] = &[
     "linked",
     "list",
     "logger",
-    "made",
     "map",
     "mixin",
     "module",
