@@ -1026,8 +1026,8 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.send_feedback(r, component, broadcast)
     }
 
-    fn note_entrypoint_constructed(&mut self, class: &str) {
-        self.inner.note_entrypoint_constructed(class);
+    fn note_entrypoint_constructed(&mut self, class: &str, instance: &Value) {
+        self.inner.note_entrypoint_constructed(class, instance);
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
@@ -1483,11 +1483,16 @@ impl NativeJar {
                     runtime.callback_infos.set_actual(&marker, actual.clone())?;
                 }
                 let before = hook_shapes::callback_info_snapshot(runtime.callback_infos, &marker)?;
-                let callback_receiver = is_instance.then(|| {
-                    receiver
-                        .clone()
-                        .unwrap_or_else(|| Value::Ref(Some(entry.callback.owner.clone())))
-                });
+                // No game object handed over: an object of the Mixin class
+                // stands for it (its name is a `String`, #156 P13c; #156 P16).
+                let callback_receiver = if is_instance {
+                    Some(match receiver.clone() {
+                        Some(receiver) => receiver,
+                        None => runtime.new_object(&entry.callback.owner),
+                    })
+                } else {
+                    None
+                };
                 // The first callback of a Mixin class on a game object runs the
                 // class's constructor on it: `javac` put the Mixin's field
                 // initialisers there, which real Mixin merges into the target's

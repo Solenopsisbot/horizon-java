@@ -686,7 +686,7 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getModule"
             && r.descriptor == "()Ljava/lang/Module;"
         {
-            let Some(class) = expect_ref(receiver) else {
+            let Some(class) = crate::host_class::class_name(receiver) else {
                 return Ok(None);
             };
             // An array is in its element type's module, a primitive (and a
@@ -695,7 +695,7 @@ impl<H: Host> Runtime<'_, H> {
             let element = if class.starts_with('[') {
                 erased_field_type(class.trim_start_matches('['))
             } else {
-                class.clone()
+                class.to_owned()
             };
             let module = if PRIMITIVE_CLASSES.contains(&element.as_str()) {
                 Some(JAVA_BASE_MODULE)
@@ -715,7 +715,7 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getPackageName"
             && r.descriptor == "()Ljava/lang/String;"
         {
-            let Some(class) = expect_ref(receiver) else {
+            let Some(class) = crate::host_class::class_name(receiver) else {
                 return Ok(None);
             };
             let element = class.trim_start_matches('[');

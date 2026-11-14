@@ -425,6 +425,20 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
+    /// [`Self::known_instance_of`] for an object of the class `class`, before
+    /// one exists (a `ServiceLoader` provider the loader is about to build).
+    pub(crate) fn class_known_instance_of(&self, class: &str, target: &str) -> Option<bool> {
+        let target_is_interface = self
+            .class(target)
+            .and_then(class_access)
+            .map(|access| access & ACC_INTERFACE != 0);
+        match self.hierarchy_verdict(class, target, target_is_interface) {
+            Verdict::Yes => Some(true),
+            Verdict::No => Some(false),
+            Verdict::Unknown => None,
+        }
+    }
+
     /// Whether an `instanceof target` the opcode's models all answered `false`
     /// is a guess rather than a known "no".
     ///

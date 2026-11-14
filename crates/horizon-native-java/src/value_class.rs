@@ -332,6 +332,13 @@ mod tests {
             "java/util/ArrayList#neutral0",
             "java/util/ImmutableCollections$ListN#immutable3",
             "java/util/ReverseOrderListView$Rand#reversed0",
+            // Spelled like a class (#156 P13c): a `Class` is a handle.
+            "java/lang/String",
+            "demo/Probe$Foo",
+            "net/minecraft/world/item/Item",
+            "[Ljava/lang/String;",
+            "[I",
+            "int",
         ] {
             assert!(is_plain_string(text), "{text:?} should be a string");
         }
@@ -342,8 +349,9 @@ mod tests {
             "string-builder/2",
             "@indy:demo/Main:0:demo/Main#lambda$0()V:",
             "@cmp:natural",
-            "[Ljava/lang/String;",
-            "java/lang/String",
+            // A marker kind ahead of a capitalized segment is no class name.
+            "component/Hello",
+            "enum/net/minecraft/core/Direction/NORTH",
         ] {
             assert!(
                 !is_plain_string(marker),
