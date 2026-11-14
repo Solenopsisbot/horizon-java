@@ -7,14 +7,17 @@
 //! BigDecimal("1.0"))` was `false`; Java says `true`) and an explicit `toString()` printing the
 //! object's key. Those answers are Java's only for a class that keeps `Object`'s member.
 //!
-//! Java 25's table (`jdk_supertypes_25.txt`, `jdk_closure.rs`) records, for each JDK class jars
-//! construct, which of `equals`/`hashCode`/`toString`/`compareTo` it declares or inherits from a
-//! JDK superclass below `Object`. Where no model answered:
+//! Java 25's table (`jdk_supertypes_25.txt`, `jdk_closure.rs`) records, for every public class of
+//! every package the system modules export (all a jar can build or extend), which of
+//! `equals`/`hashCode`/`toString`/`compareTo` it declares or inherits from a JDK superclass below
+//! `Object`. Where no model answered:
 //!
-//! * `equals` is identity only for a class the table shows keeping `Object.equals`
-//!   (`new Object()`, `Random`, `StringBuilder`, `AtomicInteger`); for any other, and for a
-//!   class the table does not list, the host's model of the class's `equals` answers, or the
-//!   call is counted.
+//! * `x.equals(x)` on the very same object is `true`: every JDK `equals` is reflexive.
+//! * Otherwise `equals` is identity only for a class the table shows keeping `Object.equals`
+//!   (`new Object()`, `Random`, `StringBuilder`, `AtomicInteger`, a jar's `extends Handler`);
+//!   for any other, and for a class the table does not hold (an incubator module's), the JDK
+//!   skeleton's body or the host's model of the class's `equals` answers, or the call is
+//!   counted.
 //! * `toString` is counted for every jar object: `Object.toString` prints an identity hash no
 //!   run reproduces, and an override is a body the host does not have.
 //! * `hashCode` was already counted (`object_methods.rs`'s `host_value_hash` has no hash for a
@@ -42,14 +45,26 @@ impl Member {
             Member::CompareTo => "compareTo",
         }
     }
+
+    /// Its letter in the table's `object` rows.
+    fn letter(self) -> char {
+        match self {
+            Member::Equals => 'e',
+            Member::CompareTo => 'c',
+        }
+    }
 }
 
 /// Whether JDK class `class` runs a JDK body of `member` rather than `Object`'s (for
 /// `compareTo`: whether it is `Comparable`), as Java 25 reports it. `None` for a class the
 /// table does not list.
 pub(crate) fn overrides(class: &str, member: Member) -> Option<bool> {
-    let row = crate::jdk_closure::class(class)?;
-    (!row.is_interface).then(|| row.overrides.contains(&member.name()))
+    match crate::jdk_closure::class(class) {
+        Some(row) => (!row.is_interface).then(|| row.overrides.contains(&member.name())),
+        // Every other public class of an exported package (`java.util.logging.Handler`).
+        None => crate::jdk_closure::object_members(class)
+            .map(|letters| letters.contains(member.letter())),
+    }
 }
 
 /// Superclass walks are bounded like every other chain walk.

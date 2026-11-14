@@ -1,6 +1,16 @@
+import java.lang.module.ModuleDescriptor;
 import java.lang.module.ModuleFinder;
 import java.lang.reflect.Modifier;
+import java.net.URI;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
@@ -8,8 +18,11 @@ import java.util.TreeSet;
  * flags, every supertype (getSuperclass/getInterfaces, transitively, the class itself left out),
  * its direct superclass (`-` for none), its direct interfaces in declaration order, and which of
  * `equals`/`hashCode`/`toString`/`compareTo` its objects run some JDK class's own body for
- * rather than `Object`'s (`-` for none, and for an interface), then every package of every system module and the module that holds it (a JDK class's
- * supertypes can only come from these).
+ * rather than `Object`'s (`-` for none, and for an interface); then, per package, that last fact
+ * for every public class of every package the boot layer's system modules export to everyone (a
+ * jar can extend or build no other JDK class), as `Simple=flags` (`e`quals, `h`ashCode,
+ * `t`oString, `c`ompareTo, `-` for none); then every package of every system module and the
+ * module that holds it (a JDK class's supertypes can only come from these).
  * Run on OpenJDK 25: `java JdkSupertypes.java > ../../../src/jdk_supertypes_25.txt`.
  */
 public final class JdkSupertypes {
@@ -193,6 +206,37 @@ public final class JdkSupertypes {
       for (Class<?> i : c.getInterfaces()) declared.add(i.getName().replace('.', '/'));
       System.out.println("class\t" + c.getName().replace('.', '/') + "\t" + flags + "\t" + String.join(" ", supers)
           + "\t" + direct + "\t" + String.join(" ", declared) + "\t" + overrides(c));
+    }
+    // Every public class of every unqualified export of the boot layer's system modules: what
+    // each runs of Object's members (#217). A class a jar extends or builds is one of these.
+    Map<String, List<String>> objects = new TreeMap<>();
+    FileSystem jrt = FileSystems.getFileSystem(URI.create("jrt:/"));
+    for (Module module : ModuleLayer.boot().modules()) {
+      if (ModuleFinder.ofSystem().find(module.getName()).isEmpty()) continue;
+      for (ModuleDescriptor.Exports export : module.getDescriptor().exports()) {
+        if (export.isQualified()) continue;
+        Path dir = jrt.getPath("/modules", module.getName(), export.source().replace('.', '/'));
+        if (!Files.isDirectory(dir)) continue;
+        List<String> entries = objects.computeIfAbsent(export.source().replace('.', '/'), k -> new ArrayList<>());
+        try (var files = Files.list(dir)) {
+          for (Path file : (Iterable<Path>) files.sorted()::iterator) {
+            String simple = file.getFileName().toString();
+            if (!simple.endsWith(".class") || simple.contains("-info.")) continue;
+            simple = simple.substring(0, simple.length() - ".class".length());
+            Class<?> c = Class.forName(module, export.source() + "." + simple);
+            if (c == null || c.isInterface() || !Modifier.isPublic(c.getModifiers())) continue;
+            String own = overrides(c);
+            StringBuilder flags = new StringBuilder();
+            for (String member : own.split(",")) if (!member.equals("-")) flags.append(member.charAt(0));
+            entries.add(simple + "=" + (flags.length() == 0 ? "-" : flags));
+          }
+        }
+      }
+    }
+    for (var entry : objects.entrySet()) {
+      if (!entry.getValue().isEmpty()) {
+        System.out.println("object\t" + entry.getKey() + "\t" + String.join(" ", entry.getValue()));
+      }
     }
     // Each system package with the module that holds it (`Class.getModule()` of a JDK class).
     Set<String> packages = new TreeSet<>();

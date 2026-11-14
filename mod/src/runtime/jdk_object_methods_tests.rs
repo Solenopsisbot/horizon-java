@@ -6,7 +6,8 @@
 //! expected string below. Each probe is one member on one class: `equals` of two equal-valued
 //! objects, `same` (`a.equals(a)`, `a == a`), `other` (`equals("x")`, `equals(null)`), `hash`
 //! (two objects' hashes equal), `text` (`toString()`), `concat` (`"" + a`), `contains`
-//! (`List.of(a).contains(b)`), `objects` (`Objects.equals(a, b)`), `compare`.
+//! (`List.of(a).contains(b)`), `objects` (`Objects.equals(a, b)`), `compare`; for a jar subclass,
+//! `self` (`a.equals(a)`, `List.of(a).contains(a)`, `Objects.equals(a, a)`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -93,7 +94,7 @@ fn jar() -> &'static NativeJar {
 #[test]
 fn jdk_objects_answer_as_java_25_or_count() {
     let cases = [
-        // `new Object()`: `Object`'s members. `equals` is identity; `hashCode` and `toString` an identity hash.
+        // `new Object()`: `Object`'s members. `equals` is identity (the same object: `true`); `hashCode` and `toString` an identity hash.
         ("object_equals", Exact(r#"false"#)),
         ("object_same", Exact(r#"truetrue"#)),
         ("object_other", Exact(r#"falsefalse"#)),
@@ -102,7 +103,7 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("object_concat", Counted),
         ("object_contains", Exact(r#"false"#)),
         ("object_objects", Exact(r#"false"#)),
-        // `Random`, `CRC32`: listed, keep every `Object` member.
+        // `Random`, `CRC32`, `Adler32`: keep every `Object` member.
         ("random_equals", Exact(r#"false"#)),
         ("random_same", Exact(r#"truetrue"#)),
         ("random_other", Exact(r#"falsefalse"#)),
@@ -119,7 +120,6 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("crc_concat", Counted),
         ("crc_contains", Exact(r#"false"#)),
         ("crc_objects", Exact(r#"false"#)),
-        // `Adler32` keeps every `Object` member; `DoubleAdder` its own `toString` (not modelled: counted), `Object.equals`.
         ("adler_equals", Exact(r#"false"#)),
         ("adler_same", Exact(r#"truetrue"#)),
         ("adler_other", Exact(r#"falsefalse"#)),
@@ -172,9 +172,9 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("zipEntry_concat", Counted),
         ("zipEntry_contains", Exact(r#"false"#)),
         ("zipEntry_objects", Exact(r#"false"#)),
-        // `BigDecimal`, `BigInteger`, `Date`, `BitSet`, `DecimalFormat`, `InetSocketAddress`: own `equals` no model answers: counted, also inside `List.contains`/`Objects.equals`.
+        // `BigDecimal`, `BigInteger`, `Date`, `BitSet`, `DecimalFormat`, `InetSocketAddress`: own `equals` no model answers: counted, also inside `List.contains`/`Objects.equals`; the same object equals itself (`createUnresolved` itself is unmodelled).
         ("decimal_equals", Counted),
-        ("decimal_same", Counted),
+        ("decimal_same", Exact(r#"truetrue"#)),
         ("decimal_other", Counted),
         ("decimal_hash", Counted),
         ("decimal_text", Counted),
@@ -183,7 +183,7 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("decimal_objects", Counted),
         ("decimal_compare", Counted),
         ("integer_equals", Counted),
-        ("integer_same", Counted),
+        ("integer_same", Exact(r#"truetrue"#)),
         ("integer_other", Counted),
         ("integer_hash", Counted),
         ("integer_text", Counted),
@@ -192,7 +192,7 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("integer_objects", Counted),
         ("integer_compare", Counted),
         ("date_equals", Counted),
-        ("date_same", Counted),
+        ("date_same", Exact(r#"truetrue"#)),
         ("date_other", Counted),
         ("date_hash", Counted),
         ("date_text", Counted),
@@ -201,7 +201,7 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("date_objects", Counted),
         ("date_compare", Counted),
         ("bits_equals", Counted),
-        ("bits_same", Counted),
+        ("bits_same", Exact(r#"truetrue"#)),
         ("bits_other", Counted),
         ("bits_hash", Counted),
         ("bits_text", Counted),
@@ -209,7 +209,7 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("bits_contains", Counted),
         ("bits_objects", Counted),
         ("format_equals", Counted),
-        ("format_same", Counted),
+        ("format_same", Exact(r#"truetrue"#)),
         ("format_other", Counted),
         ("format_hash", Counted),
         ("format_text", Counted),
@@ -233,6 +233,7 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("entry_concat", Exact(r#"k=v"#)),
         ("entry_contains", Exact(r#"true"#)),
         ("entry_objects", Exact(r#"true"#)),
+        // `DoubleAdder`: own `toString` (not modelled: counted), `Object.equals`.
         ("adder_equals", Exact(r#"false"#)),
         ("adder_same", Exact(r#"truetrue"#)),
         ("adder_other", Exact(r#"falsefalse"#)),
@@ -264,6 +265,23 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("as_object_equals", Counted),
         ("set_objects", Exact(r#"true"#)),
         ("set_equals", Exact(r#"true"#)),
+        // Jar classes extending JDK classes outside the full rows (`Handler`, `EventObject`, `InheritableThreadLocal`, `RecursiveTask`): the `object` rows show `Object.equals`, so identity; `hashCode` an identity hash.
+        ("handler_equals", Exact(r#"false"#)),
+        ("handler_self", Exact(r#"truetruetrue"#)),
+        ("handler_objects", Exact(r#"falsefalse"#)),
+        ("handler_hash", Counted),
+        ("event_equals", Exact(r#"false"#)),
+        ("event_self", Exact(r#"truetruetrue"#)),
+        ("event_objects", Exact(r#"falsefalse"#)),
+        ("event_hash", Counted),
+        ("inheritable_equals", Exact(r#"false"#)),
+        ("inheritable_self", Exact(r#"truetruetrue"#)),
+        ("inheritable_objects", Exact(r#"falsefalse"#)),
+        ("inheritable_hash", Counted),
+        ("task_equals", Exact(r#"false"#)),
+        ("task_self", Exact(r#"truetruetrue"#)),
+        ("task_objects", Exact(r#"falsefalse"#)),
+        ("task_hash", Counted),
     ];
     let mut failures = Vec::new();
     for (method, outcome) in &cases {

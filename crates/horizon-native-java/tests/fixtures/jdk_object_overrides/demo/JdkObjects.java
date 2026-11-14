@@ -647,11 +647,102 @@ public final class JdkObjects {
     return "" + new HashSet<>(List.of(1)).equals(new HashSet<>(List.of(1)));
   }
 
+  public static String handler_equals() {
+    return "" + new MyHandler().equals(new MyHandler());
+  }
+
+  public static String handler_self() {
+    MyHandler a = new MyHandler();
+    return "" + a.equals(a) + List.of(a).contains(a) + Objects.equals(a, a);
+  }
+
+  public static String handler_objects() {
+    return "" + Objects.equals(new MyHandler(), new MyHandler()) + List.of(new MyHandler()).contains(new MyHandler());
+  }
+
+  public static String handler_hash() {
+    return "" + (new MyHandler().hashCode() == new MyHandler().hashCode());
+  }
+
+  public static String event_equals() {
+    return "" + new MyEvent().equals(new MyEvent());
+  }
+
+  public static String event_self() {
+    MyEvent a = new MyEvent();
+    return "" + a.equals(a) + List.of(a).contains(a) + Objects.equals(a, a);
+  }
+
+  public static String event_objects() {
+    return "" + Objects.equals(new MyEvent(), new MyEvent()) + List.of(new MyEvent()).contains(new MyEvent());
+  }
+
+  public static String event_hash() {
+    return "" + (new MyEvent().hashCode() == new MyEvent().hashCode());
+  }
+
+  public static String inheritable_equals() {
+    return "" + new MyInheritable().equals(new MyInheritable());
+  }
+
+  public static String inheritable_self() {
+    MyInheritable a = new MyInheritable();
+    return "" + a.equals(a) + List.of(a).contains(a) + Objects.equals(a, a);
+  }
+
+  public static String inheritable_objects() {
+    return "" + Objects.equals(new MyInheritable(), new MyInheritable()) + List.of(new MyInheritable()).contains(new MyInheritable());
+  }
+
+  public static String inheritable_hash() {
+    return "" + (new MyInheritable().hashCode() == new MyInheritable().hashCode());
+  }
+
+  public static String task_equals() {
+    return "" + new MyTask().equals(new MyTask());
+  }
+
+  public static String task_self() {
+    MyTask a = new MyTask();
+    return "" + a.equals(a) + List.of(a).contains(a) + Objects.equals(a, a);
+  }
+
+  public static String task_objects() {
+    return "" + Objects.equals(new MyTask(), new MyTask()) + List.of(new MyTask()).contains(new MyTask());
+  }
+
+  public static String task_hash() {
+    return "" + (new MyTask().hashCode() == new MyTask().hashCode());
+  }
+
   static String attempt(java.util.function.Supplier<Object> s) {
     try {
       return String.valueOf(s.get());
     } catch (RuntimeException e) {
       return e.getClass().getName() + ": " + e.getMessage();
+    }
+  }
+
+  /** Jar classes extending JDK classes outside the hand list of full rows (#218 review). */
+  static final class MyHandler extends java.util.logging.Handler {
+    public void publish(java.util.logging.LogRecord r) {}
+
+    public void flush() {}
+
+    public void close() {}
+  }
+
+  static final class MyEvent extends java.util.EventObject {
+    MyEvent() {
+      super("source");
+    }
+  }
+
+  static final class MyInheritable extends InheritableThreadLocal<String> {}
+
+  static final class MyTask extends java.util.concurrent.RecursiveTask<Integer> {
+    protected Integer compute() {
+      return 1;
     }
   }
 

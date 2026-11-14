@@ -518,6 +518,10 @@ impl<H: Host> Runtime<'_, H> {
                 // class keeps `Object.equals`; otherwise the JDK skeleton's body (a map
                 // entry's, `AbstractList`'s), the host's model of the class's `equals`, or
                 // counted (`jdk_object_methods.rs`, #217).
+                // The very same object: every JDK `equals` is reflexive.
+                if a == b && crate::runtime::jar_object::object_key(a).is_some() {
+                    return Ok(true);
+                }
                 if let Some(base) = self.jdk_base_class(a)
                     && crate::runtime::jdk_object_methods::overrides(
                         &base,
