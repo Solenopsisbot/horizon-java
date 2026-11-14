@@ -222,18 +222,6 @@ fn package_of(class: &str) -> &str {
     class.rsplit_once('/').map_or("", |(package, _)| package)
 }
 
-/// The class of a `class#n` object marker (an object `new` built), in any
-/// package, or `None` for every other marker family.
-pub(crate) fn constructed_object_class(marker: &str) -> Option<&str> {
-    let (class, serial) = marker.split_once('#')?;
-    (!class.is_empty()
-        && !host_array::handle_only_class(class)
-        && !class.contains([':', ' ', '.'])
-        && !serial.is_empty()
-        && serial.bytes().all(|byte| byte.is_ascii_digit()))
-    .then_some(class)
-}
-
 impl<H: Host> Runtime<'_, H> {
     /// The jar or linked class whose body an `invokevirtual`/`invokeinterface`
     /// of `r` on `receiver` selects, or `Ok(None)` to leave the call to the
@@ -266,10 +254,7 @@ impl<H: Host> Runtime<'_, H> {
         if !matches!(opcode, 0xb6 | 0xb9) || r.name.starts_with('<') {
             return Ok(None);
         }
-        let Some(class) = receiver
-            .and_then(expect_ref)
-            .and_then(|marker| constructed_object_class(marker))
-        else {
+        let Some(class) = receiver.and_then(crate::runtime::jar_object::object_class) else {
             return Ok(None);
         };
         // A jar's own copy of a host-modelled class (an unrelocated Gson) is
@@ -477,8 +462,7 @@ impl<H: Host> Runtime<'_, H> {
     /// (`Runtime::field_owner` resolved it). A platform superclass's field
     /// is still the host's to answer.
     pub(crate) fn reads_unwritten_jar_field(&self, r: &MethodRef, receiver: &Value) -> bool {
-        let Some(class) = expect_ref(receiver).and_then(|marker| constructed_object_class(marker))
-        else {
+        let Some(class) = crate::runtime::jar_object::object_class(receiver) else {
             return false;
         };
         let declared = self.class(&r.owner).is_some_and(|file| {

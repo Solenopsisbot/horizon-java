@@ -247,7 +247,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = Target.class, targets = {"Ldemo/Target;"})
 public abstract class TailMixin {
-    @Inject(method = "tail()I", at = @At("TAIL"))
+    // `setReturnValue` cancels: Mixin throws unless the @Inject is cancellable.
+    @Inject(method = "tail()I", at = @At("TAIL"), cancellable = true)
     private static void onTail(CallbackInfoReturnable<Integer> info) {
         Probe.mark("tail-override");
         info.setReturnValue(9);

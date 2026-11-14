@@ -96,11 +96,11 @@ impl<H: Host> Runtime<'_, H> {
             // when the call site names the subclass.
             // The receiver's own class decides: a member the subclass does
             // not declare is `TypeToken`'s (`toString` through `Object`).
-            if let Some(marker) = receiver.and_then(expect_ref)
+            if let Some(marker) = receiver.and_then(crate::runtime::jar_object::object_key)
                 && self
                     .fields
                     .contains_key(&format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"))
-                && let Some((class, _)) = marker.split_once('#')
+                && let Some(class) = crate::runtime::jar_object::key_class(marker)
                 && self
                     .member_owner(class, &r.name, &r.descriptor)
                     .is_some_and(|(owner, jar_owned)| !jar_owned && owner == TYPE_TOKEN)
@@ -324,9 +324,8 @@ impl<H: Host> Runtime<'_, H> {
             Some(value) => value,
             None => {
                 // A jar `Supplier` implementation runs its own `get`.
-                let class = expect_ref(&delegate)
-                    .and_then(|marker| marker.split_once('#'))
-                    .map(|(class, _)| class.to_owned())
+                let class = crate::runtime::jar_object::object_class(&delegate)
+                    .map(str::to_owned)
                     .unwrap_or_default();
                 const GET: &str = "()Ljava/lang/Object;";
                 match self.member_owner(&class, "get", GET) {
@@ -467,10 +466,13 @@ impl<H: Host> Runtime<'_, H> {
             // superclass names `T`. A subclass that does not parameterize
             // `TypeToken` is Guava's "must be parameterized" error.
             ("<init>", "()V") => {
-                let Some(marker) = receiver.and_then(expect_ref).cloned() else {
+                let Some(marker) = receiver
+                    .and_then(crate::runtime::jar_object::object_key)
+                    .map(str::to_owned)
+                else {
                     return Ok(None);
                 };
-                let Some((class, _)) = marker.split_once('#') else {
+                let Some(class) = crate::runtime::jar_object::key_class(&marker) else {
                     return Ok(None);
                 };
                 let captured = self
@@ -602,9 +604,8 @@ impl<H: Host> Runtime<'_, H> {
                 .invoke_callback(&function, std::slice::from_ref(key))?
                 .unwrap_or(Value::Ref(None)));
         }
-        let class = expect_ref(loader)
-            .and_then(|marker| marker.split_once('#'))
-            .map(|(class, _)| class.to_owned())
+        let class = crate::runtime::jar_object::object_class(loader)
+            .map(str::to_owned)
             .unwrap_or_default();
         const LOAD: &str = "(Ljava/lang/Object;)Ljava/lang/Object;";
         match self.member_owner(&class, "load", LOAD) {

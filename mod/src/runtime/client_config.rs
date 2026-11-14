@@ -33,7 +33,12 @@
 //!
 //! A saved config file is not read: a player's own settings are a later
 //! step, and the defaults are what a fresh install shows.
+//!
+//! The holders, handlers, builders and values are host handles
+//! (`host_config.rs`, #156 P7), never text a jar string could spell.
 
+use crate::runtime::host_config;
+use crate::runtime::host_ref::HostKind;
 use crate::runtime::{Host, MethodRef, NativeError, Runtime, Value, expect_ref};
 
 const AUTO_CONFIG: &str = "me/shedaniel/autoconfig/AutoConfig";
@@ -42,14 +47,12 @@ const YACL_HANDLER: &str = "dev/isxander/yacl3/config/v2/api/ConfigClassHandler"
 const YACL_BUILDER: &str = "dev/isxander/yacl3/config/v2/api/ConfigClassHandler$Builder";
 const CONFIGLIB_BUILDERS: &str = "com/supermartijn642/configlib/api/ConfigBuilders";
 const CONFIGLIB_BUILDER: &str = "com/supermartijn642/configlib/api/IConfigBuilder";
-const CONFIGLIB: &str = "configlib-builder";
-/// `configlib-value/<n>`: the `n`th value defined, kept in the jar's statics.
-const CONFIGLIB_VALUE: &str = "configlib-value/";
-/// Values one jar's config lib builders may define.
+/// Values one jar's config lib builders may define (the `n`th value's
+/// default is kept in the jar's statics as `configlib#<n>`).
 const MAX_CONFIGLIB_VALUES: usize = 1024;
-/// Marker prefixes: `config-holder/<class>`, `config-builder/<class>`.
-const HOLDER: &str = "config-holder/";
-const BUILDER: &str = "config-builder/";
+/// The kinds a holder call answers on: an `AutoConfig` holder or a YACL
+/// handler (both are asked `getConfig`/`instance`, `save`, `load`).
+const HOLDERS: &[HostKind] = &[HostKind::AutoConfigHolder, HostKind::YaclHandler];
 /// The static slot a config class's object lives in, so it survives the
 /// invocation (jar statics are the resident state).
 fn slot(class: &str) -> String {
@@ -69,8 +72,7 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         let marker = |text: String| Some(Value::Ref(Some(text)));
-        let held = receiver.and_then(expect_ref).cloned();
-        if let Some(value) = self.invoke_configlib(r, held.as_deref(), args) {
+        if let Some(value) = self.invoke_configlib(r, receiver, args) {
             return Ok(Some(value));
         }
         Ok(match (r.owner.as_str(), r.name.as_str()) {
@@ -81,7 +83,8 @@ impl<H: Host> Runtime<'_, H> {
                 if !self.has_class(&class) {
                     return Ok(None);
                 }
-                marker(format!("{HOLDER}{class}"))
+                // One holder per config class: `AutoConfig`'s own map.
+                Some(host_config::of_class(HostKind::AutoConfigHolder, &class, 0))
             }
             (YACL_HANDLER, "createBuilder") => {
                 let Some(class) = class_arg(args) else {
@@ -90,24 +93,28 @@ impl<H: Host> Runtime<'_, H> {
                 if !self.has_class(&class) {
                     return Ok(None);
                 }
-                marker(format!("{BUILDER}{class}"))
+                let serial = self.config_serial();
+                Some(host_config::of_class(HostKind::YaclBuilder, &class, serial))
             }
             (YACL_BUILDER, "id" | "serializer")
-                if held.as_deref().is_some_and(|h| h.starts_with(BUILDER)) =>
+                if receiver.is_some_and(|held| host_config::is(held, HostKind::YaclBuilder)) =>
             {
                 receiver.cloned()
             }
             (YACL_BUILDER, "build") => {
-                let Some(class) = held.as_deref().and_then(|h| h.strip_prefix(BUILDER)) else {
+                let Some(class) =
+                    receiver.and_then(|held| host_config::class_of(held, &[HostKind::YaclBuilder]))
+                else {
                     return Ok(None);
                 };
-                marker(format!("{HOLDER}{class}"))
+                let serial = self.config_serial();
+                Some(host_config::of_class(HostKind::YaclHandler, &class, serial))
             }
             (AUTO_HOLDER | YACL_HANDLER, name) => {
-                let Some(class) = held.as_deref().and_then(|h| h.strip_prefix(HOLDER)) else {
+                let Some(class) = receiver.and_then(|held| host_config::class_of(held, HOLDERS))
+                else {
                     return Ok(None);
                 };
-                let class = class.to_owned();
                 match name {
                     "getConfig" | "instance" => Some(self.config_instance(&class)?),
                     "defaults" => Some(self.construct_default(&class)?),
@@ -135,13 +142,20 @@ impl<H: Host> Runtime<'_, H> {
     fn invoke_configlib(
         &mut self,
         r: &MethodRef,
-        receiver: Option<&str>,
+        receiver: Option<&Value>,
         args: &[Value],
     ) -> Option<Value> {
-        let builder = || Value::Ref(Some(CONFIGLIB.into()));
-        match (r.owner.as_str(), r.name.as_str(), receiver) {
-            (CONFIGLIB_BUILDERS, name, _) if name.starts_with("new") => Some(builder()),
-            (CONFIGLIB_BUILDER, "define", Some(CONFIGLIB)) => {
+        let builder = receiver.filter(|held| host_config::is(held, HostKind::ConfiglibBuilder));
+        match (r.owner.as_str(), r.name.as_str(), builder) {
+            // A new builder per `new*Config`; its steps return `this`.
+            (CONFIGLIB_BUILDERS, name, _) if name.starts_with("new") => {
+                let serial = self.config_serial();
+                Some(host_config::handle(
+                    HostKind::ConfiglibBuilder,
+                    &[Value::Int(serial)],
+                ))
+            }
+            (CONFIGLIB_BUILDER, "define", Some(_)) => {
                 let params = r.descriptor.split(')').next()?.trim_start_matches('(');
                 let default = args.get(1)?;
                 // `define(String, boolean)`, `(String, int, int, int)`,
@@ -170,22 +184,34 @@ impl<H: Host> Runtime<'_, H> {
                     return None;
                 }
                 self.static_fields.insert(format!("configlib#{n}"), boxed);
-                Some(Value::Ref(Some(format!("{CONFIGLIB_VALUE}{n}"))))
+                Some(host_config::handle(
+                    HostKind::ConfiglibValue,
+                    &[Value::Int(n as i32)],
+                ))
             }
-            (CONFIGLIB_BUILDER, "build", Some(CONFIGLIB)) => {
+            (CONFIGLIB_BUILDER, "build", Some(_)) => {
                 Some(Value::default_for(crate::runtime::return_desc(&r.descriptor)))
             }
-            (CONFIGLIB_BUILDER, _, Some(CONFIGLIB))
+            (CONFIGLIB_BUILDER, _, Some(builder))
                 if r.descriptor.ends_with(&format!("L{CONFIGLIB_BUILDER};")) =>
             {
-                Some(builder())
+                Some(builder.clone())
             }
-            ("java/util/function/Supplier", "get", Some(value)) => {
-                let n = value.strip_prefix(CONFIGLIB_VALUE)?;
+            ("java/util/function/Supplier", "get", _) => {
+                let n = host_config::configlib_index(receiver?)?;
                 self.static_fields.get(&format!("configlib#{n}")).cloned()
             }
             _ => None,
         }
+    }
+
+    /// A serial no other object of this run has: the runtime's object counter
+    /// (kept with the resident heap, so it only grows), which makes a fresh
+    /// builder's or handler's key name exactly that object.
+    fn config_serial(&mut self) -> i32 {
+        let serial = self.next_object;
+        self.next_object = self.next_object.saturating_add(1);
+        i32::try_from(serial).unwrap_or(i32::MAX)
     }
 
     /// The config object of `class`, built from its defaults the first time.

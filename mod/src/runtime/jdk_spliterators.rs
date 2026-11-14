@@ -283,10 +283,7 @@ impl<H: Host> Runtime<'_, H> {
             let key = key.to_owned();
             return self.model_member(&key, r, args);
         }
-        let Some(object_class) = expect_ref(this)
-            .and_then(|marker| jvm_dispatch::constructed_object_class(marker))
-            .map(str::to_owned)
-        else {
+        let Some(object_class) = crate::runtime::jar_object::object_class(this).map(str::to_owned) else {
             return Ok(None);
         };
         let abstract_split = self.class_is_instance(&object_class, ABSTRACT_SPLITERATOR);

@@ -26,9 +26,17 @@ pub(crate) const STRING_TYPES: &[&str] = &[
     "java/lang/constant/ConstantDesc",
 ];
 
-/// Runtime markers with no `/`, `#`, `@` or `:` in them, which the shape rule
-/// of [`is_plain_string`] cannot tell from text.
-const SEPARATOR_FREE_MARKERS: &[&str] = &["mixin-environment"];
+/// The prefixes of marker families that are host handles now (#156): no
+/// runtime value is text spelled so, so such a text is a `String`.
+const RETIRED_PREFIXES: &[&str] = &[
+    "array/",
+    "config-holder/",
+    "config-builder/",
+    "configlib-value/",
+    "mixin/callback-info/",
+    "mixin-plugin/",
+    "mixin-side/",
+];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`
 /// is one of the types a string is an instance of.
@@ -55,13 +63,16 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 /// a text spelled like their old markers (`array/...`) or their keys
 /// (`[I#0`, `color-collection#0`) is a `String`.
 pub(crate) fn is_plain_string(marker: &str) -> bool {
-    if marker.starts_with("array/") {
+    if RETIRED_PREFIXES
+        .iter()
+        .any(|prefix| marker.starts_with(prefix))
+    {
         return true;
     }
-    if marker.starts_with('@')
-        || host_array::is_array_descriptor(marker)
-        || SEPARATOR_FREE_MARKERS.contains(&marker)
-    {
+    // The last separator-free markers (`guava-cache-builder`,
+    // `mixin-environment`) became handles in #179 and #180, so a text with no
+    // `/`, `#`, `@` or `:` is never a runtime marker any more.
+    if marker.starts_with('@') || host_array::is_array_descriptor(marker) {
         return false;
     }
     if let Some((class, _)) = marker.split_once('#')

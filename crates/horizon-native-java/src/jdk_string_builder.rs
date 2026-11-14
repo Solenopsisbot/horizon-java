@@ -842,14 +842,14 @@ impl<H: Host> Runtime<'_, H> {
                 if let Some(text) = crate::java_tostring::modelled_marker(self.host, marker) {
                     return Some(text);
                 }
-                crate::jar_text::object_marker_class(marker)
+                crate::jar_object::packaged_key_class(marker)
                     .is_none()
                     .then(|| marker.to_owned())
             }
             // A `CharSequence`/`StringBuilder`/`StringBuffer` parameter: an
             // object this run built from a jar class (or one the host
             // models, a `CharBuffer`) has text only its `charAt` knows.
-            _ => crate::jar_text::object_marker_class(marker)
+            _ => crate::jar_object::packaged_key_class(marker)
                 .is_none()
                 .then(|| marker.to_owned()),
         }

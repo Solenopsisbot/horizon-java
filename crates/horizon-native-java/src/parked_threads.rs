@@ -28,7 +28,6 @@
 //! reported as unknown (`None`) rather than invented.
 
 use super::*;
-use crate::jvm_dispatch::constructed_object_class;
 
 /// A thread a jar started whose body the runtime never ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +49,9 @@ pub(crate) struct ThreadTable {
 
 /// How the report names a `Runnable` value.
 fn runnable_name(value: &Value) -> String {
+    if let Some(class) = crate::jar_object::object_class(value) {
+        return class.to_owned();
+    }
     let Some(marker) = expect_ref(value) else {
         return "null".into();
     };
@@ -62,9 +64,10 @@ fn runnable_name(value: &Value) -> String {
                 .to_owned();
         }
     }
-    constructed_object_class(marker)
-        .or_else(|| marker.split_once('#').map(|(class, _)| class))
-        .unwrap_or(marker)
+    // A host model's own object (`java/lang/Thread#neutral2`) names its class.
+    marker
+        .split_once('#')
+        .map_or(marker.as_str(), |(class, _)| class)
         .to_owned()
 }
 

@@ -261,9 +261,8 @@ impl<H: Host> Runtime<'_, H> {
         let rules = list.rules;
         // `ArrayList.equalsArrayList` (the other's class is exactly
         // `ArrayList`) checks the sizes before any element.
-        let exactly_array_list = expect_ref(other)
-            .and_then(|marker| marker.split_once('#'))
-            .is_some_and(|(class, _)| class == "java/util/ArrayList");
+        let exactly_array_list = crate::jar_object::value_marker_class(other)
+            .is_some_and(|class| class == "java/util/ArrayList");
         if rules.array_list && exactly_array_list && mine.len() != theirs.len() {
             return Ok(false);
         }
