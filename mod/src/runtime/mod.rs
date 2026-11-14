@@ -29,6 +29,7 @@ mod checkcast;
 mod class_init;
 mod class_precedence;
 pub mod client_surface;
+mod client_values;
 mod collection_base;
 mod collection_callback;
 mod collection_store;
