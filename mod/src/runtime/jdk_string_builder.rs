@@ -705,6 +705,17 @@ impl<H: Host> Runtime<'_, H> {
         } else {
             match self.string_builders.get(&marker) {
                 Some(text) => text.clone(),
+                // A builder the resident heap collected: its text is gone, a
+                // missed root, never an empty builder (#226 review).
+                None if receiver
+                    .and_then(crate::runtime::jar_object::object_key)
+                    .is_some_and(|key| self.host.object_collected(key)) =>
+                {
+                    return Err(NativeError::Metadata(format!(
+                        "the jar's object {marker} was collected while still reachable (a missed heap root); {}#{}",
+                        r.owner, r.name
+                    )));
+                }
                 None => return Ok(None),
             }
         };

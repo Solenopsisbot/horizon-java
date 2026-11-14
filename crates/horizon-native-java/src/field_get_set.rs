@@ -810,12 +810,23 @@ impl<H: Host> Runtime<'_, H> {
                 None => self.constant_value_of(field)?,
             }
         } else {
-            let Some(object) = crate::jar_object::instance_key(object) else {
+            let Some(key) = crate::jar_object::instance_key(object) else {
                 return Ok(None);
             };
-            self.fields
-                .get(&format!("{object}|{}", field.static_key()))
-                .cloned()
+            let held = self
+                .fields
+                .get(&format!("{key}|{}", field.static_key()))
+                .cloned();
+            if held.is_none()
+                && let Some(collected) = crate::jar_object::object_key(object)
+                && self.host.object_collected(collected)
+            {
+                return Err(NativeError::Metadata(format!(
+                    "the jar's object {collected} was collected while still reachable (a missed heap root); field {}",
+                    field.static_key()
+                )));
+            }
+            held
         };
         let value = held.unwrap_or_else(|| Value::default_for(field.descriptor));
         Ok(match Prim::of_descriptor(field.descriptor) {

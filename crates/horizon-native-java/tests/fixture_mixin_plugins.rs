@@ -480,3 +480,209 @@ public final class Main {
         "{refused:?}"
     );
 }
+
+/// A refused plugin's session is rolled back (statics, heap), and the
+/// entrypoint runs after it. Its objects must get numbers no earlier object
+/// had: the session may have reached higher ones, and a rollback that
+/// rewound the counter made the entrypoint's first new object look like one
+/// a collection had freed (#226 review). Nothing is collected while a
+/// session may still be rolled back. Java 25 runs `Main`'s body to
+/// `0123…39`.
+#[test]
+fn a_rolled_back_session_never_hands_its_object_numbers_out_again() {
+    let broken = "package demo;
+public class BrokenPlugin extends Base {
+    static final class Junk { int a; Junk(int a) { this.a = a; } }
+    public void onLoad(String mixinPackage) {
+        for (int i = 0; i < 3000; i++) { Junk j = new Junk(i); j.a++; }
+        Unmodelled.call();
+    }
+}
+";
+    let base = "package demo;
+import java.util.*;
+import org.objectweb.asm.tree.ClassNode;
+import org.spongepowered.asm.mixin.extensibility.*;
+public abstract class Base implements IMixinConfigPlugin {
+    public String getRefMapperConfig() { return null; }
+    public boolean shouldApplyMixin(String target, String mixin) { return true; }
+    public void acceptTargets(Set<String> mine, Set<String> others) {}
+    public List<String> getMixins() { return null; }
+    public void preApply(String t, ClassNode n, String m, IMixinInfo i) {}
+    public void postApply(String t, ClassNode n, String m, IMixinInfo i) {}
+}
+";
+    let main = "package demo;
+public final class Main {
+    public static String RESULT;
+    static final class Cell { int v; String name; Cell(int v, String n) { this.v = v; this.name = n; } }
+    public void onInitialize() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 40; i++) { Cell c = new Cell(i, \"c\"); sb.append(c.v); }
+        RESULT = sb.toString();
+    }
+}
+";
+    let fixture = Fixture::build(
+        "rollback-numbers",
+        &[("demo/Base.java", base), ("demo/BrokenPlugin.java", broken)],
+        &[(
+            "broken.mixins.json",
+            "demo.BrokenPlugin",
+            &["StoppedDeclined"],
+        )],
+        main,
+    );
+    let jar = fixture.load();
+    let mut host = jar.seed_host(
+        StdHost::new()
+            .with_environment_type("SERVER")
+            .with_strict_unknown_host_calls(),
+    );
+    use horizon_native_java::Host as _;
+    jar.execute("demo.Main", None, "main", &mut host).unwrap();
+    let result = host
+        .persistent_class_state()
+        .0
+        .get("demo/Main#RESULTLjava/lang/String;")
+        .cloned();
+    let java: String = (0..40).map(|i| i.to_string()).collect();
+    assert_eq!(result, Some(horizon_native_java::Value::Ref(Some(java))));
+}
+
+/// The entrypoint's own `java/util/HashMap`s are empty when made, even after a
+/// refused plugin session made maps of its own (#213). servercore's two Mixin
+/// plugins stop in `onLoad` and are rolled back. Rolling back once rewound
+/// the allocation counter, so the entrypoint's `new HashMap<>()` got a number
+/// a session map had had, and with it that map's host hash table: DazzleConf's
+/// `ValueSerialiserMap.of(Map)` then found an `ImmutableCollections$List12`
+/// among its serialisers and threw a `ClassCastException` Java never throws.
+/// `demo.Main` is DazzleConf 1.3.0-M2's shape (its copy, `entrySet()` walk,
+/// `checkcast` of each value and key check); Java 25 (Temurin 25.0.5,
+/// `javac --release 21`, the same on two runs) answers [`DAZZLECONF_JAVA`]
+/// for its body, which a refused session must not change.
+#[test]
+fn a_rolled_back_sessions_maps_never_reach_the_entrypoints_maps() {
+    let filling = "package demo;
+import java.util.*;
+public class FillingPlugin extends Base {
+    public void onLoad(String mixinPackage) {
+        List<Map<Class<?>, Object>> kept = new ArrayList<>();
+        for (int i = 0; i < 64; i++) {
+            Map<Class<?>, Object> m = new HashMap<>();
+            m.put(String.class, List.of(\"x\", \"y\"));
+            kept.add(m);
+        }
+        Unmodelled.call();
+    }
+}
+";
+    let base = "package demo;
+import java.util.*;
+import org.objectweb.asm.tree.ClassNode;
+import org.spongepowered.asm.mixin.extensibility.*;
+public abstract class Base implements IMixinConfigPlugin {
+    public String getRefMapperConfig() { return null; }
+    public boolean shouldApplyMixin(String target, String mixin) { return true; }
+    public void acceptTargets(Set<String> mine, Set<String> others) {}
+    public List<String> getMixins() { return null; }
+    public void preApply(String t, ClassNode n, String m, IMixinInfo i) {}
+    public void postApply(String t, ClassNode n, String m, IMixinInfo i) {}
+}
+";
+    // servercore has two configs, each with a plugin that stops.
+    let fixture = Fixture::build(
+        "rollback-maps",
+        &[
+            ("demo/Base.java", base),
+            ("demo/FillingPlugin.java", filling),
+        ],
+        &[
+            (
+                "first.mixins.json",
+                "demo.FillingPlugin",
+                &["StoppedDeclined"],
+            ),
+            ("second.mixins.json", "demo.FillingPlugin", &["LeaveMixin"]),
+        ],
+        DAZZLECONF_MAIN,
+    );
+    let jar = fixture.load();
+    let mut host = jar.seed_host(
+        StdHost::new()
+            .with_environment_type("SERVER")
+            .with_strict_unknown_host_calls(),
+    );
+    use horizon_native_java::Host as _;
+    jar.execute("demo.Main", None, "main", &mut host).unwrap();
+    let result = host
+        .persistent_class_state()
+        .0
+        .get("demo/Main#RESULTLjava/lang/String;")
+        .cloned();
+    assert_eq!(
+        result,
+        Some(horizon_native_java::Value::Ref(Some(
+            DAZZLECONF_JAVA.into()
+        )))
+    );
+}
+
+/// What Java 25 printed for `DAZZLECONF_MAIN`'s `onInitialize` (`RESULT`).
+const DAZZLECONF_JAVA: &str = "0[];1[java.lang.Integer=ints]";
+
+/// DazzleConf's `ConfigurationOptions.Builder` → `ValueSerialiserMap.of(Map)`.
+const DAZZLECONF_MAIN: &str = r#"package demo;
+
+import java.util.*;
+
+/**
+ * DazzleConf 1.3.0-M2's shape (servercore, #213): `ConfigurationOptions.Builder` keeps its serialisers in a
+ * `HashMap<Class<?>, ValueSerialiser<?>>`, and `ValueSerialiserMap.of(Map)` copies it with `new HashMap<>(map)`,
+ * walks the copy's `entrySet()`, casts each value to `ValueSerialiser` and checks it sits at its own target class.
+ */
+public final class Main {
+    public static String RESULT;
+
+    interface Serialiser<T> {
+        Class<T> getTargetClass();
+    }
+
+    static final class Ints implements Serialiser<Integer> {
+        public Class<Integer> getTargetClass() { return Integer.class; }
+        public String toString() { return "ints"; }
+    }
+
+    /** `ValueSerialiserMap.of(Map)`. */
+    static String of(Map<Class<?>, ? extends Serialiser<?>> serialisers) {
+        Map<Class<?>, Serialiser<?>> copy = new HashMap<>(serialisers);
+        List<String> seen = new ArrayList<>();
+        for (Map.Entry<Class<?>, Serialiser<?>> entry : copy.entrySet()) {
+            Class<?> key = entry.getKey();
+            Serialiser<?> serialiser = entry.getValue();
+            Objects.requireNonNull(serialiser, "serialiser");
+            if (key != serialiser.getTargetClass()) {
+                throw new IllegalArgumentException(serialiser + " is at a mismatched key " + key.getName());
+            }
+            seen.add(key.getName() + "=" + serialiser);
+        }
+        Collections.sort(seen);
+        return copy.size() + "" + seen;
+    }
+
+    public void onInitialize() {
+        // DazzleConf's defaults first (an empty builder), then the jar's own serialiser. One: a `HashMap`
+        // keyed by two `Class`es iterates in identity-hash order, which no run reproduces (counted).
+        Map<Class<?>, Serialiser<?>> defaults = new HashMap<>();
+        Map<Class<?>, Serialiser<?>> mine = new HashMap<>();
+        mine.put(Integer.class, new Ints());
+        String result;
+        try {
+            result = of(defaults) + ";" + of(mine);
+        } catch (RuntimeException e) {
+            result = e.getClass().getName() + ": " + e.getMessage();
+        }
+        RESULT = result;
+    }
+}
+"#;
