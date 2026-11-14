@@ -460,6 +460,14 @@ pub enum HostKind {
     /// `ItemStack`, a hit result, a placeholder for an object the hook did not
     /// give): key its marker, never canonical.
     GameTransient,
+    /// A collection's `iterator()`: key `iterator/<n>`, the host's table key, or
+    /// `iterator/empty` for `Collections.emptyIterator()` (`host_iterator.rs`).
+    Iterator,
+    /// An `Enumeration` (`ClassLoader.getResources`, `Collections.enumeration`,
+    /// `Vector.elements()`): key `enumeration/<n>` or `enumeration/empty`.
+    Enumeration,
+    /// A list's `listIterator()`: key `list-iterator/<n>`.
+    ListIterator,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1541,7 +1549,8 @@ const KINDS: &[KindInfo] = &[
         kind: HostKind::Collector,
         tag: "coll",
         class: ClassRule::Fixed("java/util/stream/Collectors$CollectorImpl"),
-        canonical: never_canonical,
+        // Guava's two shared collectors; every other one is its own object.
+        canonical: crate::host_collector::canonical,
         methods: &crate::stream_pipeline::COLLECTOR_IMPL,
     },
     KindInfo {
@@ -1878,6 +1887,35 @@ const KINDS: &[KindInfo] = &[
         // Its own object each time the game makes one.
         canonical: never_canonical,
         methods: &crate::game_object::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Iterator,
+        tag: "itr",
+        // The collection's own iterator class (`ArrayList$Itr`...), not named here.
+        class: ClassRule::Unknown {
+            declared: crate::host_iterator::iterator_types,
+        },
+        // A per-allocation key, or the one empty iterator.
+        canonical: always_canonical,
+        methods: &crate::host_iterator::ITERATOR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Enumeration,
+        tag: "enm",
+        class: ClassRule::Unknown {
+            declared: crate::host_iterator::enumeration_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_iterator::ITERATOR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ListIterator,
+        tag: "litr",
+        class: ClassRule::Unknown {
+            declared: crate::host_iterator::list_iterator_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_iterator::ITERATOR_METHODS,
     },
 ];
 

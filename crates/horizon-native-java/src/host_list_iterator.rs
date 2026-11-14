@@ -89,10 +89,10 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver.filter(|_| matches!(opcode, 0xb6 | 0xb9)) else {
             return Ok(None);
         };
-        let Some(marker) = expect_ref(receiver).cloned() else {
-            return Ok(None);
-        };
-        if marker.starts_with(PREFIX) {
+        // A list iterator is a handle keyed by its table key (`host_iterator.rs`).
+        if let Some(marker) = crate::host_iterator::marker(receiver).cloned()
+            && marker.starts_with(PREFIX)
+        {
             let Some(mut it) = self.host.list_iterator(&marker) else {
                 return Ok(None);
             };
@@ -134,7 +134,7 @@ impl<H: Host> Runtime<'_, H> {
         Ok(self
             .host
             .new_list_iterator(state)
-            .map(|marker| Value::Ref(Some(marker))))
+            .map(crate::host_iterator::list_iterator))
     }
 
     /// `checkForComodification()`.
