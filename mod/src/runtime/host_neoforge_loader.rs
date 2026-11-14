@@ -130,22 +130,48 @@ pub(crate) fn container_types(key: &str) -> &'static [&'static str] {
     }
 }
 
-/// `instanceof` of a container: the `minecraft` one is exactly a
-/// `MinecraftModContainer`, whose only supertypes are `ModContainer` and
-/// `Object` (FML's own class, no Mixin reaches it), so anything else is a
-/// proved `false`; any other container answers from its declared types.
+/// `instanceof` of a container. FML builds the `minecraft` container as a
+/// `MinecraftModContainer` and a `javafml` mod's as an `FMLModContainer`
+/// itself (`new`, never a subclass); each extends `ModContainer` and
+/// implements nothing, and FML's classes are not Mixin targets. So their
+/// whole type is known and anything else is a proved `false`. Any other
+/// container answers from its declared types.
 fn container_instance_of(
     handle: &HostRef,
     wanted: &str,
     hierarchy: &dyn ClassHierarchy,
 ) -> Option<bool> {
-    if container_class(handle) == Some(MINECRAFT) {
-        return Some(matches!(
-            wanted,
-            MINECRAFT_MOD_CONTAINER | MOD_CONTAINER | "java/lang/Object"
-        ));
-    }
-    instance_of_class(handle, wanted, hierarchy)
+    let exact = match container_class(handle) {
+        Some(MINECRAFT) => MINECRAFT_MOD_CONTAINER,
+        Some(JAVAFML) => FML_MOD_CONTAINER,
+        _ => {
+            return not_a_config_type(wanted)
+                .or_else(|| instance_of_class(handle, wanted, hierarchy));
+        }
+    };
+    Some(matches!(wanted, MOD_CONTAINER | "java/lang/Object") || wanted == exact)
+}
+
+/// `ModConfig.Type` is a final enum whose only instances are its constants
+/// (config type handles): no other object is one.
+fn not_a_config_type(wanted: &str) -> Option<bool> {
+    (wanted == CONFIG_TYPE).then_some(false)
+}
+
+/// `instanceof` of any other loader object: never a `ModConfig.Type`, else
+/// its declared types.
+fn loader_instance_of(
+    handle: &HostRef,
+    wanted: &str,
+    hierarchy: &dyn ClassHierarchy,
+) -> Option<bool> {
+    not_a_config_type(wanted).or_else(|| instance_of_class(handle, wanted, hierarchy))
+}
+
+/// `instanceof` of a config type: exactly `ModConfig.Type` (final, no
+/// constant bodies), whose supertypes are its declared types.
+fn config_type_instance_of(_: &HostRef, wanted: &str, _: &dyn ClassHierarchy) -> Option<bool> {
+    Some(wanted == "java/lang/Object" || config_type_types("").contains(&wanted))
 }
 
 /// Mod `id`'s `IModInfo` (`ModContainer.getModInfo`).
@@ -250,7 +276,7 @@ pub(crate) const OBJECT_METHODS: Methods = Methods {
     to_string: |_, _| Ok(None),
     hash_code: |_, _| Ok(None),
     equals: identity_equals,
-    instance_of: instance_of_class,
+    instance_of: loader_instance_of,
     // The loader's objects belong to the run that asked for them.
     crosses_jars: |_, _| false,
     compare_to: None,
@@ -264,6 +290,7 @@ pub(crate) const CONTAINER_METHODS: Methods = Methods {
 /// `Enum`: `toString` the name, `compareTo` the ordinals' difference,
 /// identity `equals`, an identity `hashCode` (counted).
 pub(crate) const CONFIG_TYPE_METHODS: Methods = Methods {
+    instance_of: config_type_instance_of,
     to_string: |handle, _| Ok(config_type_name(&Value::Host(handle.clone()))),
     compare_to: Some(|handle, other, _| {
         Ok(match other {
