@@ -6360,6 +6360,18 @@ impl Host for StdHost {
         if let Some(answer) = self.uuid_member(r, receiver, args) {
             return answer;
         }
+        // A jar's `new URI(text)` is a JDK object no model reads: building it from text
+        // `URI` accepts has no effect to answer, and every member is counted, never its
+        // key (`host_jdk_value.rs`; `URI.create` is the modelled handle).
+        if r.owner == "java/net/URI" && jar_object::object_class(receiver) == Some("java/net/URI") {
+            if let ("<init>", "(Ljava/lang/String;)V", [Value::Ref(Some(text))]) =
+                (r.name.as_str(), r.descriptor.as_str(), args)
+                && host_jdk_value::uri_parts(text).is_some()
+            {
+                return Ok(Value::Void);
+            }
+            return self.unknown_host_call(r);
+        }
         if let Some(value) = self.guava_text(r, Some(receiver), args) {
             return value;
         }

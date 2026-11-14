@@ -134,6 +134,8 @@ fn jdk_values_answer_as_java_25_or_count() {
             ),
         ),
         ("nuToString", Exact("00000000-0000-0001-0000-000000000002")),
+        ("newUri", Counted),
+        ("newUriConcat", Counted),
         (
             "constructedSets",
             Exact(

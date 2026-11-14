@@ -4,7 +4,7 @@ import java.lang.reflect.Method;
 /** Runs every HostJdkValues probe on the JDK. */
 public final class HostJdkValuesOracle {
   public static void main(String[] args) throws Exception {
-    for (String probe : new String[] {"spelled", "spelledTypes", "uuids", "durations", "uris", "identity", "uriCase", "uriHash", "constructed", "nuToString", "constructedSets", "uuidFields", "durationEdges", "uriParts", "uriBad", "uriEscaped", "uriOddHost"}) {
+    for (String probe : new String[] {"spelled", "spelledTypes", "uuids", "durations", "uris", "identity", "uriCase", "uriHash", "constructed", "nuToString", "newUri", "newUriConcat", "constructedSets", "uuidFields", "durationEdges", "uriParts", "uriBad", "uriEscaped", "uriOddHost"}) {
       Method m = HostJdkValues.class.getMethod(probe);
       Object answer;
       try {

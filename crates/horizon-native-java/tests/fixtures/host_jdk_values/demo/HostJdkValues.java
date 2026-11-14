@@ -98,6 +98,15 @@ public final class HostJdkValues {
     return new UUID(1L, 2L).toString();
   }
 
+  /** `new URI(text)`: a JDK object no model reads (counted, never its key). */
+  public static String newUri() throws Exception {
+    return new URI("http://a/b").toString();
+  }
+
+  public static String newUriConcat() throws Exception {
+    return "" + new URI("http://a/b");
+  }
+
   /** A constructed UUID in hash and tree collections with a parsed one. */
   public static String constructedSets() {
     UUID n = new UUID(1L, 2L);
