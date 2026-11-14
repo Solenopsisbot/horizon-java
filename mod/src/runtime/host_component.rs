@@ -31,9 +31,19 @@
 //! (no style or arguments, any siblings) are equal exactly when their JSON is. Anything else is
 //! counted: the JSON prints some different values one way (a translation argument `1` and `1L`)
 //! and some equal ones two ways (a colour by name or by value).
-//! `hashCode` combines the contents', style's and siblings' hashes: counted. `toString` is the
+//! `hashCode` is `31 * (31 * (31 + contents) + style) + siblings`: exact for a plain tree (its
+//! value computed from the state now; an empty text is `PlainTextContents.EMPTY`, an identity
+//! hash), counted otherwise. A hash collection keeps the hash an element had when it was added
+//! (`hash_table.rs`), so a component changed after it went in is missed by `contains`/`get`, as in
+//! Java; one whose hash is unknown makes a lookup among components counted. `toString` is the
 //! contents' text, then `[style=…, siblings=…]` when there is either: exact for a bare text
-//! (`literal{hi}`) or a bare key (`translation{key='k', args=[]}`), counted otherwise.
+//! (`literal{hi}`, `empty` for `""`) or a bare key (`translation{key='k', args=[]}`), counted
+//! otherwise.
+//!
+//! **Bounds (departure).** A read resolves at most 64 KiB of rendered JSON and 512 levels; past
+//! either (a component grown huge, or a cycle such as `a.append(a)`, where Java throws
+//! `StackOverflowError` when it reads), the read is counted instead of answered. A change is not
+//! measured, so `a.append(a)` itself succeeds, as in Java.
 //!
 //! **Identity.** Every factory call makes a new object (`Component.literal("a")` twice is two, and
 //! `copy` another), and each gets its own serial: one key is one object (canonical), so `==` is
@@ -87,8 +97,12 @@ static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
 /// end (the bound the marker model had).
 pub(crate) const MAX_JSON_BYTES: usize = 64 * 1024;
 /// How deep siblings and arguments resolve: deeper (or a cycle, `a.append(a)`, which Java
-/// answers with a `StackOverflowError`) is unknown.
-const MAX_DEPTH: usize = 64;
+/// answers with a `StackOverflowError` when the component is read) is unknown, so the read is
+/// counted. Java nests until its stack runs out, a few thousand levels.
+const MAX_DEPTH: usize = 512;
+/// The siblings one component may hold: an `append` past it is refused (a loop appending without
+/// end), the one bound a change itself checks.
+const MAX_SIBLINGS: usize = 16 * 1024;
 
 /// What a component holds once it has been changed in place: its contents and style as vanilla
 /// JSON, then the siblings appended since and the translation arguments, as the objects they
@@ -178,7 +192,9 @@ pub(crate) fn state_of(value: &Value, states: Option<&States>) -> Option<Compone
 }
 
 /// The vanilla JSON `value` stands for now, its siblings and component arguments as they are
-/// now; `None` for any other value, or one nested past [`MAX_DEPTH`]. `argument` writes a
+/// now; `None` for any other value, and for a tree past [`MAX_JSON_BYTES`] as rendered or
+/// nested past [`MAX_DEPTH`] (a reader counts it). Every read is bounded here, so a child that
+/// grows after it was appended cannot carry its parent past the bound. `argument` writes a
 /// translation argument that is not a component.
 pub(crate) fn json_in(
     value: &Value,
@@ -190,22 +206,38 @@ pub(crate) fn json_in(
         states: Option<&States>,
         argument: &dyn Fn(&Value) -> Json,
         depth: usize,
+        budget: &mut usize,
     ) -> Option<Json> {
         if depth > MAX_DEPTH {
             return None;
         }
         let state = state_of(value, states)?;
+        // The node's own contents and style, as written (its children are charged below).
+        let own: usize = state
+            .base
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "extra" | "with"))
+            .map(|(key, value)| key.len() + value.to_string().len() + 4)
+            .sum();
+        *budget = budget.checked_sub(own + 2)?;
         let mut object = state.base;
         if let Some(args) = &state.args {
             let mut with = Vec::with_capacity(args.len());
             for arg in args {
                 with.push(if is_component(arg) {
-                    resolve(arg, states, argument, depth + 1)?
+                    resolve(arg, states, argument, depth + 1, budget)?
                 } else {
-                    argument(arg)
+                    let arg = argument(arg);
+                    *budget = budget.checked_sub(arg.to_string().len() + 1)?;
+                    arg
                 });
             }
             object.insert("with".into(), Json::Array(with));
+        } else if let Some(with) = object.get("with") {
+            *budget = budget.checked_sub(with.to_string().len())?;
+        }
+        if let Some(extra) = object.get("extra") {
+            *budget = budget.checked_sub(extra.to_string().len())?;
         }
         if !state.siblings.is_empty() {
             let mut extra = match object.remove("extra") {
@@ -213,43 +245,39 @@ pub(crate) fn json_in(
                 _ => Vec::new(),
             };
             for sibling in &state.siblings {
-                extra.push(resolve(sibling, states, argument, depth + 1)?);
+                extra.push(resolve(sibling, states, argument, depth + 1, budget)?);
             }
             object.insert("extra".into(), Json::Array(extra));
         }
         Some(Json::Object(object))
     }
-    resolve(value, states, argument, 0)
+    let mut budget = MAX_JSON_BYTES;
+    resolve(value, states, argument, 0, &mut budget)
 }
 
 /// Change the component `receiver` in place: `change` its state, then keep it in `states`. The
-/// error names a component grown past [`MAX_JSON_BYTES`] or nested past [`MAX_DEPTH`] (the
-/// change is undone).
+/// change itself is not measured (a read is, [`json_in`]): `a.append(a)` succeeds, as in Java. The
+/// error names a component whose own contents grew past [`MAX_JSON_BYTES`] or that holds more
+/// than [`MAX_SIBLINGS`] siblings (the change is undone).
 pub(crate) fn change(
     states: &mut States,
     receiver: &Value,
-    argument: &dyn Fn(&Value) -> Json,
+    _argument: &dyn Fn(&Value) -> Json,
     change: impl FnOnce(&mut ComponentState),
 ) -> Result<(), NativeError> {
     let (Some(handle), Some(mut state)) = (handle_of(receiver), state_of(receiver, Some(states)))
     else {
         return Err(NativeError::Metadata("not a chat component".into()));
     };
-    let marker = marker(handle).to_owned();
-    let before = states.insert(marker.clone(), {
-        change(&mut state);
-        state
-    });
-    let size = json_in(receiver, Some(states), argument).map(|json| json.to_string().len());
-    if size.is_none_or(|size| size > MAX_JSON_BYTES) {
-        match before {
-            Some(before) => states.insert(marker, before),
-            None => states.remove(&marker),
-        };
+    change(&mut state);
+    if state.siblings.len() > MAX_SIBLINGS
+        || Json::Object(state.base.clone()).to_string().len() > MAX_JSON_BYTES
+    {
         return Err(NativeError::Metadata(format!(
-            "a chat component grew past {MAX_JSON_BYTES} bytes or {MAX_DEPTH} levels"
+            "a chat component grew past {MAX_JSON_BYTES} bytes or {MAX_SIBLINGS} siblings"
         )));
     }
+    states.insert(marker(handle).to_owned(), state);
     Ok(())
 }
 
@@ -327,15 +355,73 @@ fn component_to_string(
     let Some(json) = nested.component_json(&Value::Host(handle.clone())) else {
         return Ok(None);
     };
+    // `PlainTextContents.create("")` is `EMPTY`, whose `toString` is `empty`.
     Ok(bare(&json, "text")
-        .map(|text| format!("literal{{{text}}}"))
+        .map(|text| {
+            if text.is_empty() {
+                "empty".to_owned()
+            } else {
+                format!("literal{{{text}}}")
+            }
+        })
         .or_else(|| {
             bare(&json, "translate").map(|key| format!("translation{{key='{key}', args=[]}}"))
         }))
 }
 
-fn unknown_hash(_: &HostRef, _: &mut dyn Nested) -> Result<Option<i32>, NativeError> {
-    Ok(None)
+/// `Style.EMPTY.hashCode()`: `Objects.hash` of its ten null fields, `31^10`.
+const EMPTY_STYLE_HASH: i32 = 31_i32
+    .wrapping_mul(31)
+    .wrapping_mul(31)
+    .wrapping_mul(31)
+    .wrapping_mul(31)
+    .wrapping_mul(31)
+    .wrapping_mul(31)
+    .wrapping_mul(31)
+    .wrapping_mul(31)
+    .wrapping_mul(31);
+
+/// `MutableComponent.hashCode()` of a plain tree ([`plain_tree`]): `31 * (31 * (31 +
+/// contents) + style) + siblings` (26.3 bytecode), the contents a `LiteralContents` record
+/// (its text's hash) or a `TranslatableContents` without arguments (`(31 * key + 0) * 31 +
+/// Arrays.hashCode(NO_ARGS)`), the style `Style.EMPTY`'s, the siblings `List.hashCode`. An
+/// empty text is `PlainTextContents.EMPTY`, an identity hash: `None`.
+fn tree_hash(json: &Json) -> Option<i32> {
+    let Json::Object(object) = json else {
+        return None;
+    };
+    let contents = match (object.get("text"), object.get("translate")) {
+        (Some(Json::String(text)), None) if !text.is_empty() => {
+            crate::runtime::jdk_model::java_string_hash(text)
+        }
+        (None, Some(Json::String(key))) => crate::runtime::jdk_model::java_string_hash(key)
+            .wrapping_mul(31)
+            .wrapping_mul(31)
+            .wrapping_add(1),
+        _ => return None,
+    };
+    let mut siblings = 1_i32;
+    if let Some(Json::Array(extra)) = object.get("extra") {
+        for sibling in extra {
+            siblings = siblings.wrapping_mul(31).wrapping_add(tree_hash(sibling)?);
+        }
+    }
+    Some(
+        31_i32
+            .wrapping_add(contents)
+            .wrapping_mul(31)
+            .wrapping_add(EMPTY_STYLE_HASH)
+            .wrapping_mul(31)
+            .wrapping_add(siblings),
+    )
+}
+
+/// `hashCode` of a component as it is now: exact for a plain tree, counted otherwise.
+fn component_hash(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<i32>, NativeError> {
+    Ok(nested
+        .component_json(&Value::Host(handle.clone()))
+        .filter(plain_tree)
+        .and_then(|json| tree_hash(&json)))
 }
 
 /// `MutableComponent.equals`: contents, style and siblings.
@@ -378,7 +464,7 @@ fn stays_in_its_jar(_: &HostRef, _: &dyn Fn(&Value) -> bool) -> bool {
 
 pub(crate) const COMPONENT_METHODS: Methods = Methods {
     to_string: component_to_string,
-    hash_code: unknown_hash,
+    hash_code: component_hash,
     equals: component_equals,
     instance_of: |_, wanted, hierarchy| class_instance_of(MUTABLE, wanted, hierarchy),
     crosses_jars: stays_in_its_jar,

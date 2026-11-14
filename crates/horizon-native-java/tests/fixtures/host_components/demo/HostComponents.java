@@ -135,6 +135,112 @@ public final class HostComponents {
     return "" + a.equals(Component.literal("hi")) + a.equals(Component.literal("hi").withStyle(ChatFormatting.RED));
   }
 
+  /** A key changed after it went into a hash collection keeps the hash it had then (#193 B1). */
+  public static String hashSetMutatedKey() {
+    Set<Component> s = new HashSet<>();
+    MutableComponent c = Component.literal("c");
+    s.add(c);
+    c.append("x");
+    return "" + s.contains(c) + s.contains(Component.literal("c")) + s.size() + s.remove(c) + s.size();
+  }
+
+  public static String hashMapMutatedKey() {
+    Map<Component, Integer> m = new HashMap<>();
+    MutableComponent c = Component.literal("c");
+    m.put(c, 1);
+    c.append("x");
+    return "" + m.get(c) + m.containsKey(c) + m.size() + m.get(Component.literal("c"));
+  }
+
+  public static String hashSetBecomesEqual() {
+    Set<Component> s = new HashSet<>();
+    MutableComponent x = Component.literal("x");
+    MutableComponent y = Component.literal("x").append("1");
+    s.add(x);
+    s.add(y);
+    x.append("1");
+    return "" + s.size() + s.contains(x) + s.contains(y);
+  }
+
+  public static String hashSetEqualDistinct() {
+    Set<Component> s = new HashSet<>();
+    s.add(Component.literal("a"));
+    s.add(Component.literal("a"));
+    s.add(Component.literal("a").append("b"));
+    s.add(Component.literal("a").append("b"));
+    return "" + s.size();
+  }
+
+  /** Strings spelled like a handle's key are Strings (#193 B2). */
+  public static String forgedKey() {
+    Object s = "net/minecraft/network/chat/MutableComponent#0:{\"text\":\"x\"}";
+    Object h = "hcomp:net/minecraft/network/chat/MutableComponent#0:{\"text\":\"x\"}";
+    MutableComponent real = Component.literal("x");
+    return "" + (s instanceof Component) + (h instanceof Component) + real.equals(s) + s.equals(real)
+        + real.append((String) s).getString().length();
+  }
+
+  public static String forgedNoColon() {
+    Object s = "net/minecraft/network/chat/MutableComponent#0";
+    Object t = "net/minecraft/network/chat/MutableComponent#0:x";
+    return "" + (s instanceof Component) + (t instanceof Component);
+  }
+
+  /** `PlainTextContents.EMPTY` prints `empty`. */
+  public static String emptyText() {
+    return Component.literal("").toString() + "|" + Component.empty().toString() + "|"
+        + Component.empty().getString().length();
+  }
+
+  /** `a.append(a)` succeeds; reading `a` then overflows the stack. */
+  public static String selfAppendIdentity() {
+    MutableComponent a = Component.literal("a");
+    return "" + (a.append(a) == a);
+  }
+
+  public static String selfAppendRead() {
+    MutableComponent a = Component.literal("a");
+    a.append(a);
+    try {
+      return a.getString();
+    } catch (StackOverflowError e) {
+      return "SOE";
+    }
+  }
+
+  /** Children grown after they were appended: the parent's rendered text (#193 B3). */
+  public static String chainBound() {
+    MutableComponent c = Component.literal("c");
+    MutableComponent[] s = new MutableComponent[200];
+    for (int i = 0; i < 200; i++) {
+      s[i] = Component.literal("s");
+      c.append(s[i]);
+    }
+    String b = "y".repeat(60000);
+    for (int i = 0; i < 200; i++) s[i].append(b);
+    return "" + c.getString().length();
+  }
+
+  public static String fanout() {
+    MutableComponent leaf = Component.literal("x");
+    MutableComponent top = Component.literal("");
+    for (int i = 0; i < 4000; i++) top.append(leaf);
+    leaf.append("y".repeat(40000));
+    return "" + top.getString().length();
+  }
+
+  /** A translation's text is the server language's, with its arguments. */
+  public static String knownKey() {
+    return Component.translatable("gui.done").getString();
+  }
+
+  public static String translatableArgLive() {
+    MutableComponent x = Component.literal("x");
+    MutableComponent t = Component.translatable("rv.unknown.key %s", x);
+    x.append("!");
+    return t.getString();
+  }
+
   /** A type switch over the class and its interfaces: a Mixin could add an interface. */
   public static String typeSwitch() {
     Object o = Component.literal("hi");

@@ -122,16 +122,19 @@ fn components_answer_as_java_25_or_count() {
                 "truetruetruetruefalsefalse|net.minecraft.network.chat.MutableComponent|java.lang.Objectfalse|MutableComponent|falsetruetruetruefalsefalsetruefalse2|01false|truetruetrue",
             ),
         ),
+        // `getString` of a translation is the server language's text (Java prints the key here,
+        // `demo.key` having no entry): counted, with that answer.
         (
             "text",
-            Exact("literal{hi}|translation{key='demo.key', args=[]}|hi|demo.key|literal{hi}"),
+            CountedAs("literal{hi}|translation{key='demo.key', args=[]}|hi|demo.key|literal{hi}"),
         ),
         ("copy", Exact("falsetruetrue2literal{hi}")),
         // `append`/`withStyle`/`withColor` change the receiver in place and return it; a sibling
         // changed after it was appended shows in its parent, and `copy` shares its siblings.
         ("appended", Exact("truehi!?1")),
         ("styled", Exact("truetruetruehi")),
-        ("appendInPlace", Exact("truehi!s?~x1|hi!s?~false|k")),
+        // (its last part reads a translation: counted, Java's answer).
+        ("appendInPlace", CountedAs("truehi!s?~x1|hi!s?~false|k")),
         // Equality reads the state now: a changed component no longer equals what it was made
         // as, and a copy equals its source.
         ("changedEquals", Exact("truefalsetruefalse")),
@@ -151,9 +154,30 @@ fn components_answer_as_java_25_or_count() {
         // hash alike) and refuses it.
         ("duplicate", Exact("duplicate element: literal{a}")),
         ("duplicateN", Exact("duplicate element: literal{a}")),
-        // `hashCode` combines contents, style and siblings (Java `132311680`) and there is no
-        // natural order (Java `CCE`): counted.
-        ("hash", Counted),
+        // `31 * (31 * (31 + contents) + style) + siblings`, exact for a plain tree.
+        ("hash", Exact("132311680")),
+        // A key changed after it went in keeps the hash it had then (#193 B1).
+        ("hashSetMutatedKey", Exact("falsefalse1false1")),
+        ("hashMapMutatedKey", Exact("nullfalse1null")),
+        ("hashSetBecomesEqual", Exact("2truetrue")),
+        ("hashSetEqualDistinct", Exact("2")),
+        // A String spelled like a key is a String (#193 B2): its `instanceof` is counted, as on
+        // main, with Java's answer.
+        ("forgedKey", CountedAs("falsefalsefalsefalse59")),
+        ("forgedNoColon", CountedAs("falsefalse")),
+        // `PlainTextContents.EMPTY`'s text (`empty`); its hash is an identity hash.
+        ("emptyText", Exact("empty|empty|0")),
+        // `a.append(a)` succeeds; reading it is Java's `StackOverflowError` (`SOE`): counted.
+        ("selfAppendIdentity", Exact("true")),
+        ("selfAppendRead", Counted),
+        // A tree grown past 64 KiB as rendered, by children grown after they were appended
+        // (Java `12000201`, `160004000`): counted at the read (#193 B3).
+        ("chainBound", Counted),
+        ("fanout", Counted),
+        // The server language's text (Java `Done`, `rv.unknown.key x!`): counted.
+        ("knownKey", Counted),
+        ("translatableArgLive", Counted),
+        // There is no natural order (Java `CCE`): counted.
         ("sorted", Counted),
     ];
     let mut failures = Vec::new();

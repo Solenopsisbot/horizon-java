@@ -780,15 +780,19 @@ impl<H: Host> GameHookHost<'_, H> {
             ("sendSystemMessage", "(Lnet/minecraft/network/chat/Component;)V") if player => {
                 let uuid = object.uuid.ok_or_else(|| unmodelled(marker, r))?;
                 // The component as it is when sent (`host_component.rs`).
-                let text = args
-                    .first()
-                    .map(|value| {
+                let text = match args.first() {
+                    Some(value) => {
                         match crate::facade_text::json_now(value, self.inner.component_states()) {
                             Some(json) => crate::facade_text::plain(&json),
+                            // A component no read resolves (past the bound, a cycle).
+                            None if crate::host_component::is_component(value) => {
+                                return Err(unmodelled(marker, r));
+                            }
                             None => expect_ref(value).cloned().unwrap_or_default(),
                         }
-                    })
-                    .unwrap_or_default();
+                    }
+                    None => String::new(),
+                };
                 self.context
                     .effects
                     .push(GameHookEffect::SystemMessage { player: uuid, text });
@@ -1008,6 +1012,19 @@ impl<H: Host> Host for GameHookHost<'_, H> {
 
     fn component_states_mut(&mut self) -> Option<&mut crate::host_component::States> {
         self.inner.component_states_mut()
+    }
+
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        self.inner.feedback_calls_supplier(source, broadcast)
+    }
+
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        self.inner.send_feedback(r, component, broadcast)
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {

@@ -207,8 +207,38 @@ pub(super) enum ComponentCall {
     /// Change the component's style in place to these codes (`replace`:
     /// `setStyle`), then answer the component itself.
     Restyle { codes: String, replace: bool },
-    /// Answer this value.
-    Answer(Value),
+    /// Answer the component's style as it is now ([`style_of`]).
+    GetStyle,
+}
+
+/// The client style marker of a component's JSON style keys, in a fixed order (colour, then
+/// bold, italic, underlined, strikethrough, obfuscated), as `getStyle()` answers it now.
+pub(super) fn style_of(json: &serde_json::Value) -> Value {
+    let mut codes = String::new();
+    if let Some(serde_json::Value::String(colour)) = json.get("color") {
+        if let Some(hex) = colour.strip_prefix('#') {
+            codes.push_str(&format!("§#{}", hex.to_ascii_lowercase()));
+        } else if let Some((_, code, _)) = FORMATS
+            .iter()
+            .find(|(name, _, rgb)| name.eq_ignore_ascii_case(colour) && rgb.is_some())
+        {
+            codes.push('§');
+            codes.push(*code);
+        }
+    }
+    for (key, code) in [
+        ("bold", 'l'),
+        ("italic", 'o'),
+        ("underlined", 'n'),
+        ("strikethrough", 'm'),
+        ("obfuscated", 'k'),
+    ] {
+        if json.get(key) == Some(&serde_json::Value::Bool(true)) {
+            codes.push('§');
+            codes.push(code);
+        }
+    }
+    marker(format!("{STYLE}{codes}"))
 }
 
 pub(super) fn component_call(r: &MethodRef, args: &[Value]) -> Option<ComponentCall> {
@@ -220,7 +250,7 @@ pub(super) fn component_call(r: &MethodRef, args: &[Value]) -> Option<ComponentC
                 replace: name == "setStyle",
             })
         }
-        ("getStyle", _) => Some(ComponentCall::Answer(marker(STYLE))),
+        ("getStyle", _) => Some(ComponentCall::GetStyle),
         _ => None,
     }
 }
@@ -345,5 +375,17 @@ mod tests {
             text_call(expect_ref(&gold).unwrap(), &to_string, &[]),
             Some(marker("§6"))
         );
+    }
+
+    /// `getStyle()` is the component's style now: what `withStyle` set, in one order however it
+    /// was built, and the empty style before any.
+    #[test]
+    fn a_component_style_is_its_current_style() {
+        let plain = serde_json::json!({"text": "a"});
+        assert_eq!(style_of(&plain), marker(STYLE));
+        let styled = serde_json::json!({"text": "a", "bold": true, "color": "dark_red"});
+        assert_eq!(style_of(&styled), marker(format!("{STYLE}§4§l")));
+        let rgb = serde_json::json!({"text": "a", "color": "#33EBFF", "italic": true});
+        assert_eq!(style_of(&rgb), marker(format!("{STYLE}§#33ebff§o")));
     }
 }

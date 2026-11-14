@@ -957,6 +957,28 @@ impl StdHost {
     /// End the firing [`Self::begin_client_frame`] started: what the
     /// callbacks drew and sent, and the mappings' state after them.
     pub fn end_client_frame(&mut self) -> ClientFrameOutput {
+        // A tooltip line that is a component no read resolves (past the
+        // bound, a cycle) is left out of the tooltip and counted.
+        let unread = self
+            .mutable_collections
+            .get(TOOLTIP_LIST)
+            .map_or(0, |lines| {
+                lines
+                    .iter()
+                    .filter(|line| {
+                        crate::runtime::host_component::is_component(line)
+                            && crate::runtime::facade_text::json_now(line, Some(&self.component_states))
+                                .is_none()
+                    })
+                    .count()
+            });
+        for _ in 0..unread {
+            let _ = self.unknown_host_call(&MethodRef {
+                owner: "net/minecraft/network/chat/Component".into(),
+                name: "getString".into(),
+                descriptor: "()Ljava/lang/String;".into(),
+            });
+        }
         let state = &mut self.client;
         state.frame = None;
         state.poses.clear();
@@ -1144,7 +1166,13 @@ impl StdHost {
         // the host's own component model.
         if crate::runtime::host_component::is_component(receiver) {
             return Some(match text::component_call(r, args)? {
-                text::ComponentCall::Answer(value) => Ok(value),
+                // The style as it is now (`withStyle`/`setStyle` change it in place).
+                text::ComponentCall::GetStyle => {
+                    match crate::runtime::facade_text::json_now(receiver, Some(&self.component_states)) {
+                        Some(json) => Ok(text::style_of(&json)),
+                        None => self.unknown_host_call(r),
+                    }
+                }
                 // `return this`, the receiver's style changed in place.
                 text::ComponentCall::Restyle { codes, replace } => crate::runtime::host_component::change(
                     &mut self.component_states,

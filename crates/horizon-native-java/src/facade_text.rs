@@ -57,6 +57,18 @@ pub(crate) fn from_json(json: &Json) -> Value {
     crate::host_component::component(json)
 }
 
+/// Whether a component's JSON holds a translation anywhere (its text then
+/// depends on the language, which the interpreter does not hold).
+pub(crate) fn has_translation(json: &Json) -> bool {
+    match json {
+        Json::Object(object) => {
+            object.contains_key("translate") || object.get("extra").is_some_and(has_translation)
+        }
+        Json::Array(items) => items.iter().any(has_translation),
+        _ => false,
+    }
+}
+
 /// `getString()`: every text in order, a translation as its key (the
 /// interpreter has no language table).
 pub(crate) fn plain(json: &Json) -> String {
@@ -262,6 +274,13 @@ impl<H: Host> Runtime<'_, H> {
         }
         match (name, descriptor) {
             ("getString", "()Ljava/lang/String;") => match self.component_now(receiver) {
+                // Java prints a translation in the server's language, with its
+                // arguments; the interpreter has no language table: counted,
+                // the key answered as before.
+                Some(json) if has_translation(&json) => {
+                    self.host.unknown_operand_call(r)?;
+                    Ok(Some(Value::Ref(Some(plain(&json)))))
+                }
                 Some(json) => Ok(Some(Value::Ref(Some(plain(&json))))),
                 // Nested past what resolves (Java: a cycle overflows).
                 None => self.host.unknown_operand_call(r).map(Some),
