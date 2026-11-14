@@ -71,6 +71,7 @@ mod hook_shapes;
 mod host_array;
 mod host_attachment;
 mod host_brigadier;
+mod host_component;
 mod host_config;
 mod host_entry;
 mod host_events;
@@ -2257,6 +2258,38 @@ pub trait Host {
         Ok(Value::default_for(return_desc(&r.descriptor)))
     }
 
+    /// The chat components this host changed in place (`host_component.rs`
+    /// `States`), `None` for a host that keeps none: its components are as
+    /// they were made, and a change to one is counted.
+    fn component_states(&self) -> Option<&host_component::States> {
+        None
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        None
+    }
+
+    /// `CommandSourceStack.sendSuccess(supplier, broadcast)` on `source`:
+    /// whether vanilla calls the supplier now (`Some(Some(true))`), skips it
+    /// (`Some(Some(false))`), or the host cannot tell (`Some(None)`, counted);
+    /// `None` when `source` is not the running command's (the host answers
+    /// the call as before).
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        let _ = (source, broadcast);
+        None
+    }
+
+    /// Deliver the component a `sendSuccess` supplier gave, as it is now.
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        let _ = (component, broadcast);
+        self.unknown_operand_call(r)
+    }
+
     /// Invoke an instance method with its receiver preserved. Existing hosts
     /// keep their old behavior through the default forwarding implementation.
     fn invoke_instance(
@@ -2845,6 +2878,8 @@ pub struct StdHost {
     /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
     holder_binding: host_registry::Binding,
     mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Chat components changed in place, by marker (`host_component.rs`).
+    pub(crate) component_states: host_component::States,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
     unmodifiable_collections: BTreeMap<String, Option<String>>,
@@ -3022,6 +3057,7 @@ impl StdHost {
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
             mutable_collections: BTreeMap::new(),
+            component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
             jdk_list_of: std::collections::BTreeSet::new(),
@@ -4379,6 +4415,27 @@ impl StdHost {
 impl Host for StdHost {
     fn unknown_operand_call(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         self.unknown_host_call(r)
+    }
+
+    fn component_states(&self) -> Option<&host_component::States> {
+        Some(&self.component_states)
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        Some(&mut self.component_states)
+    }
+
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        self.brigadier_feedback_calls_supplier(source, broadcast)
+    }
+
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        self.brigadier_send_feedback(r, component, broadcast)
     }
 
     fn counted_unknown_calls(&self) -> usize {
@@ -8597,26 +8654,57 @@ impl Host for StdHost {
                 "()Ljava/lang/String;",
             )
             | ("net/minecraft/network/chat/Component", "getString", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(component_text(receiver))))
+                if !host_component::is_component(receiver) {
+                    return Ok(Value::Ref(Some(
+                        expect_ref(receiver).cloned().unwrap_or_default(),
+                    )));
+                }
+                match facade_text::json_now(receiver, Some(&self.component_states)) {
+                    // A translation's text is the server language's: counted.
+                    Some(json) if facade_text::has_translation(&json) => {
+                        self.unknown_host_call(r)?;
+                        Ok(Value::Ref(Some(facade_text::plain(&json))))
+                    }
+                    Some(json) => Ok(Value::Ref(Some(facade_text::plain(&json)))),
+                    // Nested past what resolves (Java: a cycle overflows).
+                    None => self.unknown_host_call(r),
+                }
             }
+            // `siblings.add(c); return this` (`append(String)` adds
+            // `Component.literal(text)`), as `facade_text.rs` answers it in
+            // the interpreter; a receiver or sibling the model did not make
+            // (a jar's own `Component`) is counted.
             ("net/minecraft/network/chat/MutableComponent", "append", descriptor)
             | ("net/minecraft/network/chat/Component", "append", descriptor)
                 if descriptor.ends_with(")Lnet/minecraft/network/chat/MutableComponent;") =>
             {
-                let current = component_text(receiver);
-                let suffix = Self::argument(r, args, 0)?;
-                let suffix = if descriptor.contains("Ljava/lang/String;") {
-                    expect_string(suffix).to_owned()
+                let sibling = Self::argument(r, args, 0)?;
+                let sibling = if descriptor.contains("Ljava/lang/String;") {
+                    host_component::literal(expect_string(sibling))
                 } else {
-                    component_text(suffix)
+                    sibling.clone()
                 };
-                Ok(component_value("literal", &format!("{current}{suffix}")))
+                if !host_component::is_component(receiver)
+                    || !host_component::is_component(&sibling)
+                {
+                    return self.unknown_host_call(r);
+                }
+                host_component::change(
+                    &mut self.component_states,
+                    receiver,
+                    &facade_text::argument,
+                    |state| state.siblings.push(sibling),
+                )?;
+                Ok(receiver.clone())
             }
             ("net/minecraft/network/chat/MutableComponent", "copy", descriptor)
             | ("net/minecraft/network/chat/Component", "copy", descriptor)
                 if descriptor == "()Lnet/minecraft/network/chat/MutableComponent;" =>
             {
-                Ok(component_value("literal", &component_text(receiver)))
+                match host_component::copy(Some(&mut self.component_states), receiver, false) {
+                    Some(copy) => Ok(copy),
+                    None => self.unknown_host_call(r),
+                }
             }
             ("java/util/UUID", "toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
                 uuid_text(receiver)
@@ -9841,21 +9929,12 @@ fn identifier_value(namespace: &str, path: &str) -> Value {
     host_ids::identifier(namespace, path)
 }
 
+/// A new `literal` or `translatable` component (`host_component.rs`).
 fn component_value(kind: &str, text: &str) -> Value {
-    Value::Ref(Some(format!("component/{kind}/{text}")))
-}
-
-fn component_text(value: &Value) -> String {
-    let raw = expect_ref(value).map_or("", |value| value.as_str());
-    // A styled component or one with arguments (`facade_text.rs`).
-    if raw.starts_with(facade_text::JSON_PREFIX) {
-        return facade_text::to_json(value)
-            .map_or_else(String::new, |json| facade_text::plain(&json));
+    match kind {
+        "translatable" => host_component::translatable(text),
+        _ => host_component::literal(text),
     }
-    raw.strip_prefix("component/literal/")
-        .or_else(|| raw.strip_prefix("component/translatable/"))
-        .unwrap_or(raw)
-        .to_owned()
 }
 
 fn identifier_parse(value: &str) -> Value {
@@ -10727,6 +10806,10 @@ impl host_ref::Nested for HostNested<'_> {
             (Value::Ref(Some(_)), None) => None,
             (other, _) => Some(value_text(other)),
         })
+    }
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let host = self.0.as_deref()?;
+        facade_text::json_now(value, Some(&host.component_states))
     }
 }
 
@@ -20677,6 +20760,13 @@ impl<H: Host> Runtime<'_, H> {
             && let Some((class, _)) = rest.rsplit_once('/')
         {
             return self.class_is_instance(class, wanted);
+        }
+        // A host kind's objects are handles, never text: a String spelled
+        // like one (`"…/MutableComponent#0"`) is no instance of its class, and
+        // the class's row is not asked (`instance_of_is_guess` counts it).
+        let class = jar_object::marker_class_or_text(marker);
+        if self.class(class).is_none() && HostKind::owning_class(class).is_some() {
+            return false;
         }
         self.class_is_instance(marker, wanted)
     }
@@ -33598,8 +33688,8 @@ mandatory = true
                 &[Value::Ref(Some("Hello".into()))],
             )
             .unwrap();
-        assert_eq!(
-            host.invoke_instance(
+        let appended = host
+            .invoke_instance(
                 &MethodRef {
                     owner: "net/minecraft/network/chat/MutableComponent".into(),
                     name: "append".into(),
@@ -33609,9 +33699,14 @@ mandatory = true
                 &literal,
                 &[Value::Ref(Some(" world".into()))],
             )
-            .unwrap(),
-            component_value("literal", "Hello world")
+            .unwrap();
+        // `return this`, the receiver changed in place.
+        assert_eq!(appended, literal);
+        assert_eq!(
+            facade_text::json_now(&literal, Some(&host.component_states)),
+            Some(serde_json::json!({"text": "Hello", "extra": [{"text": " world"}]}))
         );
+        assert_eq!(host.unknown_host_call_count(), 0);
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {

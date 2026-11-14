@@ -377,6 +377,10 @@ pub enum HostKind {
     /// An object `new` (or a model) allocated: key `class#n`
     /// (`jar_object.rs`), one key per allocation.
     JarObject,
+    /// A chat component (`MutableComponent`): key a serial per allocation, then its vanilla
+    /// JSON, keys sorted
+    /// (`host_component.rs`).
+    Component,
 }
 
 /// How a kind's Java class follows from its key.
@@ -434,6 +438,13 @@ pub(crate) trait Nested {
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError>;
     /// `String.valueOf(value)`.
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError>;
+    /// The vanilla JSON a chat component holds now (its host's state,
+    /// `host_component.rs`); `None` where this context cannot read the
+    /// host's table (the caller counts).
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
 }
 
 /// `toString()` of a handle.
@@ -564,6 +575,10 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::FabricEnvType,
         &crate::host_fabric_runtime::ENV_TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::Component,
+        &crate::host_component::COMPONENT_CLASS_SIDE,
     ),
 ];
 
@@ -1487,6 +1502,14 @@ const KINDS: &[KindInfo] = &[
         // `Runtime::new_object` numbers every allocation once.
         canonical: always_canonical,
         methods: &crate::jar_object::JAR_OBJECT,
+    },
+    KindInfo {
+        kind: HostKind::Component,
+        tag: "comp",
+        class: ClassRule::FromKey(crate::host_component::component_class),
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_component::COMPONENT_METHODS,
     },
 ];
 

@@ -923,6 +923,9 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
             .value_of_text(value, "Ljava/lang/Object;", self.class, self.method)
             .map(Some)
     }
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        crate::facade_text::json_now(value, self.runtime.host.component_states())
+    }
 }
 
 /// Whether `descriptor` is a `compareTo`'s: one reference parameter, `int`

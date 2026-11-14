@@ -3,14 +3,14 @@
 //!
 //! A component's own style lives in the interpreter's component model
 //! (`facade_text.rs`): `withStyle(ChatFormatting)`, `withColor(int)` and
-//! `append` build vanilla's component JSON there, `component/json/<json>`.
+//! `append` build vanilla's component JSON there (`host_component.rs`).
 //! What that model leaves to the host is the style *objects*, and those are
 //! answered here: `Style.EMPTY` and every derived style is
 //! `client/style/<codes>`, its formatting kept as legacy codes (an RGB
 //! colour as the client-only `§#rrggbb`); `TextColor.fromRgb(rgb)` /
 //! `fromLegacyFormat(f)` is `client/text-color/<code>`. A component styled
-//! with one (`withStyle(style)`, `setStyle(style)`) becomes the same JSON
-//! component the façade builds, with the style's keys set.
+//! with one (`withStyle(style)`, `setStyle(style)`) changes in place to the
+//! same JSON the façade builds, with the style's keys set.
 //!
 //! `ChatFormatting.<NAME>.toString()` is its code (`§6`), so
 //! `ChatFormatting.GOLD + "Day"` is a legacy-coded string, which every client
@@ -91,16 +91,30 @@ fn boxed_true(value: Option<&Value>) -> Option<bool> {
     }
 }
 
-/// A component with a style's `codes` applied over its own style, as
-/// `MutableComponent.withStyle(Style)` merges them (`Style.applyTo`): the
-/// codes' keys win.
-fn styled(component: &Value, codes: &str) -> Option<Value> {
-    use serde_json::{Map, Value as Json, json};
-    let mut object = match crate::runtime::facade_text::to_json(component)? {
-        Json::Object(object) => object,
-        Json::String(text) => Map::from_iter([("text".to_owned(), Json::String(text))]),
-        _ => return None,
-    };
+/// The style keys a client style marker's `codes` set.
+const STYLE_KEYS: [&str; 6] = [
+    "color",
+    "bold",
+    "italic",
+    "underlined",
+    "strikethrough",
+    "obfuscated",
+];
+
+/// A style's `codes` applied to a component's JSON `object`: over its own
+/// style as `withStyle(Style)` merges them (`Style.applyTo`: the codes' keys
+/// win), or in its place (`setStyle`, `replace`).
+pub(super) fn apply_style(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    codes: &str,
+    replace: bool,
+) {
+    use serde_json::json;
+    if replace {
+        for key in STYLE_KEYS {
+            object.remove(key);
+        }
+    }
     let mut chars = codes.chars();
     while let Some(c) = chars.next() {
         if c != '§' {
@@ -122,14 +136,7 @@ fn styled(component: &Value, codes: &str) -> Option<Value> {
             'm' => "strikethrough",
             'k' => "obfuscated",
             'r' => {
-                for key in [
-                    "color",
-                    "bold",
-                    "italic",
-                    "underlined",
-                    "strikethrough",
-                    "obfuscated",
-                ] {
+                for key in STYLE_KEYS {
                     object.remove(key);
                 }
                 continue;
@@ -146,7 +153,6 @@ fn styled(component: &Value, codes: &str) -> Option<Value> {
         };
         object.insert(key.into(), json!(true));
     }
-    Some(crate::runtime::facade_text::from_json(&Json::Object(object)))
 }
 
 /// Static fields: `ChatFormatting.<NAME>` and `Style.EMPTY`.
@@ -193,21 +199,65 @@ pub(super) fn text_invoke(r: &MethodRef, args: &[Value]) -> Option<Value> {
 /// Instance calls on components, styles, text colours and formatting
 /// constants; `None` when the receiver is none of them or the member is not
 /// listed.
+/// Instance calls on a component (`host_component.rs`): `withStyle`/`setStyle`
+/// with a style object and `getStyle`. `withStyle(ChatFormatting)` and
+/// `withColor(int)` are the interpreter's (`facade_text.rs`).
+/// What a client style call on a component does.
+pub(super) enum ComponentCall {
+    /// Change the component's style in place to these codes (`replace`:
+    /// `setStyle`), then answer the component itself.
+    Restyle { codes: String, replace: bool },
+    /// Answer the component's style as it is now ([`style_of`]).
+    GetStyle,
+}
+
+/// The client style marker of a component's JSON style keys, in a fixed order (colour, then
+/// bold, italic, underlined, strikethrough, obfuscated), as `getStyle()` answers it now.
+pub(super) fn style_of(json: &serde_json::Value) -> Value {
+    let mut codes = String::new();
+    if let Some(serde_json::Value::String(colour)) = json.get("color") {
+        if let Some(hex) = colour.strip_prefix('#') {
+            codes.push_str(&format!("§#{}", hex.to_ascii_lowercase()));
+        } else if let Some((_, code, _)) = FORMATS
+            .iter()
+            .find(|(name, _, rgb)| name.eq_ignore_ascii_case(colour) && rgb.is_some())
+        {
+            codes.push('§');
+            codes.push(*code);
+        }
+    }
+    for (key, code) in [
+        ("bold", 'l'),
+        ("italic", 'o'),
+        ("underlined", 'n'),
+        ("strikethrough", 'm'),
+        ("obfuscated", 'k'),
+    ] {
+        if json.get(key) == Some(&serde_json::Value::Bool(true)) {
+            codes.push('§');
+            codes.push(code);
+        }
+    }
+    marker(format!("{STYLE}{codes}"))
+}
+
+pub(super) fn component_call(r: &MethodRef, args: &[Value]) -> Option<ComponentCall> {
+    match (r.name.as_str(), return_desc(&r.descriptor)) {
+        (name @ ("withStyle" | "setStyle"), _) => {
+            let codes = expect_ref(args.first()?)?.strip_prefix(STYLE)?;
+            Some(ComponentCall::Restyle {
+                codes: codes.to_owned(),
+                replace: name == "setStyle",
+            })
+        }
+        ("getStyle", _) => Some(ComponentCall::GetStyle),
+        _ => None,
+    }
+}
+
 pub(super) fn text_call(object: &str, r: &MethodRef, args: &[Value]) -> Option<Value> {
     let name = r.name.as_str();
     let returns = return_desc(&r.descriptor);
-    if object.starts_with("component/") {
-        // `withStyle(ChatFormatting)` and `withColor(int)` are the
-        // interpreter's (`facade_text.rs`); a style object is ours.
-        return match (name, returns) {
-            ("withStyle" | "setStyle", _) => {
-                let codes = expect_ref(args.first()?)?.strip_prefix(STYLE)?;
-                styled(&marker(object), codes)
-            }
-            ("getStyle", _) => Some(marker(STYLE)),
-            _ => None,
-        };
-    }
     if let Some(codes) = object.strip_prefix(STYLE) {
         let add = |extra: Option<String>| Some(marker(format!("{STYLE}{codes}{}", extra?)));
         return match (name, returns) {
@@ -303,16 +353,14 @@ mod tests {
             "withStyle",
             "(Lnet/minecraft/network/chat/Style;)Lnet/minecraft/network/chat/MutableComponent;",
         );
-        let styled = text_call("component/literal/Day 3", &with_style, &[bold]).unwrap();
-        let json: serde_json::Value = serde_json::from_str(
-            expect_ref(&styled)
-                .unwrap()
-                .strip_prefix("component/json/")
-                .unwrap(),
-        )
-        .unwrap();
+        let Some(ComponentCall::Restyle { codes, replace }) = component_call(&with_style, &[bold])
+        else {
+            panic!("not a restyle")
+        };
+        let mut object = serde_json::Map::from_iter([("text".to_owned(), "Day 3".into())]);
+        apply_style(&mut object, &codes, replace);
         assert_eq!(
-            json,
+            serde_json::Value::Object(object),
             serde_json::json!({"text": "Day 3", "color": "#33EBFF", "bold": true})
         );
         // `ChatFormatting.GOLD + "x"` concatenates its code.
@@ -327,5 +375,17 @@ mod tests {
             text_call(expect_ref(&gold).unwrap(), &to_string, &[]),
             Some(marker("§6"))
         );
+    }
+
+    /// `getStyle()` is the component's style now: what `withStyle` set, in one order however it
+    /// was built, and the empty style before any.
+    #[test]
+    fn a_component_style_is_its_current_style() {
+        let plain = serde_json::json!({"text": "a"});
+        assert_eq!(style_of(&plain), marker(STYLE));
+        let styled = serde_json::json!({"text": "a", "bold": true, "color": "dark_red"});
+        assert_eq!(style_of(&styled), marker(format!("{STYLE}§4§l")));
+        let rgb = serde_json::json!({"text": "a", "color": "#33EBFF", "italic": true});
+        assert_eq!(style_of(&rgb), marker(format!("{STYLE}§#33ebff§o")));
     }
 }

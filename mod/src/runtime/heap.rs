@@ -276,6 +276,7 @@ fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
         + heap.enum_constants.len()
         + host.mutable_collections.len()
         + host.iterators.len()
+        + host.component_states.len()
 }
 
 fn over_count_bound(heap: &JavaHeap) -> bool {
@@ -322,6 +323,14 @@ fn heap_bytes(heap: &JavaHeap, host: &StdHost) -> usize {
                 .iter()
                 .map(|(key, (elements, _))| key.len() + values(elements)),
         )
+        .chain(host.component_states.iter().map(|(key, state)| {
+            key.len()
+                + serde_json::Value::Object(state.base.clone())
+                    .to_string()
+                    .len()
+                + values(&state.siblings)
+                + state.args.as_deref().map_or(0, values)
+        }))
         .sum()
 }
 
@@ -343,6 +352,7 @@ impl Collectable {
             .chain(heap.enum_constants.keys().map(String::as_str))
             .chain(host.mutable_collections.keys().map(String::as_str))
             .chain(host.iterators.keys().map(String::as_str))
+            .chain(host.component_states.keys().map(String::as_str))
             .filter(|marker| collectable(marker))
             .map(str::to_owned)
             .collect();
@@ -436,7 +446,19 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .get(&marker)
             .into_iter()
             .flat_map(|(elements, _)| elements);
-        for value in fields.chain(arrays).chain(collections).chain(iterators) {
+        // A changed chat component's appended siblings and component
+        // arguments (`host_component.rs`).
+        let components = host
+            .component_states
+            .get(&marker)
+            .into_iter()
+            .flat_map(|state| state.siblings.iter().chain(state.args.iter().flatten()));
+        for value in fields
+            .chain(arrays)
+            .chain(collections)
+            .chain(iterators)
+            .chain(components)
+        {
             if let Some(text) = value_text(value) {
                 collectable.scan(text, &mut found);
             }
@@ -450,6 +472,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     heap.enum_constants.retain(|key, _| keep(key));
     host.mutable_collections.retain(|key, _| keep(key));
     host.iterators.retain(|key, _| keep(key));
+    host.component_states.retain(|key, _| keep(key));
 }
 
 impl<H: Host> Runtime<'_, H> {
