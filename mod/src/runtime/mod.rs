@@ -8037,6 +8037,16 @@ impl Host for StdHost {
                 if let Some((simple, _)) = java_immutable::member_class_names(&name) {
                     return Ok(Value::Ref(Some(simple)));
                 }
+                // A JDK member class (`Map.Entry`): `Entry`. A nested JDK
+                // class the binary name cannot name (local, anonymous) is
+                // counted, never `Map$Entry`.
+                let internal = name.replace('.', "/");
+                if let Some((simple, _)) = reflect_names::jdk_member_names(&internal) {
+                    return Ok(Value::Ref(Some(simple)));
+                }
+                if internal.contains('$') && jdk_closure::in_jdk_package(&internal) {
+                    return self.unknown_host_call(r);
+                }
                 Ok(Value::Ref(Some(
                     name.rsplit('.').next().unwrap_or(&name).to_owned(),
                 )))
@@ -19501,6 +19511,15 @@ struct Runtime<'a, H> {
     /// [`BUDGET_CHECK_INSTRUCTIONS`] and in [`Runtime::invoke`].
     budget: &'a ExecutionBudget,
 }
+/// A `Class.isAssignableFrom` answer (`Runtime::class_assignable`).
+enum Assignable {
+    Known(bool),
+    /// Not known here: the caller counts the call.
+    Counted,
+    /// A name the runtime does not know: the host's nominal answer.
+    Host,
+}
+
 /// Whether `file` itself declares `field` (name and descriptor).
 fn declares_field(file: &ClassFile, field: &MethodRef) -> bool {
     file.fields
@@ -20883,7 +20902,36 @@ impl<H: Host> Runtime<'_, H> {
         let binary = expect_string(
             name.ok_or_else(|| NativeError::Metadata("Class.forName needs a class name".into()))?,
         );
+        let not_found = || NativeError::UncaughtException {
+            class: "java/lang/ClassNotFoundException".into(),
+            message: Some(binary.to_owned()),
+            frame: None,
+        };
+        // `forName` takes a binary name: `java/lang/String` names no class.
+        if binary.contains('/') {
+            return Err(not_found());
+        }
         let internal = binary.replace('.', "/");
+        // An array class by its `getName` (`[I`, `[Ljava.lang.String;`): one
+        // when its element class is (`[V` and a bare `[L…` are not).
+        if let Some((dimensions, _)) = host_class::array_element(&internal) {
+            let element = &internal[dimensions..];
+            let resolves = match element.as_bytes() {
+                [b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D'] => true,
+                [b'L', .., b';'] => {
+                    let class = &element[1..element.len() - 1];
+                    self.has_class(class)
+                        || library_dispatch::jdk_class_exists(class)
+                        || self.host.platform_class_present(class)
+                }
+                _ => false,
+            };
+            return if resolves {
+                Ok(host_class::class_value(&internal))
+            } else {
+                Err(not_found())
+            };
+        }
         if self.has_class(&internal) {
             let initialize = match r.descriptor.as_str() {
                 "(Ljava/lang/String;)Ljava/lang/Class;" => true,
@@ -21014,6 +21062,84 @@ impl<H: Host> Runtime<'_, H> {
         false
     }
 
+    /// `target.isAssignableFrom(source)` (internal names): known, counted
+    /// (the supertypes are not known here), or left to the host (a name the
+    /// runtime does not know at all keeps the host's nominal answer).
+    ///
+    /// * A primitive is assignable only from itself (`Object.class` is not
+    ///   from `int.class`).
+    /// * An array is an `Object`, a `Cloneable` and a `Serializable`; one
+    ///   array type is assignable from another when their components are (a
+    ///   primitive component only from itself), JLS 4.10.3.
+    /// * A host kind's class answers by its row unless the run holds that
+    ///   class file; a held class walks its hierarchy and the jar's Mixins; a
+    ///   JDK class answers from Java 25's table, counted outside it.
+    fn class_assignable(&self, target: &str, source: &str, depth: usize) -> Assignable {
+        if target == source {
+            return Assignable::Known(true);
+        }
+        if host_class::is_primitive(source) || host_class::is_primitive(target) {
+            return Assignable::Known(false);
+        }
+        if let Some(component) = source.strip_prefix('[') {
+            if matches!(
+                target,
+                "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable"
+            ) {
+                return Assignable::Known(true);
+            }
+            let Some(target_component) = target.strip_prefix('[') else {
+                return Assignable::Known(false);
+            };
+            let (source, target) = (
+                erased_field_type(component),
+                erased_field_type(target_component),
+            );
+            if host_class::is_primitive(&source) || host_class::is_primitive(&target) {
+                return Assignable::Known(source == target);
+            }
+            if depth >= MAX_SUPERCLASS_WALK {
+                return Assignable::Counted;
+            }
+            return match self.class_assignable(&target, &source, depth + 1) {
+                // A component the runtime cannot name: its array is not
+                // the host's to answer either.
+                Assignable::Host => Assignable::Counted,
+                known => known,
+            };
+        }
+        if target.starts_with('[') {
+            return Assignable::Known(false);
+        }
+        // A host kind's class (`getClass()` of a handle): its row, unless
+        // the run holds that class file (a jar's own copy wins).
+        if self.class(source).is_none()
+            && let Some(answer) = HostKind::class_instance_of(source, target, self)
+        {
+            return answer.map_or(Assignable::Counted, Assignable::Known);
+        }
+        if target == "java/lang/Object" {
+            return Assignable::Known(true);
+        }
+        if self.class(source).is_some() {
+            return Assignable::Known(
+                self.class_is_instance(source, target) || self.woven_is_instance(source, target),
+            );
+        }
+        // A JDK class of Java 25's generated table (`jdk_closure.rs`; a
+        // `FromKey` kind's class, `java/lang/Thread`): its whole supertype set
+        // is known, and a `false` stands only when proved.
+        if crate::runtime::jdk_closure::class(source).is_some() {
+            return host_ref::ClassHierarchy::is_instance(&host_ref::JdkHierarchy, source, target)
+                .map_or(Assignable::Counted, Assignable::Known);
+        }
+        // A JDK class outside the table: its supertypes are not known here.
+        if crate::runtime::jdk_closure::in_jdk_package(source) {
+            return Assignable::Counted;
+        }
+        Assignable::Host
+    }
+
     /// Whether a Mixin of the jar adds `wanted` to `name` or one of its held
     /// superclasses (`checkcast.rs`): the woven class is a `wanted` though
     /// its class file does not say so.
@@ -21076,6 +21202,14 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A JDK class: Java 25's table (`jdk_closure.rs`); one outside it is
         // left to the host, which counts it.
+        // Every array is a `Cloneable` and a `Serializable` (JLS 10.8).
+        if name.starts_with('[') {
+            let values = ["java/lang/Cloneable", "java/io/Serializable"]
+                .iter()
+                .map(|interface| host_class::class_value(interface))
+                .collect();
+            return Some(self.new_array_value("[Ljava/lang/Class;", values));
+        }
         let interfaces = match (self.class(&name), crate::runtime::jdk_closure::class(&name)) {
             // The woven class's: its own, then what the jar's Mixins add.
             (Some(file), _) => {
@@ -21549,41 +21683,10 @@ impl<H: Host> Runtime<'_, H> {
         {
             let target = reflection_class_name(receiver, r)?.replace('.', "/");
             let source = reflection_class_name(args.first(), r)?.replace('.', "/");
-            // A host kind's class (`getClass()` of a handle): its row, unless
-            // the run holds that class file (a jar's own copy wins).
-            if self.class(&source).is_none()
-                && let Some(answer) = HostKind::class_instance_of(&source, &target, self)
-            {
-                return match answer {
-                    Some(answer) => Ok(Some(Value::Int(i32::from(answer)))),
-                    None => self.host.unknown_operand_call(r).map(Some),
-                };
-            }
-            let assignable = target == source
-                || target == "java/lang/Object"
-                || (!class_is_primitive(&Value::Ref(Some(source.clone())))
-                    && self.class(&source).is_some()
-                    && (self.class_is_instance(&source, &target)
-                        || self.woven_is_instance(&source, &target)));
-            if assignable || self.class(&source).is_some() {
-                return Ok(Some(Value::Int(i32::from(assignable))));
-            }
-            // A JDK class of Java 25's generated table (`jdk_closure.rs`;
-            // a `FromKey` kind's class, `java/lang/Thread`): its whole
-            // supertype set is known, and a `false` stands only when proved.
-            if crate::runtime::jdk_closure::class(&source).is_some() {
-                return match host_ref::ClassHierarchy::is_instance(
-                    &host_ref::JdkHierarchy,
-                    &source,
-                    &target,
-                ) {
-                    Some(answer) => Ok(Some(Value::Int(i32::from(answer)))),
-                    None => self.host.unknown_operand_call(r).map(Some),
-                };
-            }
-            // A JDK class outside the table: its supertypes are not known here.
-            if crate::runtime::jdk_closure::in_jdk_package(&source) {
-                return self.host.unknown_operand_call(r).map(Some);
+            match self.class_assignable(&target, &source, 0) {
+                Assignable::Known(answer) => return Ok(Some(Value::Int(i32::from(answer)))),
+                Assignable::Counted => return self.host.unknown_operand_call(r).map(Some),
+                Assignable::Host => {}
             }
         }
         if let Some(value) = self.invoke_reflect_enum(r, receiver)? {
@@ -21593,6 +21696,9 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_reflect_simple_name(r, receiver)? {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.invoke_reflect_canonical_name(r, receiver)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_reflect_enclosing_class(r, receiver)? {
@@ -21628,6 +21734,11 @@ impl<H: Host> Runtime<'_, H> {
                 if crate::runtime::jdk_closure::in_jdk_package(&class) {
                     return self.host.unknown_operand_call(r).map(Some);
                 }
+            }
+            // An interface's (an annotation's too) is null; its class file
+            // names `Object`.
+            if self.class_is_interface(&class) == Some(true) {
+                return Ok(Some(Value::Ref(None)));
             }
             let parent = self
                 .class(&class)
@@ -22276,7 +22387,7 @@ impl<H: Host> Runtime<'_, H> {
                 .strip_prefix('L')
                 .and_then(|descriptor| descriptor.strip_suffix(';'))
                 .unwrap_or(&annotation.descriptor);
-            return Ok(Value::Ref(Some(name.to_owned())));
+            return Ok(host_class::class_value(name));
         }
         // The use site's value, else the interface's `default`, converted to
         // the member's declared type (`annotation_values`).

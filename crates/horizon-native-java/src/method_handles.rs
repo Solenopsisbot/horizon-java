@@ -945,10 +945,10 @@ impl<H: Host> Runtime<'_, H> {
                 let field = usize::try_from(*index)
                     .ok()
                     .and_then(|index| parameters.get(index))?;
-                Value::Ref(Some(class_marker(field)))
+                crate::host_class::class_value(&class_marker(field))
             }
             ("returnType", "()Ljava/lang/Class;") => {
-                Value::Ref(Some(class_marker(return_desc(&descriptor))))
+                crate::host_class::class_value(&class_marker(return_desc(&descriptor)))
             }
             ("parameterCount", "()I") => Value::Int(parameters.len() as i32),
             ("toMethodDescriptorString", "()Ljava/lang/String;") => {

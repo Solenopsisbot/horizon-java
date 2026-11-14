@@ -261,7 +261,52 @@ impl<H: Host> Runtime<'_, H> {
     }
 }
 
+/// A JDK member class's names from its binary name (`java/util/Map$Entry`:
+/// `Entry`, `java.util.Map.Entry`): the JDK's own classes are compiled by
+/// javac, whose member classes are `Outer$Inner`. A segment starting with a
+/// digit is a local or anonymous class, whose names only its `InnerClasses`
+/// row can give: `None`.
+pub(crate) fn jdk_member_names(class: &str) -> Option<(String, String)> {
+    if !class.contains('$') || !crate::runtime::jdk_closure::in_jdk_package(class) {
+        return None;
+    }
+    let segments: Vec<&str> = class.split('$').collect();
+    if segments[1..]
+        .iter()
+        .any(|segment| !segment.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_'))
+    {
+        return None;
+    }
+    Some((segments.last()?.to_string(), class.replace(['/', '$'], ".")))
+}
+
 impl<H: Host> Runtime<'_, H> {
+    /// `Class.getCanonicalName()`: [`Self::canonical_class_name`] for a class
+    /// the runtime can name (a held class by its `InnerClasses`, an array by
+    /// its component, a JDK member class by [`jdk_member_names`]); `null` for
+    /// a local or anonymous class; counted otherwise. The host's own
+    /// collection classes keep the host's answer.
+    pub(super) fn invoke_reflect_canonical_name(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "java/lang/Class"
+            || r.name != "getCanonicalName"
+            || r.descriptor != "()Ljava/lang/String;"
+        {
+            return Ok(None);
+        }
+        let class = reflection_class_name(receiver, r)?.replace('.', "/");
+        if crate::runtime::java_immutable::member_class_names(&class.replace('/', ".")).is_some() {
+            return Ok(None);
+        }
+        match self.canonical_class_name(&class) {
+            Some(name) => Ok(Some(Value::Ref(name))),
+            None => self.host.unknown_operand_call(r).map(Some),
+        }
+    }
+
     /// `Class.getCanonicalName()` of `class` (an internal name), as JDK 25
     /// builds it: an array's component's name plus `[]`; `null` for a local
     /// or anonymous class; a member class's enclosing class's canonical name,
@@ -287,6 +332,9 @@ impl<H: Host> Runtime<'_, H> {
         }
         let binary = class.replace('/', ".");
         let Some(file) = self.class(class) else {
+            if let Some((_, canonical)) = jdk_member_names(class) {
+                return Some(Some(canonical));
+            }
             return (!class.contains('$')).then_some(Some(binary));
         };
         let nesting = file.nesting_attributes()?;

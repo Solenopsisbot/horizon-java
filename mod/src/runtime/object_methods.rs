@@ -654,6 +654,16 @@ impl<H: Host> Runtime<'_, H> {
         if !matches!(opcode, 0xb6 | 0xb9) || crate::runtime::jar_object::is_object_handle(handle) {
             return Ok(None);
         }
+        // A `Class` against class-marker text of its name, until #156 P13c
+        // (`host_class.rs`): counted, the old answer kept, as in either order.
+        if r.name == "equals"
+            && r.descriptor == EQUALS
+            && let [other] = args
+            && crate::runtime::host_class::handle_against_same_text(&Value::Host(handle.clone()), other)
+        {
+            self.host.unknown_operand_call(r)?;
+            return Ok(Some(Value::Int(1)));
+        }
         let mut nested = RuntimeNested {
             runtime: self,
             class,

@@ -32,6 +32,10 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 match self.io_text(&path) {
+                    // The file holds the text as written in UTF-8; another
+                    // charset decodes those bytes into other text unless they
+                    // are ASCII: left to the host, which counts it.
+                    Some(text) if !decodes_alike(args.get(1), &text) => Ok(None),
                     Some(text) => Ok(Some(Value::Ref(Some(text)))),
                     None => Err(NativeError::UncaughtException {
                         class: "java/io/FileNotFoundException".into(),
@@ -50,9 +54,22 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(path) = args.first().and_then(|value| self.io_path_of(value)) else {
                     return Ok(None);
                 };
-                let Some(text) = args.get(1).and_then(expect_ref) else {
+                // A `String`'s text only: a `StringBuilder` (or any other
+                // `CharSequence`) writes its contents, which its marker is
+                // not. Counted by the host instead.
+                let Some(text) = args.get(1).and_then(|value| match value {
+                    Value::Ref(Some(text)) if crate::value_class::is_plain_string(text) => {
+                        Some(text)
+                    }
+                    _ => None,
+                }) else {
                     return Ok(None);
                 };
+                // The table holds Java text as UTF-8 bytes would read back;
+                // another charset's bytes differ unless the text is ASCII.
+                if !decodes_alike(args.get(2), text) {
+                    return Ok(None);
+                }
                 // commons-io may make parent folders and opens its own stream:
                 // not events the model can name (`watch_service.rs`).
                 self.watch_change(&path, crate::watch_service::Change::Unmodelled);
@@ -66,5 +83,18 @@ impl<H: Host> Runtime<'_, H> {
     /// The text of a virtual file, if the host holds one at `path`.
     fn io_text(&self, path: &str) -> Option<String> {
         self.io_files.get(path).cloned()
+    }
+}
+
+/// Whether text written or read with `charset` (none: the JVM default, UTF-8
+/// since Java 18) is the same text the UTF-8 table holds: UTF-8 itself, or an
+/// ASCII-compatible charset over ASCII text. Anything else changes the text
+/// (`h\u{e9}llo` in ISO-8859-1 reads back in UTF-8 as `h\u{fffd}llo`) and
+/// is counted, never stored as is.
+fn decodes_alike(charset: Option<&Value>, text: &str) -> bool {
+    match charset.and_then(expect_ref).map(String::as_str) {
+        None | Some("charset/UTF-8") => true,
+        Some("charset/US-ASCII" | "charset/ISO-8859-1") => text.is_ascii(),
+        Some(_) => false,
     }
 }

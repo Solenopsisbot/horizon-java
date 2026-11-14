@@ -108,7 +108,7 @@ impl<H: Host> Runtime<'_, H> {
                 // no such frame the JVM throws, as a walk from the bottom of
                 // the stack has no caller.
                 match snapshot().get(1) {
-                    Some((class, _)) => Ok(Some(Value::Ref(Some(class.clone())))),
+                    Some((class, _)) => Ok(Some(crate::host_class::class_value(class))),
                     None => Err(NativeError::UncaughtException {
                         class: "java/lang/IllegalCallerException".into(),
                         message: Some("no caller frame".into()),
@@ -125,7 +125,7 @@ impl<H: Host> Runtime<'_, H> {
                 Ok(match name {
                     "getClassName" => Some(Value::Ref(Some(class.replace('/', ".")))),
                     "getMethodName" => Some(Value::Ref(Some(method))),
-                    "getDeclaringClass" => Some(Value::Ref(Some(class))),
+                    "getDeclaringClass" => Some(crate::host_class::class_value(&class)),
                     _ => None,
                 })
             }

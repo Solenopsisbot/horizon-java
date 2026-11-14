@@ -543,6 +543,25 @@ impl<H: Host> Runtime<'_, H> {
         };
         let value = args.first().cloned().unwrap_or(Value::Ref(None));
         let is_null = matches!(value, Value::Ref(None));
+        // A primitive class has no instances: its `cast` of any object throws
+        // (`int.class.cast(1)`: `Cannot cast java.lang.Integer to int`).
+        if r.name == "cast" && !is_null && crate::runtime::host_class::is_primitive(&wanted) {
+            let Some(class) = crate::runtime::class_of_value(&value).or_else(|| {
+                expect_ref(&value)
+                    .filter(|text| crate::runtime::value_class::is_plain_string(text))
+                    .map(|_| "java/lang/String".to_owned())
+            }) else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/ClassCastException".into(),
+                message: Some(format!(
+                    "Cannot cast {} to {wanted}",
+                    crate::runtime::host_class::binary_name(&class)
+                )),
+                frame: None,
+            });
+        }
         // A `String` (plain text, or text spelling an object's key): a final
         // class whose supertypes are known, so both answer exactly, and a
         // failed `cast` throws Java's `Cannot cast java.lang.String to X`.
