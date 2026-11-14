@@ -117,22 +117,27 @@ impl<H: Host> Runtime<'_, H> {
                     self.class_is_instance(class, "java/util/List")
                         && self.class_is_instance(class, "java/util/RandomAccess")
                 });
-                if random_access {
+                let stream = if random_access {
                     let values = self.random_access_values(this)?;
-                    return Ok(self.new_stream("java/util/List", name, values));
+                    self.new_stream("java/util/List", name, values)
+                } else {
+                    // `StreamSupport.stream(spliterator(), false)`: the
+                    // collection's `IteratorSpliterator` asks for `iterator()`
+                    // and `size()` when the terminal operation starts, then
+                    // drains the iterator. The runtime's streams are eager, so
+                    // this traversal happens here, when the stream is made.
+                    let it = self.iterator_of(Site::Interface, COLLECTION, this)?;
+                    self.size_of(Site::Interface, COLLECTION, this)?;
+                    let mut values = Vec::new();
+                    while self.has_next(&it)? {
+                        values.push(self.next(&it)?);
+                    }
+                    self.new_stream("java/util/Collection", name, values)
+                };
+                if name == "parallelStream" {
+                    self.mark_parallel_stream(&stream);
                 }
-                // `StreamSupport.stream(spliterator(), false)`: the
-                // collection's `IteratorSpliterator` asks for `iterator()`
-                // and `size()` when the terminal operation starts, then
-                // drains the iterator. The runtime's streams are eager, so
-                // this traversal happens here, when the stream is made.
-                let it = self.iterator_of(Site::Interface, COLLECTION, this)?;
-                self.size_of(Site::Interface, COLLECTION, this)?;
-                let mut values = Vec::new();
-                while self.has_next(&it)? {
-                    values.push(self.next(&it)?);
-                }
-                Ok(self.new_stream("java/util/Collection", name, values))
+                Ok(stream)
             }
             (ITERATOR, "remove") => Err(throw(
                 "java/lang/UnsupportedOperationException",

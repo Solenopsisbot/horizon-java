@@ -75,6 +75,7 @@ mod host_config;
 mod host_entry;
 mod host_events;
 mod host_executors;
+mod host_fabric_loader;
 mod host_game_event;
 mod host_guava;
 mod host_ids;
@@ -163,6 +164,7 @@ mod registry_contents;
 mod sequenced;
 mod service_loader;
 mod stack_walk;
+mod stream_pipeline;
 mod string_code_points;
 mod string_constructors;
 mod synchronized_views;
@@ -2596,6 +2598,12 @@ pub trait Host {
         None
     }
 
+    /// A new unmodifiable list (`ImmutableCollections.ListN`) holding
+    /// `values`, for a host that models one.
+    fn unmodifiable_list(&mut self, _values: Vec<Value>) -> Option<Value> {
+        None
+    }
+
     /// How many unknown host calls this host has counted (each answered with
     /// a neutral value), for a model that must not build a verdict on one.
     fn counted_unknown_calls(&self) -> usize {
@@ -4585,6 +4593,10 @@ impl Host for StdHost {
         Some(self.empty_collection(kind))
     }
 
+    fn unmodifiable_list(&mut self, values: Vec<Value>) -> Option<Value> {
+        Some(self.unmodifiable_values("list", values))
+    }
+
     fn payload_type_id(&self, marker: &str) -> Option<String> {
         self.packet_types.get(marker).cloned()
     }
@@ -5309,17 +5321,18 @@ impl Host for StdHost {
                 "toUnmodifiableSet",
                 "()Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some("collector/unmodifiable-set".into()))),
+            // An unmodifiable list that rejects `null` (`List.of`'s
+            // `ListN`; Guava's `ImmutableList` is the host's same shape).
             (
                 "java/util/stream/Collectors",
                 "toUnmodifiableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/list".into()))),
-            // Guava's immutable collectors are the same list/set shapes.
-            (
+            )
+            | (
                 "com/google/common/collect/ImmutableList",
                 "toImmutableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/list".into()))),
+            ) => Ok(Value::Ref(Some("collector/unmodifiable-list".into()))),
             (
                 "com/google/common/collect/ImmutableSet",
                 "toImmutableSet",
@@ -5358,9 +5371,11 @@ impl Host for StdHost {
                 "joining",
                 "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some(format!(
+                // `joining(delimiter, prefix, suffix)`; the payload is
+                // prefix, delimiter, suffix.
                 "collector/joining/{}\u{1f}{}\u{1f}{}",
-                expect_string(Self::argument(r, args, 0)?),
                 expect_string(Self::argument(r, args, 1)?),
+                expect_string(Self::argument(r, args, 0)?),
                 expect_string(Self::argument(r, args, 2)?)
             )))),
             ("java/util/List", "of", descriptor) if descriptor.ends_with("Ljava/util/List;") => {
@@ -6477,8 +6492,8 @@ impl Host for StdHost {
             };
         }
         let receiver_marker = expect_ref(receiver).cloned();
-        if let Some(marker) = receiver_marker.as_deref()
-            && let Some(value) = functional_composition_marker(r, marker, args)
+        if let Some(marker) = callback_text(receiver)
+            && let Some(value) = functional_composition_marker(r, &marker, args)
         {
             return Ok(value);
         }
@@ -8829,8 +8844,8 @@ impl Host for StdHost {
                     && let Some(rest) = marker.strip_prefix("@fn:consumer.then:")
                     && let Some((left, right)) = rest.split_once('|')
                 {
-                    self.invoke_instance(r, &Value::Ref(Some(left.to_owned())), args)?;
-                    self.invoke_instance(r, &Value::Ref(Some(right.to_owned())), args)?;
+                    self.invoke_instance(r, &composed_callback(left), args)?;
+                    self.invoke_instance(r, &composed_callback(right), args)?;
                 }
                 Ok(Value::Void)
             }
@@ -8929,16 +8944,10 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Int(0)),
                 };
-                // The loader itself and the game are always loaded; a jar's
-                // platform probe asks for them before it asks for anything the
-                // metadata could name.
-                // Horizon's Fabric API façade stands in for the `fabric-api`
-                // jar wherever it answers a Fabric jar's calls.
-                let fabric_api =
-                    id == "fabric-api" && !self.fabric_entrypoint_containers.is_empty();
-                Ok(Value::Int(
-                    (self.mods.contains_key(id) || is_always_loaded_mod(id) || fabric_api) as i32,
-                ))
+                // `modMap.containsKey(id)`: what `getModContainer` finds and
+                // `getAllMods` lists, including the loader, the game and the
+                // Fabric API modules Horizon's façade stands in for.
+                Ok(Value::Int(self.fabric_mod_present(id) as i32))
             }
             (
                 "net/neoforged/fml/ModList" | "net/minecraftforge/fml/ModList",
@@ -8989,13 +8998,16 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(optional_wrap(Value::Ref(match self.mods.get(id) {
-                    Some(version) => Some(format!("mod-container/{id}/{version}")),
-                    // The loader and the game are present in every runtime
-                    // even though no jar declares them as a dependency.
-                    None if is_always_loaded_mod(id) => Some(format!("mod-container/{id}/unknown")),
-                    None => None,
-                })))
+                // Present exactly when `getAllMods` lists it (or the run
+                // knows it otherwise: `fabric_mod_present`), as the same
+                // container (`host_fabric_loader.rs`).
+                let present = self.fabric_mod_present(id);
+                let id = id.clone();
+                Ok(optional_wrap(if present {
+                    self.fabric_container(&id)
+                } else {
+                    Value::Ref(None)
+                }))
             }
             (
                 "net/fabricmc/loader/api/ModContainer",
@@ -9094,34 +9106,28 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/EntrypointContainer",
                 "getProvider",
                 "()Lnet/fabricmc/loader/api/ModContainer;",
-            ) => Ok(Value::Ref(
-                fabric_entrypoint_part(expect_ref(receiver), 3).map(|provider| {
-                    let version = self
-                        .mods
-                        .get(&provider)
-                        .map(String::as_str)
-                        .unwrap_or("unknown");
-                    format!("mod-container/{provider}/{version}")
-                }),
-            )),
+            ) => Ok(fabric_entrypoint_part(expect_ref(receiver), 3)
+                .map_or(Value::Ref(None), |provider| {
+                    self.fabric_container(&provider)
+                })),
+            // A container's own metadata, origin and root.
             (
                 "net/fabricmc/loader/api/ModContainer",
                 "getMetadata",
                 "()Lnet/fabricmc/loader/api/metadata/ModMetadata;",
-            ) => Ok(Value::Ref(Some(
-                expect_ref(receiver)
-                    .cloned()
-                    .unwrap_or_else(|| "mod-container/unknown/unknown".into())
-                    .replacen("mod-container/", "metadata/", 1),
-            ))),
+            ) if host_fabric_loader::container_id(receiver).is_some() => {
+                Ok(host_fabric_loader::metadata(
+                    &host_fabric_loader::container_id(receiver).unwrap_or_default(),
+                ))
+            }
             (
                 "net/fabricmc/loader/api/ModContainer",
                 "getOrigin",
                 "()Lnet/fabricmc/loader/api/metadata/ModOrigin;",
-            ) => {
+            ) if host_fabric_loader::container_id(receiver).is_some() => {
                 // Fabric Loader's own origin for a jar container is a `PATH`
                 // origin over the container's root (`mod_origin.rs`).
-                let id = metadata_part(expect_ref(receiver), 1);
+                let id = host_fabric_loader::container_id(receiver).unwrap_or_default();
                 Ok(mod_origin::origin_value(&id))
             }
             (
@@ -9129,8 +9135,8 @@ impl Host for StdHost {
                 "getRootPaths",
                 // Fabric Loader declares `List<Path> getRootPaths()`.
                 "()Ljava/util/List;" | "()Ljava/util/Collection;",
-            ) => {
-                let id = metadata_part(expect_ref(receiver), 1);
+            ) if host_fabric_loader::container_id(receiver).is_some() => {
+                let id = host_fabric_loader::container_id(receiver).unwrap_or_default();
                 Ok(collection_value(
                     "list",
                     &[path_value(&format!("/horizon/mods/{id}"))],
@@ -9141,16 +9147,28 @@ impl Host for StdHost {
                 "getModId",
                 "()Ljava/lang/String;",
             ) => Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1)))),
-            ("net/fabricmc/loader/api/metadata/ModMetadata", "getId", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1))))
+            // The metadata of a mod with no `fabric.mod.json` and no built-in
+            // model (`fabric_mods.rs` answers the rest): its id, and the
+            // version the run's mod list has for it.
+            (
+                "net/fabricmc/loader/api/metadata/ModMetadata",
+                "getId" | "getName",
+                "()Ljava/lang/String;",
+            ) if host_fabric_loader::metadata_id(receiver).is_some() => {
+                Ok(Value::Ref(host_fabric_loader::metadata_id(receiver)))
             }
             (
                 "net/fabricmc/loader/api/metadata/ModMetadata",
                 "getVersion",
                 "()Lnet/fabricmc/loader/api/Version;",
-            ) => Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 2)))),
-            ("net/fabricmc/loader/api/metadata/ModMetadata", "getName", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(metadata_part(expect_ref(receiver), 1))))
+            ) if host_fabric_loader::metadata_id(receiver).is_some() => {
+                let id = host_fabric_loader::metadata_id(receiver).unwrap_or_default();
+                Ok(Value::Ref(Some(
+                    self.mods
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".into()),
+                )))
             }
             ("net/fabricmc/loader/api/metadata/ModMetadata", "getType", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some("release".into())))
@@ -9852,6 +9870,10 @@ fn java_value_text(value: &Value, desc: &str) -> String {
         Value::Long(value) => value.to_string(),
         Value::Float(value) if desc == "F" => format_java_float32(*value),
         Value::Float(value) => format_java_float(*value),
+        // A stream never prints its marker (`stream_pipeline.rs`).
+        Value::Ref(Some(value)) if stream_pipeline::is_stream_marker(value) => {
+            stream_pipeline::STREAM_TEXT.into()
+        }
         Value::Ref(Some(value)) => value.clone(),
         Value::Boxed(boxed) => boxed.text(),
         Value::Host(_) => host_text(value),
@@ -10671,6 +10693,10 @@ fn value_text(value: &Value) -> String {
             // instance method.
             if let Some(value) = value.strip_prefix("regex-pattern/") {
                 return value.to_owned();
+            }
+            // A stream never prints its marker (`stream_pipeline.rs`).
+            if stream_pipeline::is_stream_marker(value) {
+                return stream_pipeline::STREAM_TEXT.into();
             }
             value.clone()
         }
@@ -11577,7 +11603,12 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
         }
         Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
             // An object no model prints (a jar object, an identity hash)
-            // is counted; the element keeps its marker in the text.
+            // is counted; the element keeps its marker in the text. A
+            // stream is counted too, and never prints its marker.
+            if stream_pipeline::is_stream_marker(marker) {
+                let _ = host.unknown_host_call(&jar_text::object_to_string());
+                return stream_pipeline::STREAM_TEXT.into();
+            }
             if crate::runtime::jar_object::packaged_object_class(value).is_some() {
                 let _ = host.unknown_host_call(&jar_text::object_to_string());
             }
@@ -16236,6 +16267,7 @@ impl NativeJar {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -16402,6 +16434,7 @@ impl NativeJar {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -16552,6 +16585,7 @@ impl NativeJar {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -18592,12 +18626,35 @@ fn predicate_marker_value(marker: &str) -> bool {
 /// both the host surface and a jar callback's own combinator call read it the
 /// same way: composing two callbacks must not execute the receiver as if it
 /// were the argument (which is what a callback marker otherwise means).
+/// A callback's text inside a composition marker: its marker, or a host
+/// handle's encoded form (a `Stream.Builder` is a `Consumer`), which
+/// [`composed_callback`] reads back.
+fn callback_text(value: &Value) -> Option<String> {
+    match value {
+        // A jar `String` spelled like a handle's encoding is no callback, and
+        // never becomes the handle (`composed_callback`).
+        Value::Ref(Some(marker)) if HostRef::decode(marker).is_some() => None,
+        Value::Ref(Some(marker)) => Some(marker.clone()),
+        Value::Host(handle) => Some(handle.encode()),
+        _ => None,
+    }
+}
+
+/// One side of a composition marker as the callback it was.
+fn composed_callback(text: &str) -> Value {
+    match HostRef::decode(text) {
+        Some(handle) => Value::Host(handle),
+        None => Value::Ref(Some(text.to_owned())),
+    }
+}
+
 fn functional_composition_marker(
     r: &MethodRef,
     receiver_marker: &str,
     args: &[Value],
 ) -> Option<Value> {
-    let other = || args.first().and_then(expect_ref).map(String::as_str);
+    let other_text = args.first().and_then(callback_text);
+    let other = || other_text.as_deref();
     match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
         (
             "java/util/function/Predicate",
@@ -19012,6 +19069,8 @@ struct Runtime<'a, H> {
     next_object: usize,
     streams: BTreeMap<String, Vec<Value>>,
     next_stream: usize,
+    /// Lazy stream stages and builders (`stream_pipeline.rs`).
+    pipelines: stream_pipeline::Pipelines,
     /// Enum constants this invocation's `<clinit>` built, keyed by the object's
     /// marker: the declared name and ordinal its `java.lang.Enum` constructor
     /// received.
@@ -19941,6 +20000,10 @@ impl<H: Host> Runtime<'_, H> {
         marker: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        // A `Stream.Builder` handle is a `Consumer` (`stream_pipeline.rs`).
+        if let Some(value) = self.stream_callback(marker, args)? {
+            return Ok(Some(value));
+        }
         let Some(marker) = expect_ref(marker) else {
             return Ok(None);
         };
@@ -19959,8 +20022,9 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(rest) = marker.strip_prefix("@fn:consumer.then:")
             && let Some((left, right)) = rest.split_once('|')
         {
-            self.invoke_callback(&Value::Ref(Some(left.to_owned())), args)?;
-            self.invoke_callback(&Value::Ref(Some(right.to_owned())), args)?;
+            // A side may be a host handle's encoded form (`callback_text`).
+            self.invoke_callback(&composed_callback(left), args)?;
+            self.invoke_callback(&composed_callback(right), args)?;
             return Ok(Some(Value::Void));
         }
         if let Some(rest) = marker.strip_prefix("@fn:function.then:")
@@ -20147,7 +20211,12 @@ impl<H: Host> Runtime<'_, H> {
                     .into_iter()
                     .map(|value| parse_collection_value(&value))
                     .collect::<Result<Vec<_>, _>>()?;
-                return Ok(Some(self.new_stream("callback", "stream", values)));
+                let stream = self.new_stream("callback", "stream", values);
+                self.mark_stream_origin(&stream, &receiver);
+                if self.collection_stream_sized(&receiver) {
+                    self.mark_sized(&stream);
+                }
+                return Ok(Some(stream));
             }
             // Reflection is the interpreter's own surface (it knows the jar's
             // hierarchy, annotations and fields); the host only answers it
@@ -23398,19 +23467,10 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn new_stream(&mut self, class: &str, method: &str, values: Vec<Value>) -> Value {
-        let marker = format!("stream/{class}/{method}/{}", self.next_stream);
+        let marker = stream_pipeline::stream_marker(class, method, self.next_stream);
         self.next_stream += 1;
         self.streams.insert(marker.clone(), values);
         Value::Ref(Some(marker))
-    }
-
-    fn stream(&self, value: &Value) -> Result<&Vec<Value>, NativeError> {
-        let marker = expect_ref(value)
-            .filter(|marker| marker.starts_with("stream/"))
-            .ok_or_else(|| NativeError::Metadata("expected a native stream marker".into()))?;
-        self.streams
-            .get(marker)
-            .ok_or_else(|| NativeError::Metadata("stream is not owned by this invocation".into()))
     }
 
     fn invoke_stream(
@@ -23421,6 +23481,11 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        // Stages, `concat`, builders and the per-element terminals run
+        // lazily (`stream_pipeline.rs`).
+        if let Some(value) = self.invoke_lazy_stream(r, receiver, args, class, method)? {
+            return Ok(Some(value));
+        }
         if let Some(value) = self.stream_support_stream(r, args, class, method)? {
             return Ok(Some(value));
         }
@@ -23439,7 +23504,7 @@ impl<H: Host> Runtime<'_, H> {
             self.mark_sized(&stream);
             return Ok(Some(stream));
         }
-        if r.name == "stream"
+        if (r.name == "stream" || r.name == "parallelStream")
             && r.descriptor == "()Ljava/util/stream/Stream;"
             && is_collection_owner(&r.owner)
             && !is_map_owner(&r.owner)
@@ -23450,11 +23515,13 @@ impl<H: Host> Runtime<'_, H> {
                 .map(|value| parse_collection_value(&value))
                 .collect::<Result<Vec<_>, _>>()?;
             let stream = self.new_stream(class, method, values);
-            // A JDK collection's spliterator reports SIZED, a concurrent
-            // one's does not.
-            if !expect_ref(receiver)
-                .is_some_and(|marker| marker.starts_with("java/util/concurrent/"))
-            {
+            // A fail-fast collection's stream binds late and checks for
+            // modification (`stream_pipeline.rs`).
+            self.mark_stream_origin(&stream, receiver);
+            if r.name == "parallelStream" {
+                self.mark_parallel_stream(&stream);
+            }
+            if self.collection_stream_sized(receiver) {
                 self.mark_sized(&stream);
             }
             return Ok(Some(stream));
@@ -23492,224 +23559,22 @@ impl<H: Host> Runtime<'_, H> {
             self.mark_sized(&stream);
             return Ok(Some(stream));
         }
-        // `Stream.concat(first, second)` is the two-source shape a constant
-        // table builder uses; both sides are streams this runtime owns.
-        if r.owner == "java/util/stream/Stream"
-            && r.name == "concat"
-            && r.descriptor
-                == "(Ljava/util/stream/Stream;Ljava/util/stream/Stream;)Ljava/util/stream/Stream;"
-        {
-            for stream in args {
-                self.force_stream(stream)?;
-            }
-            let mut values = self
-                .stream(args.first().ok_or_else(|| {
-                    NativeError::Metadata("Stream.concat needs a first stream".into())
-                })?)?
-                .clone();
-            values.extend(
-                self.stream(args.get(1).ok_or_else(|| {
-                    NativeError::Metadata("Stream.concat needs a second stream".into())
-                })?)?
-                .clone(),
-            );
-            // SIZED when both halves are.
-            let sized = args.len() == 2
-                && args.iter().all(|stream| {
-                    expect_ref(stream).is_some_and(|marker| self.stream_is_sized(marker))
-                });
-            let stream = self.new_stream(class, method, values);
-            if sized {
-                self.mark_sized(&stream);
-            }
-            return Ok(Some(stream));
-        }
         if !r.owner.starts_with("java/util/stream/") {
             return Ok(None);
         }
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        // A SIZED-keeping stage is recorded, `count()` may not traverse
-        // (`jdk_stream::StreamPlan`); anything else runs recorded stages first.
-        if let Some(value) = self.plan_stream_call(r, receiver, args, class, method)? {
-            return Ok(Some(value));
+        // A terminal that runs on the stream's whole output: a source's
+        // list, or a lazy pipeline's output from one push. Anything else
+        // (`close`, `onClose`, `Object`'s members) must not run the pipeline.
+        if !stream_pipeline::takes_output(&r.name) {
+            return Ok(None);
         }
-        let values = self.stream(receiver)?.clone();
+        let values = self.stream_output(receiver, &r.name)?;
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
-            ("map", "(Ljava/util/function/Function;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut mapped = Vec::with_capacity(values.len());
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Function".into(),
-                                    name: "apply".into(),
-                                    descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".into(),
-                                },
-                                callback,
-                                &[value],
-                            )?,
-                        };
-                    mapped.push(result);
-                }
-                self.new_stream(class, method, mapped)
-            }
-            ("filter", "(Ljava/util/function/Predicate;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut filtered = Vec::with_capacity(values.len());
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if matches!(result, Value::Int(flag) if flag != 0) {
-                        filtered.push(value);
-                    }
-                }
-                self.new_stream(class, method, filtered)
-            }
-            ("flatMap", "(Ljava/util/function/Function;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut flattened = Vec::new();
-                for value in &values {
-                    let mapped =
-                        match self.invoke_callback(callback, std::slice::from_ref(value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Function".into(),
-                                    name: "apply".into(),
-                                    descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(value),
-                            )?,
-                        };
-                    self.force_stream(&mapped)?;
-                    flattened.extend(self.stream(&mapped)?.clone());
-                }
-                self.new_stream(class, method, flattened)
-            }
-            ("distinct", "()Ljava/util/stream/Stream;") => {
-                // `DistinctOps`' `HashSet` (`hash_bulk.rs`).
-                let distinct = self.hash_distinct(values)?;
-                self.new_stream(class, method, distinct)
-            }
-            // Both take a `long` (`ldc2_w 2L`), not an `int`.
-            ("limit", "(J)Ljava/util/stream/Stream;") => {
-                let limit = usize::try_from(expect_long(r, StdHost::argument(r, args, 0)?)?.max(0))
-                    .unwrap_or(usize::MAX);
-                self.new_stream(class, method, values.into_iter().take(limit).collect())
-            }
-            ("skip", "(J)Ljava/util/stream/Stream;") => {
-                let skip = usize::try_from(expect_long(r, StdHost::argument(r, args, 0)?)?.max(0))
-                    .unwrap_or(usize::MAX);
-                self.new_stream(class, method, values.into_iter().skip(skip).collect())
-            }
-            ("anyMatch", "(Ljava/util/function/Predicate;)Z") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut matched = false;
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if matches!(result, Value::Int(flag) if flag != 0) {
-                        matched = true;
-                        break;
-                    }
-                }
-                Value::Int(matched as i32)
-            }
-            ("allMatch", "(Ljava/util/function/Predicate;)Z") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut matched = true;
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if !matches!(result, Value::Int(flag) if flag != 0) {
-                        matched = false;
-                        break;
-                    }
-                }
-                Value::Int(matched as i32)
-            }
-            ("noneMatch", "(Ljava/util/function/Predicate;)Z") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                let mut matched = true;
-                for value in values {
-                    let result =
-                        match self.invoke_callback(callback, std::slice::from_ref(&value))? {
-                            Some(result) => result,
-                            None => self.host.invoke_instance(
-                                &MethodRef {
-                                    owner: "java/util/function/Predicate".into(),
-                                    name: "test".into(),
-                                    descriptor: "(Ljava/lang/Object;)Z".into(),
-                                },
-                                callback,
-                                std::slice::from_ref(&value),
-                            )?,
-                        };
-                    if matches!(result, Value::Int(flag) if flag != 0) {
-                        matched = false;
-                        break;
-                    }
-                }
-                Value::Int(matched as i32)
-            }
-            // Execution mode does not change the bounded value sequence;
-            // returning the same stream keeps a `parallel` in the chain from
-            // falling out to a null host answer. `sorted` reorders, so it is a
-            // real stage (`jdk_stream::more_stream_stages`).
-            ("parallel", _) | ("sequential", _) | ("unordered", _) => {
-                self.new_stream(class, method, values)
-            }
-            ("peek", "(Ljava/util/function/Consumer;)Ljava/util/stream/Stream;") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                for value in &values {
-                    self.invoke_callback(callback, std::slice::from_ref(value))?;
-                }
-                self.new_stream(class, method, values)
-            }
-            ("findFirst" | "findAny", "()Ljava/util/Optional;") => {
-                optional_wrap(values.into_iter().next().unwrap_or(Value::Ref(None)))
-            }
-            ("count", "()J") => Value::Int(values.len() as i32),
-            ("toList", "()Ljava/util/List;") => collection_value("list", &values),
+            // `Stream.toList()`: an unmodifiable `ListN` that allows `null`.
+            ("toList", "()Ljava/util/List;") => self.unmodifiable_list(values),
             ("toArray", "()[Ljava/lang/Object;") => {
                 self.new_array_value("[Ljava/lang/Object;", values)
             }
@@ -23718,7 +23583,18 @@ impl<H: Host> Runtime<'_, H> {
                     NativeError::Metadata("Stream.collect needs a collector".into())
                 })?;
                 match collector.as_str() {
-                    "collector/list" => collection_value("list", &values),
+                    // `ArrayList::new`, `List::add`: a list of its own.
+                    "collector/list" => self.new_array_list(values),
+                    "collector/unmodifiable-list" => {
+                        if values.contains(&Value::Ref(None)) {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/NullPointerException".into(),
+                                message: None,
+                                frame: None,
+                            });
+                        }
+                        self.unmodifiable_list(values)
+                    }
                     // `HashSet::new` (`hash_bulk.rs`).
                     "collector/set" => self.hash_set_collect(&values)?,
                     "collector/ordered-set" => collection_value("set", &values),
@@ -23756,25 +23632,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
             }
             ("isEmpty", "()Z") => Value::Int(values.is_empty() as i32),
-            ("forEach", "(Ljava/util/function/Consumer;)V") => {
-                let callback = StdHost::argument(r, args, 0)?;
-                for value in values {
-                    let result = self.invoke_callback(callback, std::slice::from_ref(&value))?;
-                    if result.is_none() {
-                        self.host.invoke_instance(
-                            &MethodRef {
-                                owner: "java/util/function/Consumer".into(),
-                                name: "accept".into(),
-                                descriptor: "(Ljava/lang/Object;)V".into(),
-                            },
-                            callback,
-                            &[value],
-                        )?;
-                    }
-                }
-                Value::Void
-            }
-            _ => return self.more_stream_stages(r, &values, args, class, method),
+            _ => return self.more_stream_stages(r, &values),
         };
         Ok(Some(result))
     }
@@ -24825,7 +24683,8 @@ impl<H: Host> Runtime<'_, H> {
                     let matches = unboxed
                         || !wanted.starts_with('[')
                             && expect_ref(&value).is_some_and(|marker| {
-                                self.object_is_instance_of(marker, &wanted)
+                                self.forged_stream_instance_of(marker, &wanted)
+                                    || self.object_is_instance_of(marker, &wanted)
                                     || self.host.host_instance_of(marker, &wanted)
                                     || jdk_model::platform_instance_of(marker, &wanted)
                                     || generic_type_instance_of(marker, &wanted)
@@ -25476,7 +25335,7 @@ impl<H: Host> Runtime<'_, H> {
                                     // combinator returns.
                                     if let Some(value) = functional_composition_marker(
                                         &resolved,
-                                        expect_ref(receiver).map(String::as_str).unwrap_or(""),
+                                        callback_text(receiver).as_deref().unwrap_or(""),
                                         &args,
                                     ) {
                                         value
@@ -29832,6 +29691,7 @@ mod tests {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -29896,6 +29756,7 @@ mod tests {
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -31883,7 +31744,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&container, &loader, &[Value::Ref(Some("demo".into()))])
                 .unwrap(),
-            optional_wrap(Value::Ref(Some("mod-container/demo/1.2.3".into())))
+            optional_wrap(host_fabric_loader::container("demo", Some("1.2.3")))
         );
     }
 
@@ -35742,7 +35603,7 @@ mandatory = true
         // `Optional<ModContainer>`.
         assert_eq!(
             container_value,
-            optional_wrap(Value::Ref(Some("mod-container/demo/1.2.3".into())))
+            optional_wrap(host_fabric_loader::container("demo", Some("1.2.3")))
         );
         // Fabric declares `Collection<ModContainer> getAllMods()`. A mod only
         // seeded with `with_mod` is a loaded id, not a Fabric jar with its own
@@ -35767,7 +35628,7 @@ mandatory = true
             .unwrap();
         assert_eq!(
             first,
-            Value::Ref(Some("mod-container/fabric-api/0.165.0+26.3".into()))
+            host_fabric_loader::container("fabric-api", Some("0.165.0+26.3"))
         );
         let present = MethodRef {
             owner: "java/util/Optional".into(),
@@ -35803,7 +35664,7 @@ mandatory = true
         assert_eq!(
             host.invoke_instance(&metadata, &container_value, &[])
                 .unwrap(),
-            Value::Ref(Some("metadata/demo/1.2.3".into()))
+            host_fabric_loader::metadata("demo")
         );
         let root_paths = MethodRef {
             owner: "net/fabricmc/loader/api/ModContainer".into(),
@@ -35845,7 +35706,7 @@ mandatory = true
             descriptor: "()Ljava/lang/String;".into(),
         };
         assert_eq!(
-            host.invoke_instance(&name, &Value::Ref(Some("metadata/demo/1.2.3".into())), &[])
+            host.invoke_instance(&name, &host_fabric_loader::metadata("demo"), &[])
                 .unwrap(),
             Value::Ref(Some("demo".into()))
         );
@@ -35855,12 +35716,8 @@ mandatory = true
             descriptor: "()Ljava/lang/String;".into(),
         };
         assert_eq!(
-            host.invoke_instance(
-                &metadata_type,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
-            .unwrap(),
+            host.invoke_instance(&metadata_type, &host_fabric_loader::metadata("demo"), &[],)
+                .unwrap(),
             Value::Ref(Some("release".into()))
         );
         let provides = MethodRef {
@@ -35869,11 +35726,7 @@ mandatory = true
             descriptor: "()Ljava/util/Collection;".into(),
         };
         let provides_value = host
-            .invoke_instance(
-                &provides,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
+            .invoke_instance(&provides, &host_fabric_loader::metadata("demo"), &[])
             .unwrap();
         assert_eq!(
             host.invoke_instance(
@@ -35896,7 +35749,7 @@ mandatory = true
                         name: method_name.into(),
                         descriptor: "()Ljava/util/Collection;".into(),
                     },
-                    &Value::Ref(Some("metadata/demo/1.2.3".into())),
+                    &host_fabric_loader::metadata("demo"),
                     &[],
                 )
                 .unwrap();
@@ -35922,7 +35775,7 @@ mandatory = true
                     name: "getIconPath".into(),
                     descriptor: "(I)Ljava/util/Optional;".into(),
                 },
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
+                &host_fabric_loader::metadata("demo"),
                 &[Value::Int(64)],
             )
             .unwrap();
@@ -35933,11 +35786,7 @@ mandatory = true
             descriptor: "()Ljava/util/Map;".into(),
         };
         let dependencies_value = host
-            .invoke_instance(
-                &dependencies,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
+            .invoke_instance(&dependencies, &host_fabric_loader::metadata("demo"), &[])
             .unwrap();
         assert_eq!(
             host.invoke_instance(
@@ -35958,11 +35807,7 @@ mandatory = true
             descriptor: "()Lnet/fabricmc/loader/api/Version;".into(),
         };
         let version_value = host
-            .invoke_instance(
-                &version,
-                &Value::Ref(Some("metadata/demo/1.2.3".into())),
-                &[],
-            )
+            .invoke_instance(&version, &host_fabric_loader::metadata("demo"), &[])
             .unwrap();
         let friendly = MethodRef {
             owner: "net/fabricmc/loader/api/Version".into(),
@@ -36911,6 +36756,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -37070,6 +36916,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -37252,6 +37099,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -37271,6 +37119,41 @@ mandatory = true
             store_verdict: Default::default(),
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
+        };
+        // A stream takes one stage or terminal (`linkedOrConsumed`): each
+        // use below gets a fresh stream over the same list.
+        let list_stream = |runtime: &mut Runtime<'_, StdHost>| {
+            runtime
+                .invoke_stream(
+                    &MethodRef {
+                        owner: "java/util/List".into(),
+                        name: "stream".into(),
+                        descriptor: "()Ljava/util/stream/Stream;".into(),
+                    },
+                    Some(&list),
+                    &[],
+                    "demo/Stream",
+                    "probe",
+                )
+                .unwrap()
+                .unwrap()
+        };
+        let distinct_stream = |runtime: &mut Runtime<'_, StdHost>| {
+            let stream = list_stream(runtime);
+            runtime
+                .invoke_stream(
+                    &MethodRef {
+                        owner: "java/util/stream/Stream".into(),
+                        name: "distinct".into(),
+                        descriptor: "()Ljava/util/stream/Stream;".into(),
+                    },
+                    Some(&stream),
+                    &[],
+                    "demo/Stream",
+                    "probe",
+                )
+                .unwrap()
+                .unwrap()
         };
         let stream = runtime
             .invoke_stream(
@@ -37300,8 +37183,9 @@ mandatory = true
                     "probe",
                 )
                 .unwrap(),
-            Some(Value::Int(3))
+            Some(Value::Long(3))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -37346,7 +37230,7 @@ mandatory = true
                     "probe",
                 )
                 .unwrap(),
-            Some(Value::Int(1))
+            Some(Value::Long(1))
         );
         let empty_stream = runtime
             .invoke_stream(
@@ -37376,8 +37260,9 @@ mandatory = true
                     "probe",
                 )
                 .unwrap(),
-            Some(Value::Int(0))
+            Some(Value::Long(0))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -37394,6 +37279,7 @@ mandatory = true
                 .unwrap(),
             Some(Value::Int(0))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -37410,6 +37296,7 @@ mandatory = true
                 .unwrap(),
             Some(Value::Int(1))
         );
+        let stream = list_stream(&mut runtime);
         assert_eq!(
             runtime
                 .invoke_stream(
@@ -37426,6 +37313,7 @@ mandatory = true
                 .unwrap(),
             Some(optional_wrap(Value::Ref(Some("alpha".into()))))
         );
+        let stream = list_stream(&mut runtime);
         let distinct = runtime
             .invoke_stream(
                 &MethodRef {
@@ -37440,45 +37328,49 @@ mandatory = true
             )
             .unwrap()
             .unwrap();
+        // A real list now (`Stream.toList()`'s `ListN`, `Collectors.toList()`'s
+        // `ArrayList`): its elements are what the stream yielded.
+        let listed = runtime
+            .invoke_stream(
+                &MethodRef {
+                    owner: "java/util/stream/Stream".into(),
+                    name: "toList".into(),
+                    descriptor: "()Ljava/util/List;".into(),
+                },
+                Some(&distinct),
+                &[],
+                "demo/Stream",
+                "probe",
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            runtime
-                .invoke_stream(
-                    &MethodRef {
-                        owner: "java/util/stream/Stream".into(),
-                        name: "toList".into(),
-                        descriptor: "()Ljava/util/List;".into(),
-                    },
-                    Some(&distinct),
-                    &[],
-                    "demo/Stream",
-                    "probe",
-                )
-                .unwrap(),
-            Some(collection_value(
-                "list",
-                &[Value::Ref(Some("alpha".into())), Value::Int(2)],
-            ))
+            runtime_collection_values(runtime.host, &listed).unwrap(),
+            ["ralpha", "i2"]
         );
         let collector = Value::Ref(Some("collector/list".into()));
+        let distinct = distinct_stream(&mut runtime);
+        // A real list now (`Stream.toList()`'s `ListN`, `Collectors.toList()`'s
+        // `ArrayList`): its elements are what the stream yielded.
+        let listed = runtime
+            .invoke_stream(
+                &MethodRef {
+                    owner: "java/util/stream/Stream".into(),
+                    name: "collect".into(),
+                    descriptor: "(Ljava/util/stream/Collector;)Ljava/lang/Object;".into(),
+                },
+                Some(&distinct),
+                std::slice::from_ref(&collector),
+                "demo/Stream",
+                "probe",
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            runtime
-                .invoke_stream(
-                    &MethodRef {
-                        owner: "java/util/stream/Stream".into(),
-                        name: "collect".into(),
-                        descriptor: "(Ljava/util/stream/Collector;)Ljava/lang/Object;".into(),
-                    },
-                    Some(&distinct),
-                    std::slice::from_ref(&collector),
-                    "demo/Stream",
-                    "probe",
-                )
-                .unwrap(),
-            Some(collection_value(
-                "list",
-                &[Value::Ref(Some("alpha".into())), Value::Int(2)],
-            ))
+            runtime_collection_values(runtime.host, &listed).unwrap(),
+            ["ralpha", "i2"]
         );
+        let distinct = distinct_stream(&mut runtime);
         let array = runtime
             .invoke_stream(
                 &MethodRef {
@@ -37566,6 +37458,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -37775,7 +37668,7 @@ mandatory = true
             br#"{"id":"demo","version":"1.0","custom":{"commit":"abcdef0123456789","ci":true}}"#
                 .to_vec(),
         );
-        let metadata = Value::Ref(Some("metadata/demo/1.0".into()));
+        let metadata = host_fabric_loader::metadata("demo");
         let get = MethodRef {
             owner: "net/fabricmc/loader/api/metadata/ModMetadata".into(),
             name: "getCustomValue".into(),
@@ -37868,6 +37761,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -41328,7 +41222,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Ref(Some("mod-container/demo/1.2.3".into()))
+            host_fabric_loader::container("demo", Some("1.2.3"))
         );
         let client = host
             .invoke_instance(&entries, &loader, &[Value::Ref(Some("client".into()))])
@@ -42997,6 +42891,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
@@ -43049,6 +42944,7 @@ mandatory = true
             next_object: 0,
             streams: BTreeMap::new(),
             next_stream: 0,
+            pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),

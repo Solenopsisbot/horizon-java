@@ -205,6 +205,14 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(text) = self.string_builders.get(marker) {
             return Ok(Some(Value::Ref(Some(text.clone()))));
         }
+        // A stream's `toString` is its stage class and identity hash: counted,
+        // and its marker never printed (`stream_pipeline::STREAM_TEXT`).
+        if self.is_live_stream(marker) {
+            self.host.unknown_operand_call(&object_to_string())?;
+            return Ok(Some(Value::Ref(Some(
+                crate::stream_pipeline::STREAM_TEXT.into(),
+            ))));
+        }
         // A host map entry prints `key=value` (`host_entry.rs`).
         if let Some(text) = self.host_entry_text(value, class, method)? {
             return Ok(Some(text));
@@ -282,6 +290,9 @@ impl<H: Host> Runtime<'_, H> {
         {
             if let Some(text) = self.host_entry_text(receiver, class, method)? {
                 return Ok(Some(text));
+            }
+            if expect_ref(receiver).is_some_and(|marker| self.is_live_stream(marker)) {
+                return self.runtime_value_of(receiver, class, method);
             }
             return self.jar_to_string(receiver, class, method);
         }

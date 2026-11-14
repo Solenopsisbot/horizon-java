@@ -58,7 +58,13 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 }
                 let points = text.chars().map(|c| Value::Int(c as i32)).collect();
-                Ok(Some(self.new_stream(SOURCE.0, SOURCE.1, points)))
+                let stream = self.new_stream(SOURCE.0, SOURCE.1, points);
+                // A Latin-1 string's code points are its chars (SIZED); a
+                // UTF-16 one's `CodePointsSpliterator` is not.
+                if text.chars().all(|c| u32::from(c) <= 0xFF) {
+                    self.mark_sized(&stream);
+                }
+                Ok(Some(stream))
             }
             ("java/util/function/Function", "identity", "()Ljava/util/function/Function;") => {
                 Ok(Some(Value::Ref(Some(FUNCTION_IDENTITY.into()))))

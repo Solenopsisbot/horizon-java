@@ -148,6 +148,15 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Err(class_cast_exception(&runtime_class, target));
         }
+        // A plain `String`, or a `stream/...` text that is no live stream (a
+        // jar `String` spelled like one), is never a stream: Java's CCE.
+        if crate::runtime::stream_pipeline::is_stream_interface(target)
+            && let Value::Ref(Some(text)) = value
+            && (crate::runtime::value_class::is_plain_string(text)
+                || (text.starts_with("stream/") && !self.is_live_stream(text)))
+        {
+            return Err(class_cast_exception("java/lang/String", target));
+        }
         let Some(target_file) = self.class(target) else {
             // A JDK or game target: the runtime models those values by marker
             // and keeps its previous behaviour.
@@ -158,6 +167,11 @@ impl<H: Host> Runtime<'_, H> {
         let (verdict, runtime_class) = self.cast_verdict(value, target, target_is_interface);
         match verdict {
             Verdict::Yes => Ok(()),
+            // A stream's class is a pipeline stage's own, which the
+            // exception's message would name: counted, its marker never shown.
+            Verdict::No if expect_ref(value).is_some_and(|marker| self.is_live_stream(marker)) => {
+                self.count_cast(value, target)
+            }
             Verdict::No => Err(class_cast_exception(
                 runtime_class.as_deref().unwrap_or("java/lang/Object"),
                 target,
@@ -375,6 +389,16 @@ impl<H: Host> Runtime<'_, H> {
             Value::Void | Value::Ref(None) => return (Verdict::Yes, None),
             Value::Ref(Some(marker)) => marker.as_str(),
         };
+        // A `stream/...` text that is no live stream is a jar `String`
+        // spelled like one (`stream_pipeline::stream_marker`).
+        if marker.starts_with("stream/") && !self.is_live_stream(marker) {
+            let verdict = if self.forged_stream_instance_of(marker, target) {
+                Verdict::Yes
+            } else {
+                Verdict::No
+            };
+            return (verdict, Some("java/lang/String".into()));
+        }
         if marker.starts_with("@indy:") {
             // A lambda is an instance of its functional interface only.
             return match target_is_interface {
