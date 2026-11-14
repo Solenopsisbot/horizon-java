@@ -513,6 +513,33 @@ impl<H: Host> Runtime<'_, H> {
                 if let Some(path) = self.file_path(a) {
                     return Ok(self.file_path(b) == Some(path));
                 }
+                // A JDK object a jar built (`new BigDecimal(..)`), or a jar object whose chain
+                // leaves the jar at a JDK class: identity only where Java 25's table shows the
+                // class keeps `Object.equals`; otherwise the JDK skeleton's body (a map
+                // entry's, `AbstractList`'s), the host's model of the class's `equals`, or
+                // counted (`jdk_object_methods.rs`, #217).
+                // The very same object: every JDK `equals` is reflexive.
+                if a == b && crate::jar_object::object_key(a).is_some() {
+                    return Ok(true);
+                }
+                if let Some(base) = self.jdk_base_class(a)
+                    && crate::jdk_object_methods::overrides(
+                        &base,
+                        crate::jdk_object_methods::Member::Equals,
+                    ) != Some(false)
+                {
+                    let equals = MethodRef {
+                        owner: base,
+                        name: "equals".into(),
+                        descriptor: EQUALS.into(),
+                    };
+                    let other = std::slice::from_ref(b);
+                    let answer = match self.invoke_jdk_skeleton(&equals, 0xb6, Some(a), other)? {
+                        Some(answer) => answer,
+                        None => self.host.invoke_instance(&equals, a, other)?,
+                    };
+                    return Ok(matches!(answer, Value::Int(flag) if flag != 0));
+                }
                 Ok(a == b)
             }
         }
@@ -918,6 +945,24 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 return self.host.invoke_instance(&typed, receiver, args).map(Some);
             }
+        }
+        // `o.equals(x)` on a JDK object a jar built, whatever class the call names
+        // (`Object o = new BigDecimal(..)` names `Object`): identity only where Java 25's
+        // table shows its class keeps `Object.equals`, else its model or counted
+        // (`java_equals`, `jdk_object_methods.rs`, #217). Collections, map entries and
+        // files keep their own paths.
+        if r.name == "equals"
+            && r.descriptor == EQUALS
+            && matches!(opcode, 0xb6 | 0xb9)
+            && let (Some(receiver), [other]) = (receiver, args)
+            && self.equality_of(receiver) == Equality::Host
+            && self.host_collection_class(receiver).is_none()
+            && !is_map_entry(receiver)
+            && self.file_path(receiver).is_none()
+            && self.jdk_base_class(receiver).is_some()
+        {
+            let equal = self.java_equals(receiver, other)?;
+            return Ok(Some(Value::Int(i32::from(equal))));
         }
         self.invoke_list_equality(r, opcode, receiver, args)
     }
