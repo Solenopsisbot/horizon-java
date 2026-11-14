@@ -2742,9 +2742,10 @@ pub struct StdHost {
     /// clock read.  Keeping the value seeded makes bootstrap replayable.
     current_time_millis: i32,
     mods: BTreeMap<String, String>,
-    /// Each mod of a linked NeoForge jar: its file's first mod and that
-    /// mod's version (`LoadingModList.getModFileById`, `neoforge_loader.rs`).
-    neoforge_mod_files: BTreeMap<String, (String, Option<String>)>,
+    /// Each mod of a linked NeoForge jar: its own version, its file's first
+    /// mod and that mod's version (`ModList`, `LoadingModList.getModFileById`,
+    /// `neoforge_loader.rs`).
+    neoforge_mod_files: BTreeMap<String, neoforge_loader::LinkedMod>,
     /// The loader this run is on and the running jar's own loader-namespace
     /// classes, for class precedence (`class_precedence.rs`).
     run_loader: class_precedence::RunLoader,
@@ -3321,11 +3322,15 @@ impl StdHost {
         self.record_fabric_metadata(jar);
         if let Some(toml) = jar.resource_bytes.get("META-INF/neoforge.mods.toml") {
             let entries = neoforge_loader::mod_file_entries(toml, jar.neoforge_version.as_deref());
-            if let Some(first) = entries.first().cloned() {
-                for (id, _) in &entries {
-                    self.neoforge_mod_files
-                        .entry(id.clone())
-                        .or_insert_with(|| first.clone());
+            if let Some((first, first_version)) = entries.first().cloned() {
+                for (id, version) in entries {
+                    self.neoforge_mod_files.entry(id).or_insert_with(|| {
+                        neoforge_loader::LinkedMod {
+                            version,
+                            file: first.clone(),
+                            file_version: first_version.clone(),
+                        }
+                    });
                 }
             }
         }

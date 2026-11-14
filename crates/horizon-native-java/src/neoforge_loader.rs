@@ -450,8 +450,8 @@ impl StdHost {
         if own.iter().any(|(own_id, _)| own_id == id) {
             return own.into_iter().next();
         }
-        if let Some(file) = self.neoforge_mod_files.get(id) {
-            return Some(file.clone());
+        if let Some(linked) = self.neoforge_mod_files.get(id) {
+            return Some((linked.file.clone(), linked.file_version.clone()));
         }
         match id {
             "minecraft" => Some(("minecraft".into(), self.game_version.clone())),
@@ -463,8 +463,9 @@ impl StdHost {
     /// `ModList.getMods()`: each mod's `IModInfo`. FML lists every loaded
     /// mod of the game, which the host cannot know (other jars, their order:
     /// `ModSorter`), so the call is counted; the list holds every mod the
-    /// host does know: the run's mods, the running jar's own `[[mods]]`, the
-    /// game (when its version was seeded) and `neoforge`.
+    /// host does know: the run's mods, the running jar's and the linked
+    /// NeoForge jars' `[[mods]]`, the game (when its version was seeded) and
+    /// `neoforge`.
     pub(crate) fn neoforge_mod_infos(&mut self, r: &MethodRef) -> Value {
         *self
             .unknown_host_calls
@@ -476,6 +477,7 @@ impl StdHost {
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
         ids.extend(self.own_mod_file().into_iter().map(|(id, _)| id));
+        ids.extend(self.neoforge_mod_files.keys().cloned());
         ids.insert("neoforge".into());
         if self.game_version.is_some() {
             ids.insert("minecraft".into());
@@ -494,11 +496,22 @@ impl StdHost {
     /// are always present; their version is the caller-seeded game version
     /// (or `unknown` when the host was not told).
     pub(super) fn neoforge_mod_version(&self, id: &str) -> Option<String> {
-        if let Some(version) = self.mods.get(id) {
+        // A version a jar declared wins over a dependency's `unknown`
+        // stand-in (`seed_host` seeds every required id that way).
+        let seeded = self.mods.get(id);
+        if let Some(version) = seeded.filter(|version| *version != "unknown") {
             return Some(version.clone());
         }
-        if let Some((_, version)) = self.own_mod_file().into_iter().find(|(own, _)| own == id) {
-            return Some(version.unwrap_or_else(|| "unknown".into()));
+        let own = self.own_mod_file().into_iter().find(|(own, _)| own == id);
+        if let Some(version) = own
+            .as_ref()
+            .and_then(|(_, version)| version.clone())
+            .or_else(|| self.neoforge_mod_files.get(id)?.version.clone())
+        {
+            return Some(version);
+        }
+        if seeded.is_some() || own.is_some() || self.neoforge_mod_files.contains_key(id) {
+            return Some("unknown".into());
         }
         if id == "minecraft" {
             // The game's own version is only known when the caller seeded it;
@@ -508,6 +521,17 @@ impl StdHost {
         }
         is_always_loaded_mod(id).then(|| "unknown".into())
     }
+}
+
+/// A mod of a linked NeoForge jar (`StdHost::neoforge_mod_files`).
+#[derive(Clone, Debug)]
+pub(crate) struct LinkedMod {
+    /// Its own `[[mods]]` version.
+    pub(crate) version: Option<String>,
+    /// Its file's first mod, which names the file.
+    pub(crate) file: String,
+    /// That first mod's version (`ModFileInfo.versionString`).
+    pub(crate) file_version: Option<String>,
 }
 
 const FML_MOD_CONTAINER: &str = "net/neoforged/fml/javafmlmod/FMLModContainer";
