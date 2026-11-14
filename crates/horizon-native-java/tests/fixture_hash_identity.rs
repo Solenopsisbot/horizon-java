@@ -15,7 +15,7 @@ mod javac_fixture;
 /// What `java -cp . demo.Identity` printed on Java 25 (Temurin 25.0.5,
 /// `javac --release 21`), the same on two runs.
 const ORACLE: &str = "\
-tables=TFTF2T11/2/2/1T1F
+tables=TF1TTF111/2/2/1T0F
 probes=IIII23TT8T
 identity=1/2/1T20
 separate=FT22
@@ -42,7 +42,9 @@ fn run(method: &str) -> (String, Vec<(String, usize)>) {
 }
 
 /// One `MethodHandle` (identity `equals` and hash) and one `Path` (value
-/// hash), each added twice: `HashSet`/`LinkedHashSet` keep one, a second
+/// hash, in a set of its own: beside an identity-hashed key its lookup
+/// would meet a node no run can place), each added twice: `HashSet`/
+/// `LinkedHashSet` keep one, a second
 /// `HashMap.put` answers the first value, `computeIfAbsent` finds it, and
 /// `remove` takes it out. `Set.of(h, h)`, `Set.of(h, p, h)`, `Map.of(h, 1, h,
 /// 2)` and `Map.of(h, 1, p, 2, h, 3)` throw "duplicate element"/"duplicate

@@ -69,7 +69,11 @@ public final class Identity {
         MethodHandle h = handle();
         Path p = Path.of("/a");
         Set<Object> set = new HashSet<>();
-        String out = b(set.add(h)) + b(set.add(h)) + b(set.add(p)) + b(set.add(p)) + set.size() + b(set.contains(h));
+        String out = b(set.add(h)) + b(set.add(h)) + set.size() + b(set.contains(h));
+        // A `Path` in a set of its own: beside an identity-hashed key, whose bin
+        // no run can name, its lookup would call `Path.equals` on an unknown node.
+        Set<Object> paths = new HashSet<>();
+        out += b(paths.add(p)) + b(paths.add(p)) + paths.size();
         Set<Object> linked = new LinkedHashSet<>();
         linked.add(h);
         linked.add(h);
