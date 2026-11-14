@@ -20774,6 +20774,17 @@ impl<H: Host> Runtime<'_, H> {
             };
             let (receiver, mut rest) = (receiver.clone(), rest.to_vec());
             method_ref_null_check(&callback.target.descriptor, Some(&receiver), &rest)?;
+            // A bound reference to a functional interface's method on a
+            // callback (`Supplier n = it::next; n::get`, any depth): the
+            // receiver's own body, exactly what the direct call `n.get()`
+            // runs, its exception included (#224). The host has no body for
+            // `Supplier.get` and answered it neutrally.
+            if is_jdk_functional_method(&callback.target)
+                && let Some(value) = self.invoke_callback(&receiver, &rest)?
+            {
+                return box_callback_result(self, &receiver, value, &callback.target.descriptor)
+                    .map(Some);
+            }
             jdk_model::unbox_for_descriptor(&callback.target.descriptor, &mut rest);
             // `Collection::size` on a jar object runs the object's own body
             // (`jvm_dispatch.rs`); a JDK body over its data is counted
