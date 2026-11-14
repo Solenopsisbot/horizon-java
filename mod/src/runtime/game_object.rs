@@ -40,25 +40,22 @@
 use crate::runtime::host_ref::{HostKind, HostRef, Methods, instance_of_class};
 use crate::runtime::{NativeError, Value};
 
-/// The client's service objects: one each, by name (`client/minecraft`).
+/// The client's service objects: one each for the life of the client, by
+/// name (`client/minecraft`). The connection, its packet sender, the game
+/// mode, the integrated server, the player's inventory and food data and the
+/// tooltip flag are made again on each join, life or toggle, so they are
+/// transient: `==` between two producers' handles is counted.
 const CLIENT_SINGLETONS: &[&str] = &[
     "minecraft",
     "camera",
     "chat",
-    "connection",
     "debug-overlay",
     "font",
-    "food-data",
-    "game-mode",
     "game-renderer",
     "gui",
     "hud",
-    "integrated-server",
-    "inventory",
     "options",
-    "packet-sender",
     "texture-manager",
-    "tooltip-flag",
     "user",
     "window",
 ];
@@ -129,7 +126,6 @@ pub(crate) fn is_game_kind(kind: HostKind) -> bool {
 
 /// The handle of the game object `marker` names (its kind by [`kind_of`]).
 /// `None` for text that names no game object.
-#[cfg_attr(not(test), allow(dead_code))] // P16b's producers
 pub(crate) fn value(marker: &str) -> Option<Value> {
     Some(Value::Host(HostRef::new(kind_of(marker)?, marker)))
 }
@@ -142,6 +138,188 @@ pub(crate) fn text(value: &Value) -> Option<&String> {
     match value {
         Value::Host(handle) if is_game_kind(handle.kind()) => Some(handle.key_text()),
         other => crate::runtime::expect_ref(other),
+    }
+}
+
+/// A client value of the game (#156 P16d): the handle of a `client/…` or
+/// `key-category/…` marker; any other text stays the text it was.
+pub(crate) fn client_value(marker: String) -> Value {
+    if (marker.starts_with("client/") || marker.starts_with(crate::runtime::client_values::CATEGORY))
+        && let Some(value) = value(&marker)
+    {
+        return value;
+    }
+    Value::Ref(Some(marker))
+}
+
+/// A server-side value of the game (#156 P16b): the handle of a `game/…`
+/// marker. Text of any other family stays the text it was: its producers
+/// move with P16c (values and registry objects) and P16d (the client).
+pub(crate) fn server_value(marker: String) -> Value {
+    if marker.starts_with("game/")
+        && let Some(value) = value(&marker)
+    {
+        return value;
+    }
+    Value::Ref(Some(marker))
+}
+
+/// Whether every object of `class` the runtime hands out is a game handle
+/// (#156 P16d: the client's classes), so a `String` is never one: a cast of
+/// one throws Java's CCE.
+pub(crate) fn handle_only_class(class: &str) -> bool {
+    matches!(
+        class,
+        "net/minecraft/network/chat/Style"
+            | "net/minecraft/network/chat/TextColor"
+            | "net/minecraft/client/KeyMapping$Category"
+            | "net/minecraft/client/Minecraft"
+            | "net/minecraft/client/Options"
+            | "net/minecraft/client/gui/Gui"
+            | "net/minecraft/client/gui/Font"
+            | "net/minecraft/client/multiplayer/ClientLevel"
+            | "net/minecraft/client/player/LocalPlayer"
+    )
+}
+
+/// Whether two equal keys of a server or client object are one object: a
+/// server's player, entity and level keys name one object each (P16b), the
+/// client's `LocalPlayer` and `ClientLevel` are made again on each join and
+/// respawn, and their keys do not say which (counted).
+pub(crate) fn world_canonical(key: &str) -> bool {
+    !key.starts_with("client/")
+}
+
+/// A player's key: `game/player/<uuid>/<session>.<life>[/<id>]`.
+///
+/// One `ServerPlayer` is one object from login to respawn: `PlayerList.respawn`
+/// builds a new one and gives it the old id (`setId(serverPlayer.getId())`),
+/// a relog builds a new one with a new id, and a dimension change keeps the
+/// same object (`ServerPlayer.teleport` returns `this`). The game's bridge
+/// counts the sessions (logins) and lives (respawns, the clone moment) of each
+/// player (`events::FacadePlayer`), so one key is one object. The entity id,
+/// when the façade knows it, ends the key: `Entity.equals`/`hashCode` go by it.
+/// It is the same for every life of one session, so it splits no object.
+///
+/// A player the façade does not list is `game/player/<uuid>`: which session's
+/// object it is is unknown, so the key is not canonical and its `equals` and
+/// `hashCode` are counted (#228's review: a made-up session `0` was silently
+/// one object for every unlisted session).
+fn player_key(uuid: u128, player: Option<&crate::runtime::events::FacadePlayer>, life: u32) -> String {
+    let Some(player) = player else {
+        return format!("game/player/{uuid:032x}");
+    };
+    let session = player.session;
+    match player.entity_id {
+        Some(id) => format!("game/player/{uuid:032x}/{session}.{life}/{id}"),
+        None => format!("game/player/{uuid:032x}/{session}.{life}"),
+    }
+}
+
+/// The façade's player `uuid`, if it lists them: online, or leaving in this
+/// firing (`EventFacade::departed`).
+pub(crate) fn facade_player(
+    facade: &crate::runtime::events::EventFacade,
+    uuid: u128,
+) -> Option<&crate::runtime::events::FacadePlayer> {
+    facade
+        .players
+        .iter()
+        .chain(&facade.departed)
+        .find(|player| player.uuid == uuid)
+}
+
+/// Whether two equal entity keys are one object: every server key but an
+/// unlisted player's (no session) names one (P16b); the client's `LocalPlayer`
+/// is made again on each join and respawn and its key does not say which
+/// (P16d, [`world_canonical`]).
+pub(crate) fn entity_canonical(key: &str) -> bool {
+    world_canonical(key) && player_parts(key).is_none_or(|(_, session)| session.is_some())
+}
+
+/// The player `uuid` as the firing's façade knows them (session, life and id;
+/// a non-canonical key for a player the façade does not list).
+pub(crate) fn player_value(facade: &crate::runtime::events::EventFacade, uuid: u128) -> Value {
+    let player = facade_player(facade, uuid);
+    server_value(player_key(
+        uuid,
+        player,
+        player.map_or(0, |player| player.life),
+    ))
+}
+
+/// The player `uuid` before their last respawn (`AFTER_RESPAWN`'s `oldPlayer`):
+/// their previous life's object, `None` when the façade counts no respawn.
+pub(crate) fn previous_player_value(
+    facade: &crate::runtime::events::EventFacade,
+    uuid: u128,
+) -> Option<Value> {
+    let player = facade_player(facade, uuid)?;
+    let life = player.life.checked_sub(1)?;
+    Some(server_value(player_key(uuid, Some(player), life)))
+}
+
+/// The entity with id `id`: the player of that id when the façade lists one
+/// (an attacked player is that player, not a second object), else
+/// `game/entity/<id>`.
+pub(crate) fn entity_value(facade: &crate::runtime::events::EventFacade, id: i32) -> Value {
+    match facade
+        .players
+        .iter()
+        .chain(&facade.departed)
+        .find(|player| player.entity_id == Some(id))
+    {
+        Some(player) => player_value(facade, player.uuid),
+        None => server_value(format!("game/entity/{id}")),
+    }
+}
+
+/// The UUID of a player marker (`game/player/<uuid>[/<session>.<life>[/<id>]]`).
+pub(crate) fn player_uuid(marker: &str) -> Option<u128> {
+    player_parts(marker).map(|(uuid, _)| uuid)
+}
+
+/// A player marker's UUID and session (`None` for the session of the old
+/// key without one).
+fn player_parts(marker: &str) -> Option<(u128, Option<u32>)> {
+    let mut parts = marker.strip_prefix("game/player/")?.split('/');
+    let hex = parts.next()?;
+    let uuid = (hex.len() == 32).then(|| u128::from_str_radix(hex, 16).ok())??;
+    let session = match parts.next() {
+        Some(life) => Some(life.split_once('.')?.0.parse().ok()?),
+        None => None,
+    };
+    Some((uuid, session))
+}
+
+/// The entity id an entity key carries: `game/entity/<id>`, or a player's
+/// trailing `/<id>`.
+fn entity_id(marker: &str) -> Option<i32> {
+    if let Some(id) = marker.strip_prefix("game/entity/") {
+        return id.parse().ok();
+    }
+    let rest = marker.strip_prefix("game/player/")?;
+    let mut parts = rest.split('/');
+    parts.nth(2)?.parse().ok()
+}
+
+/// `Entity.equals` (vanilla 26.3: `obj instanceof Entity e && e.getId() ==
+/// getId()`) between two entity keys: one key is one object; two keys with
+/// ids by id; two players without one equal when their UUID and session
+/// match (a respawn keeps the id, a relog takes a new one). A player without
+/// an id against an entity, or a clone's original against a player, is not
+/// known here: `None`, counted by the caller.
+fn entity_equals(a: &str, b: &str) -> Option<bool> {
+    if a == b {
+        return Some(true);
+    }
+    if let (Some(x), Some(y)) = (entity_id(a), entity_id(b)) {
+        return Some(x == y);
+    }
+    match (player_parts(a), player_parts(b)) {
+        (Some((u1, _)), Some((u2, _))) if u1 != u2 => Some(false),
+        (Some((_, Some(s1))), Some((_, Some(s2)))) => Some(s1 == s2),
+        _ => None,
     }
 }
 
@@ -158,8 +336,18 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         })
         .unwrap_or(key);
     match (key.starts_with("client/"), family) {
-        (false, "player") => &["net/minecraft/server/level/ServerPlayer"],
-        (false, "original-player") => &["net/minecraft/world/entity/player/Player"],
+        // Vanilla's fixed supertypes are sure too (#228's review).
+        (false, "player") => &[
+            "net/minecraft/server/level/ServerPlayer",
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
+        (false, "original-player") => &[
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
         (false, "entity") => &["net/minecraft/world/entity/Entity"],
         (false, "level") => &["net/minecraft/server/level/ServerLevel"],
         (false, "server") => &["net/minecraft/server/MinecraftServer"],
@@ -180,6 +368,14 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         (true, "stack") => &["net/minecraft/world/item/ItemStack"],
         (true, "item") => &["net/minecraft/world/item/Item"],
         (true, "block") => &["net/minecraft/world/level/block/Block"],
+        (true, "style") => &["net/minecraft/network/chat/Style"],
+        (true, "text-color") => &["net/minecraft/network/chat/TextColor"],
+        (_, "key-category") => &["net/minecraft/client/KeyMapping$Category"],
+        (true, "vec3") => &["net/minecraft/world/phys/Vec3"],
+        (true, "awt-color") => &["java/awt/Color"],
+        (true, "options") => &["net/minecraft/client/Options"],
+        (true, "font") => &["net/minecraft/client/gui/Font"],
+        (true, "gui") => &["net/minecraft/client/gui/Gui"],
         // A family whose class P16b–e reads from its snapshot: only `Object`
         // is sure until then.
         _ => &[],
@@ -214,16 +410,52 @@ pub(crate) const IDENTITY_METHODS: Methods = Methods {
     compare_to: None,
 };
 
-/// A value (`BlockPos`, `LevelResource`, `Style`...): `equals` by its fields,
-/// which its key spells exactly, so two handles of one key are equal (and two
-/// keys two values); `==` is per producer (the kind is never canonical).
-pub(crate) const VALUE_METHODS: Methods = Methods {
+/// An entity (`Entity.equals`/`hashCode` are by `getId()`, vanilla 26.3):
+/// `equals` by [`entity_equals`]; `hashCode` is the id where the key carries
+/// it, counted where it does not (a player the façade gives no id).
+/// `toString` needs the position: counted.
+pub(crate) const ENTITY_METHODS: Methods = Methods {
+    hash_code: |handle, _| Ok(entity_id(handle.key())),
     equals: |handle, other, _| {
-        Ok(Some(matches!(
-            other,
-            Value::Host(other) if other.kind() == handle.kind() && other.key() == handle.key()
-        )))
+        Ok(match other {
+            Value::Host(other) if other.kind() == HostKind::GameEntity => {
+                entity_equals(handle.key(), other.key())
+            }
+            _ => Some(false),
+        })
     },
+    ..IDENTITY_METHODS
+};
+
+/// A value (`BlockPos`, `LevelResource`, `Style`...): `equals` by its fields,
+/// which its key spells exactly. The client's values answer Java's
+/// `equals`, `hashCode` and `toString` from their key (`client_values.rs`);
+/// the others compare keys, and count the rest until P16c.
+pub(crate) const VALUE_METHODS: Methods = Methods {
+    to_string: |handle, _| Ok(crate::runtime::client_values::to_string(handle.key())),
+    hash_code: |handle, _| Ok(crate::runtime::client_values::hash_code(handle.key())),
+    equals: |handle, other, _| {
+        let other_key = match other {
+            Value::Host(other) if other.kind() == handle.kind() => Some(other.key()),
+            _ => None,
+        };
+        Ok(crate::runtime::client_values::equals(handle.key(), other_key, other)
+            .unwrap_or_else(|| Some(other_key == Some(handle.key()))))
+    },
+    ..IDENTITY_METHODS
+};
+
+/// Whether two handles of one value key are one object: the client's
+/// constants are (`client_values::canonical`), any other value is per
+/// producer.
+pub(crate) fn value_canonical(key: &str) -> bool {
+    crate::runtime::client_values::canonical(key)
+}
+
+/// A level: identity `equals`; `ClientLevel.toString()` is `ClientLevel`
+/// (vanilla 26.3), a `ServerLevel`'s needs the world's name (counted).
+pub(crate) const LEVEL_METHODS: Methods = Methods {
+    to_string: |handle, _| Ok((handle.key() == "client/level").then(|| "ClientLevel".to_owned())),
     ..IDENTITY_METHODS
 };
 
@@ -312,9 +544,13 @@ mod tests {
         assert_ne!(same(&pos(), &pos()), Some(true));
         let damage = || value("game/damage/minecraft:generic").unwrap();
         assert_ne!(same(&damage(), &damage()), Some(true));
+        // A server player is surely a `ServerPlayer` and every vanilla supertype.
         assert_eq!(
-            declared_types("game/player/2a"),
-            &["net/minecraft/server/level/ServerPlayer"]
+            declared_types("game/player/2a")[..2],
+            [
+                "net/minecraft/server/level/ServerPlayer",
+                "net/minecraft/world/entity/player/Player"
+            ]
         );
         assert_eq!(
             declared_types("block-pos/1,2,3"),

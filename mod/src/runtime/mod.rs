@@ -29,6 +29,7 @@ mod checkcast;
 mod class_init;
 mod class_precedence;
 pub mod client_surface;
+mod client_values;
 mod collection_base;
 mod collection_callback;
 mod collection_store;
@@ -2237,6 +2238,12 @@ pub trait Host {
         &mut neoforge_attachments::AttachmentState,
         &mut BTreeMap<String, usize>,
     )> {
+        None
+    }
+    /// The UUID of the clone's old player when `text` keys it as the player's previous life
+    /// (`events::is_clone_original`): its attachments are the original's. A host with no
+    /// firing answers `None`.
+    fn clone_original_of(&self, _text: &str) -> Option<u128> {
         None
     }
     /// The listeners NeoForge's buses hold and the unknown-call table registrations are counted
@@ -4619,6 +4626,10 @@ impl Host for StdHost {
         &mut BTreeMap<String, usize>,
     )> {
         Some((&mut self.neoforge_attachments, &mut self.unknown_host_calls))
+    }
+    fn clone_original_of(&self, text: &str) -> Option<u128> {
+        let firing = self.game_event.as_deref()?;
+        events::is_clone_original(firing, text).then_some(firing.context.original.as_ref()?.uuid)
     }
     fn neoforge_bus(
         &mut self,

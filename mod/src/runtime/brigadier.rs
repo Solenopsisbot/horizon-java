@@ -1202,8 +1202,7 @@ impl StdHost {
             return Some(source.level);
         }
         let exec = self.brigadier.exec()?;
-        let player = crate::runtime::game_object::text(value)?.strip_prefix("game/player/")?;
-        let uuid = u128::from_str_radix(player, 16).ok()?;
+        let uuid = crate::runtime::game_object::player_uuid(crate::runtime::game_object::text(value)?)?;
         let source = exec.sources.first()?;
         Some(if source.player == Some(uuid) {
             source.level
@@ -1322,7 +1321,7 @@ impl StdHost {
                 return Some(uuid_value(&uuid_text(uuid)));
             }
             ("DimensionArgument", "getDimension", CommandArgument::Dimension(id)) => {
-                marker(format!("game/level/{id}"))
+                crate::runtime::game_object::server_value(format!("game/level/{id}"))
             }
             _ => return mismatch(),
         }))
@@ -1356,6 +1355,9 @@ impl StdHost {
             }
             _ => return None,
         };
+        // The players and entities a selector found, as the firing's façade
+        // knows them (`game_object::player_value`).
+        let facade = self.firing_facade();
         let refuse = |this: &mut Self, key: &str| {
             this.brigadier
                 .exception_texts
@@ -1363,8 +1365,8 @@ impl StdHost {
             Some(Err(syntax_error(key)))
         };
         let one = |entity: &SelectedEntity| match entity {
-            SelectedEntity::Player(uuid) => marker(format!("game/player/{uuid:032x}")),
-            SelectedEntity::Entity(id) => marker(format!("game/entity/{id}")),
+            SelectedEntity::Player(uuid) => crate::runtime::game_object::player_value(&facade, *uuid),
+            SelectedEntity::Entity(id) => crate::runtime::game_object::entity_value(&facade, *id),
         };
         match (getter, selected.as_slice()) {
             ("getEntity", []) | ("getEntities", []) => {
@@ -1557,10 +1559,9 @@ impl StdHost {
         }
         // `player.sendSystemMessage(component)` while a command runs: to them.
         if self.brigadier.exec.is_some()
-            && let Some(player) = text.strip_prefix("game/player/")
+            && let Some(uuid) = crate::runtime::game_object::player_uuid(&text)
             && name == "sendSystemMessage"
             && r.descriptor == "(Lnet/minecraft/network/chat/Component;)V"
-            && let Ok(uuid) = u128::from_str_radix(player, 16)
         {
             let Some(text) = CommandText::of(args.first()?, &self.component_states) else {
                 return Some(self.unknown_host_call(r));
@@ -1923,10 +1924,11 @@ impl StdHost {
             .source(receiver)
             .cloned()
             .ok_or_else(unknown)?;
+        let facade = self.firing_facade();
         let player = || {
             source
                 .player
-                .map(|uuid| marker(format!("game/player/{uuid:032x}")))
+                .map(|uuid| crate::runtime::game_object::player_value(&facade, uuid))
         };
         let first = args.first();
         match (r.name.as_str(), r.descriptor.as_str()) {
@@ -1936,11 +1938,13 @@ impl StdHost {
                 let wanted = int_arg(args, 0).ok_or_else(unknown)?;
                 Ok(Value::Int(i32::from(i32::from(source.level) >= wanted)))
             }
-            ("getServer", _) => Ok(marker("game/server".into())),
+            ("getServer", _) => Ok(crate::runtime::game_object::server_value("game/server".into())),
             // A source whose level is unknown (a player: no mod API dimension read) refuses the
             // same way any unmodelled host call does, and the call is counted.
             ("getLevel", _) => match source.dimension.as_deref() {
-                Some(dimension) => Ok(marker(format!("game/level/{dimension}"))),
+                Some(dimension) => Ok(crate::runtime::game_object::server_value(format!(
+                    "game/level/{dimension}"
+                ))),
                 None => self.unknown_host_call(r),
             },
             ("isPlayer", "()Z") => Ok(Value::Int(i32::from(source.player.is_some()))),
@@ -2294,7 +2298,9 @@ impl NativeJar {
                 uuid: PROBE_PLAYER,
                 name: "Player".into(),
                 level: Some("minecraft:overworld".into()),
-                entity_id: Some(0),
+                entity_id: None,
+                session: 0,
+                life: 0,
             }],
             ..EventFacade::default()
         });
@@ -2505,7 +2511,7 @@ mod tests {
         let (console, calls) = get_level(&mut host, &jar, Some("minecraft:overworld"));
         assert_eq!(
             console.unwrap(),
-            marker("game/level/minecraft:overworld".into())
+            crate::runtime::game_object::server_value("game/level/minecraft:overworld".into())
         );
         assert_eq!(calls, 0);
 

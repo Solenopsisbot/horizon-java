@@ -16,14 +16,13 @@
 //! `ChatFormatting.GOLD + "Day"` is a legacy-coded string, which every client
 //! drawing path formats by.
 
+use crate::runtime::client_values::{Colour, FLAGS, STYLE, Style, TEXT_COLOR};
 use crate::runtime::{MethodRef, Value, expect_ref, return_desc};
 
 use super::{flag, int_arg, marker};
 
 const FORMATTING: &str = "net/minecraft/ChatFormatting";
 const FORMATTING_MARKER: &str = "enum/net/minecraft/ChatFormatting/";
-const STYLE: &str = "client/style/";
-const TEXT_COLOR: &str = "client/text-color/";
 
 /// `ChatFormatting`: name, code, colour (RGB) for the colours.
 const FORMATS: &[(&str, char, Option<u32>)] = &[
@@ -55,38 +54,32 @@ fn format_named(name: &str) -> Option<&'static (&'static str, char, Option<u32>)
     FORMATS.iter().find(|(n, ..)| *n == name)
 }
 
-/// The legacy code of a `ChatFormatting` marker (`§6`).
-fn formatting_code(value: &Value) -> Option<String> {
+/// The code of a `ChatFormatting` marker (`6`, `l`).
+fn formatting_code(value: &Value) -> Option<char> {
     let name = expect_ref(value)?.strip_prefix(FORMATTING_MARKER)?;
-    format_named(name).map(|(_, code, _)| format!("§{code}"))
+    format_named(name).map(|(_, code, _)| *code)
 }
 
-/// The code an RGB colour is written as.
-fn rgb_code(rgb: i32) -> String {
-    format!("§#{:06x}", rgb as u32 & 0xff_ffff)
+/// `withColor`'s argument: an `int` (`TextColor.fromRgb`), a `TextColor`, a
+/// `ChatFormatting` (`TextColor.fromLegacyFormat`: null for a format), or
+/// null.
+fn colour_arg(value: &Value) -> Option<Option<Colour>> {
+    match value {
+        Value::Int(rgb) => Some(Some(Colour::Rgb(*rgb as u32 & 0xff_ffff))),
+        Value::Ref(None) => Some(None),
+        _ => match crate::runtime::game_object::text(value)?.strip_prefix(TEXT_COLOR) {
+            Some(code) => Some(Some(Colour::parse(code)?)),
+            None => Some(Colour::parse(&format!("§{}", formatting_code(value)?))),
+        },
+    }
 }
 
-/// The codes a style argument stands for: a `ChatFormatting`, a style, a
-/// text colour or an `int` colour.
-fn codes_of(value: &Value) -> Option<String> {
-    if let Value::Int(rgb) = value {
-        return Some(rgb_code(*rgb));
-    }
-    let text = crate::runtime::game_object::text(value)?;
-    if let Some(codes) = text.strip_prefix(STYLE) {
-        return Some(codes.to_owned());
-    }
-    if let Some(code) = text.strip_prefix(TEXT_COLOR) {
-        return Some(code.to_owned());
-    }
-    formatting_code(value)
-}
-
-/// A boxed `Boolean` argument (`withBold(true)` boxes it).
-fn boxed_true(value: Option<&Value>) -> Option<bool> {
-    match value? {
-        Value::Int(v) => Some(*v != 0),
-        Value::Boxed(crate::runtime::Boxed::Boolean(v)) => Some(*v),
+/// A `Boolean` argument (`withBold(true)` boxes it): `None` inside for null.
+fn boolean_arg(value: &Value) -> Option<Option<bool>> {
+    match value {
+        Value::Int(v) => Some(Some(*v != 0)),
+        Value::Boxed(crate::runtime::Boxed::Boolean(v)) => Some(Some(*v)),
+        Value::Ref(None) => Some(None),
         _ => None,
     }
 }
@@ -102,56 +95,28 @@ const STYLE_KEYS: [&str; 6] = [
 ];
 
 /// A style's `codes` applied to a component's JSON `object`: over its own
-/// style as `withStyle(Style)` merges them (`Style.applyTo`: the codes' keys
-/// win), or in its place (`setStyle`, `replace`).
+/// style as `withStyle(Style)` merges them (`Style.applyTo`: the style's set
+/// fields win, an explicit `false` included), or in its place (`setStyle`).
 pub(super) fn apply_style(
     object: &mut serde_json::Map<String, serde_json::Value>,
     codes: &str,
     replace: bool,
 ) {
-    use serde_json::json;
+    let Some(style) = Style::parse(codes) else {
+        return;
+    };
     if replace {
         for key in STYLE_KEYS {
             object.remove(key);
         }
     }
-    let mut chars = codes.chars();
-    while let Some(c) = chars.next() {
-        if c != '§' {
-            continue;
+    if let Some(colour) = style.colour {
+        object.insert("color".into(), colour.text().into());
+    }
+    for ((_, key), value) in FLAGS.iter().zip(style.flags) {
+        if let Some(value) = value {
+            object.insert((*key).into(), value.into());
         }
-        let Some(code) = chars.next() else { break };
-        if code == '#' {
-            let hex: String = chars.by_ref().take(6).collect();
-            object.insert(
-                "color".into(),
-                json!(format!("#{}", hex.to_ascii_uppercase())),
-            );
-            continue;
-        }
-        let key = match code {
-            'l' => "bold",
-            'o' => "italic",
-            'n' => "underlined",
-            'm' => "strikethrough",
-            'k' => "obfuscated",
-            'r' => {
-                for key in STYLE_KEYS {
-                    object.remove(key);
-                }
-                continue;
-            }
-            colour => {
-                if let Some((name, ..)) = FORMATS
-                    .iter()
-                    .find(|(_, c, rgb)| *c == colour && rgb.is_some())
-                {
-                    object.insert("color".into(), json!(name.to_ascii_lowercase()));
-                }
-                continue;
-            }
-        };
-        object.insert(key.into(), json!(true));
     }
 }
 
@@ -172,12 +137,15 @@ pub(super) fn text_invoke(r: &MethodRef, args: &[Value]) -> Option<Value> {
     match (r.owner.as_str(), r.name.as_str()) {
         ("net/minecraft/network/chat/TextColor", "fromRgb") => Some(marker(format!(
             "{TEXT_COLOR}{}",
-            rgb_code(int_arg(args, 0)?)
+            Colour::Rgb(int_arg(args, 0)? as u32 & 0xff_ffff).code()
         ))),
-        ("net/minecraft/network/chat/TextColor", "fromLegacyFormat") => Some(marker(format!(
-            "{TEXT_COLOR}{}",
-            formatting_code(args.first()?)?
-        ))),
+        // A named colour's constant; null for a format (`BOLD`).
+        ("net/minecraft/network/chat/TextColor", "fromLegacyFormat") => Some(
+            match Colour::parse(&format!("§{}", formatting_code(args.first()?)?)) {
+                Some(colour) => marker(format!("{TEXT_COLOR}{}", colour.code())),
+                None => Value::Ref(None),
+            },
+        ),
         (FORMATTING, "getByName") => {
             let name = expect_ref(args.first()?)?.to_ascii_uppercase();
             Some(match format_named(&name) {
@@ -209,42 +177,43 @@ pub(super) enum ComponentCall {
     Restyle { codes: String, replace: bool },
     /// Answer the component's style as it is now ([`style_of`]).
     GetStyle,
+    /// A style with a field the model does not keep (a click event...):
+    /// applying it would drop the field, so the call is counted.
+    Unknown,
 }
 
-/// The client style marker of a component's JSON style keys, in a fixed order (colour, then
-/// bold, italic, underlined, strikethrough, obfuscated), as `getStyle()` answers it now.
+/// The client style of a component's JSON style keys (its fields, in the
+/// key's one order), as `getStyle()` answers it now.
 pub(super) fn style_of(json: &serde_json::Value) -> Value {
-    let mut codes = String::new();
-    if let Some(serde_json::Value::String(colour)) = json.get("color") {
-        if let Some(hex) = colour.strip_prefix('#') {
-            codes.push_str(&format!("§#{}", hex.to_ascii_lowercase()));
-        } else if let Some((_, code, _)) = FORMATS
-            .iter()
-            .find(|(name, _, rgb)| name.eq_ignore_ascii_case(colour) && rgb.is_some())
-        {
-            codes.push('§');
-            codes.push(*code);
-        }
+    let mut style = Style {
+        colour: json
+            .get("color")
+            .and_then(serde_json::Value::as_str)
+            .and_then(Colour::from_text),
+        ..Style::default()
+    };
+    for ((_, key), value) in FLAGS.iter().zip(&mut style.flags) {
+        *value = json.get(*key).and_then(serde_json::Value::as_bool);
     }
-    for (key, code) in [
-        ("bold", 'l'),
-        ("italic", 'o'),
-        ("underlined", 'n'),
-        ("strikethrough", 'm'),
-        ("obfuscated", 'k'),
-    ] {
-        if json.get(key) == Some(&serde_json::Value::Bool(true)) {
-            codes.push('§');
-            codes.push(code);
-        }
-    }
-    marker(format!("{STYLE}{codes}"))
+    style.extra = [
+        "click_event",
+        "hover_event",
+        "insertion",
+        "font",
+        "shadow_color",
+    ]
+    .iter()
+    .any(|key| json.get(key).is_some());
+    marker(format!("{STYLE}{}", style.codes()))
 }
 
 pub(super) fn component_call(r: &MethodRef, args: &[Value]) -> Option<ComponentCall> {
     match (r.name.as_str(), return_desc(&r.descriptor)) {
         (name @ ("withStyle" | "setStyle"), _) => {
             let codes = crate::runtime::game_object::text(args.first()?)?.strip_prefix(STYLE)?;
+            if Style::parse(codes)?.extra {
+                return Some(ComponentCall::Unknown);
+            }
             Some(ComponentCall::Restyle {
                 codes: codes.to_owned(),
                 replace: name == "setStyle",
@@ -255,46 +224,52 @@ pub(super) fn component_call(r: &MethodRef, args: &[Value]) -> Option<ComponentC
     }
 }
 
-pub(super) fn text_call(object: &str, r: &MethodRef, args: &[Value]) -> Option<Value> {
+/// A call on a style, a text colour or a `ChatFormatting` constant;
+/// `receiver` is the object itself, which a `with…` that changes nothing
+/// hands back (Java's `return this`).
+pub(super) fn text_call(
+    object: &str,
+    receiver: &Value,
+    r: &MethodRef,
+    args: &[Value],
+) -> Option<Value> {
     let name = r.name.as_str();
     let returns = return_desc(&r.descriptor);
     if let Some(codes) = object.strip_prefix(STYLE) {
-        let add = |extra: Option<String>| Some(marker(format!("{STYLE}{codes}{}", extra?)));
-        return match (name, returns) {
-            ("withColor", _) => add(codes_of(args.first()?)),
-            ("applyFormat" | "applyLegacyFormat", _) => add(formatting_code(args.first()?)),
-            ("withBold", _) => add(Some(
-                if boxed_true(args.first())? { "§l" } else { "" }.into(),
-            )),
-            ("withItalic", _) => add(Some(
-                if boxed_true(args.first())? { "§o" } else { "" }.into(),
-            )),
-            ("withUnderlined", _) => add(Some(
-                if boxed_true(args.first())? { "§n" } else { "" }.into(),
-            )),
-            ("withStrikethrough", _) => add(Some(
-                if boxed_true(args.first())? { "§m" } else { "" }.into(),
-            )),
-            ("withObfuscated", _) => add(Some(
-                if boxed_true(args.first())? { "§k" } else { "" }.into(),
-            )),
-            ("isEmpty", "Z") => Some(flag(codes.is_empty())),
-            _ => None,
-        };
-    }
-    if object.starts_with(TEXT_COLOR) {
-        return match (name, returns) {
-            ("getValue", "I") => {
-                let code = object.strip_prefix(TEXT_COLOR)?;
-                let rgb = match code.strip_prefix("§#") {
-                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-                    None => {
-                        let c = code.chars().nth(1)?;
-                        FORMATS.iter().find(|(_, k, _)| *k == c)?.2?
-                    }
-                };
-                Some(Value::Int(rgb as i32))
+        let style = Style::parse(codes)?;
+        let setter = [
+            "withBold",
+            "withItalic",
+            "withUnderlined",
+            "withStrikethrough",
+            "withObfuscated",
+        ]
+        .iter()
+        .position(|setter| *setter == name);
+        let next = match (name, returns) {
+            ("isEmpty", "Z") => return Some(flag(codes.is_empty())),
+            // `Objects.equals` of the colours is `TextColor.equals`: the value.
+            ("withColor", _) => match colour_arg(args.first()?)? {
+                colour if colour.map(Colour::value) == style.colour.map(Colour::value) => style,
+                colour => Style { colour, ..style },
+            },
+            ("applyFormat" | "applyLegacyFormat", _) => {
+                style.apply(formatting_code(args.first()?)?, name == "applyLegacyFormat")?
             }
+            _ => {
+                let mut next = style;
+                next.flags[setter?] = boolean_arg(args.first()?)?;
+                next
+            }
+        };
+        if next == style && name.starts_with("with") {
+            return Some(receiver.clone());
+        }
+        return Some(marker(format!("{STYLE}{}", next.codes())));
+    }
+    if let Some(code) = object.strip_prefix(TEXT_COLOR) {
+        return match (name, returns) {
+            ("getValue", "I") => Some(Value::Int(Colour::parse(code)?.value() as i32)),
             _ => None,
         };
     }
@@ -336,10 +311,12 @@ mod tests {
             "withColor",
             "(I)Lnet/minecraft/network/chat/Style;",
         );
-        let style = text_call(STYLE, &with_color, &[Value::Int(0x33ebff)]).unwrap();
+        let empty = marker(STYLE);
+        let style = text_call(STYLE, &empty, &with_color, &[Value::Int(0x33ebff)]).unwrap();
         assert_eq!(style, marker("client/style/§#33ebff"));
         let bold = text_call(
-            expect_ref(&style).unwrap(),
+            crate::runtime::game_object::text(&style).unwrap(),
+            &style,
             &method(
                 "net/minecraft/network/chat/Style",
                 "withBold",
@@ -372,20 +349,22 @@ mod tests {
         .unwrap();
         let to_string = method(FORMATTING, "toString", "()Ljava/lang/String;");
         assert_eq!(
-            text_call(expect_ref(&gold).unwrap(), &to_string, &[]),
+            text_call(expect_ref(&gold).unwrap(), &gold, &to_string, &[]),
             Some(marker("§6"))
         );
     }
 
     /// `getStyle()` is the component's style now: what `withStyle` set, in one order however it
-    /// was built, and the empty style before any.
+    /// was built, the empty style before any, and a counted one with a field the model lacks.
     #[test]
     fn a_component_style_is_its_current_style() {
         let plain = serde_json::json!({"text": "a"});
         assert_eq!(style_of(&plain), marker(STYLE));
         let styled = serde_json::json!({"text": "a", "bold": true, "color": "dark_red"});
         assert_eq!(style_of(&styled), marker(format!("{STYLE}§4§l")));
-        let rgb = serde_json::json!({"text": "a", "color": "#33EBFF", "italic": true});
-        assert_eq!(style_of(&rgb), marker(format!("{STYLE}§#33ebff§o")));
+        let rgb = serde_json::json!({"text": "a", "color": "#33EBFF", "italic": false});
+        assert_eq!(style_of(&rgb), marker(format!("{STYLE}§#33ebff§!o")));
+        let click = serde_json::json!({"text": "a", "insertion": "x"});
+        assert_eq!(style_of(&click), marker(format!("{STYLE}§?")));
     }
 }
