@@ -43,7 +43,7 @@
 //! [`HostKind::OpaqueMapEntry`], whose class is not known (`getClass()` counted): their key and
 //! value are as read while the map is unchanged, and `setValue` is counted.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::runtime::host_ref::{HostKind, HostRef, Methods, Nested, instance_of_class};
 use crate::runtime::mod_count::ModStamp;
@@ -159,12 +159,14 @@ enum Life {
     /// A holder or snapshot: its key and value never change.
     Fixed,
     /// A node `map` holds (or an entry reading `map` by its key, `fresh`): its value is the
-    /// map's. `node` is its `TreeMap` tree node. `stamp` is the map's `modCount` when the host
-    /// last followed it. `nulls`: `setValue(null)` is allowed.
+    /// map's, read while the map's `modCount` is where the host last followed it
+    /// ([`Entries::followed`]). `node` is its `TreeMap` tree node; `slot` the pair index its key
+    /// last sat at in the map's row (a hint: a read checks it before scanning). `nulls`:
+    /// `setValue(null)` is allowed.
     Live {
         map: String,
-        stamp: ModStamp,
         node: Option<usize>,
+        slot: usize,
         fresh: bool,
         nulls: bool,
     },
@@ -174,8 +176,13 @@ enum Life {
     Detached,
     /// A node this model lost track of.
     Lost,
-    /// An entry of a map whose entry class is not modelled, as read at `stamp`.
-    Opaque { map: String, stamp: ModStamp },
+    /// An entry of a map whose entry class is not modelled, as read at `stamp`. `view`: `map` is
+    /// the map an unmodifiable view reads, whose entries the view's entries read live.
+    Opaque {
+        map: String,
+        stamp: ModStamp,
+        view: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -187,17 +194,40 @@ struct EntryState {
     handle: Value,
 }
 
+/// What a call on a map with live nodes started from.
+#[derive(Clone, Debug, PartialEq)]
+struct Before {
+    stamp: ModStamp,
+    /// Each live node's key and value, for a call that may remove keys; `None` for one that only
+    /// reads, inserts or replaces values (`put`, `get`...), after which every node is still there.
+    taken: Option<Vec<(String, Value, Value)>>,
+}
+
 /// The entries the host made, by handle key.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Entries {
-    states: BTreeMap<String, EntryState>,
-    /// A live node's entry key, by its map and the node (`k<key marker>` for a hash node,
+    states: HashMap<String, EntryState>,
+    /// A live node's entry key, by its map and then the node (`k<key marker>` for a hash node,
     /// `n<index>` for a tree node).
-    nodes: BTreeMap<(String, String), String>,
+    nodes: BTreeMap<String, HashMap<String, String>>,
+    /// Lookup memos, rebuilt when the map's row (its collection generation) or tree (its
+    /// `modCount` and size) changes: each key's pair index in the row, each key's tree node
+    /// (#221 review B3: a view of n entries is minted in O(n), not O(n²)).
+    slot_memo: BTreeMap<String, (u64, HashMap<String, usize>)>,
+    tree_memo: BTreeMap<String, (u64, usize, HashMap<String, usize>)>,
+    /// The keys of the last `entrySet()` view built per map, position by position (its handles
+    /// are the view's own contents): a rebuild reuses each handle whose key still sits at its
+    /// position. Dropped whenever one of the map's entries stops being live.
+    view_memo: BTreeMap<String, Vec<Value>>,
+    /// The live entries of each map, by entry key (#221 review B3: a call on a map looks at its
+    /// own, never every entry).
+    by_map: BTreeMap<String, BTreeSet<String>>,
+    /// Each map's `modCount` at which its live entries were last followed: they read the map
+    /// while it is still there.
+    followed: BTreeMap<String, ModStamp>,
     /// Maps whose nodes this model lost: their entries' identity is counted.
     lost_maps: BTreeSet<String>,
-    /// The key and value of each live node of a map, taken before a call on it.
-    before: BTreeMap<String, Vec<(String, Value, Value)>>,
+    before: BTreeMap<String, Before>,
     next: u64,
 }
 
@@ -229,24 +259,141 @@ impl Entries {
     pub(crate) fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.states.retain(|key, _| keep(key));
         let states = &self.states;
-        self.nodes.retain(|_, key| states.contains_key(key));
+        for nodes in self.nodes.values_mut() {
+            nodes.retain(|_, key| states.contains_key(key));
+        }
+        self.nodes.retain(|_, nodes| !nodes.is_empty());
+        // The memos are caches: rebuilt on the next use.
+        self.slot_memo.clear();
+        self.tree_memo.clear();
+        self.view_memo.clear();
+        for live in self.by_map.values_mut() {
+            live.retain(|key| states.contains_key(key));
+        }
+        self.by_map.retain(|_, live| !live.is_empty());
+    }
+
+    /// Set an entry's life, keeping [`Self::by_map`] to the live ones.
+    fn set_life(&mut self, entry_key: &str, life: Life) {
+        let Some(state) = self.states.get_mut(entry_key) else {
+            return;
+        };
+        if let Life::Live { map, .. } = &state.life {
+            if let Some(live) = self.by_map.get_mut(map) {
+                live.remove(entry_key);
+            }
+            if !matches!(life, Life::Live { .. }) {
+                self.view_memo.remove(map);
+            }
+        }
+        if let Life::Live { map, .. } = &life {
+            self.by_map
+                .entry(map.clone())
+                .or_default()
+                .insert(entry_key.to_owned());
+        }
+        state.life = life;
+    }
+
+    fn live_of(&self, map: &str) -> Vec<String> {
+        self.by_map
+            .get(map)
+            .map(|live| live.iter().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
+/// The members of a map that can remove a key: before one, each live node's key and value are
+/// taken (what a removed node keeps). Every other member only reads, inserts or replaces values
+/// (`get` moves an access-ordered node, `putFirst` moves one: neither replaces it), so every
+/// node it leaves is still there (#221 review B3: `get` no longer walks the live nodes). A key a
+/// member not listed here did remove reads as absent and is counted, never answered.
+fn may_remove(name: &str) -> bool {
+    matches!(
+        name,
+        "remove"
+            | "clear"
+            | "compute"
+            | "computeIfPresent"
+            | "merge"
+            | "retainAll"
+            | "removeAll"
+            | "removeIf"
+            | "pollFirstEntry"
+            | "pollLastEntry"
+            | "pollFirst"
+            | "pollLast"
+            | "removeFirst"
+            | "removeLast"
+    )
+}
+
 impl StdHost {
-    /// The value `map` holds for `key` (compared as stored: the node's own key).
-    fn entry_map_value(&self, map: &str, key: &Value) -> Option<Value> {
-        self.mutable_collections
-            .get(map)?
-            .chunks(2)
-            .find(|pair| pair.first() == Some(key))
-            .and_then(|pair| pair.get(1).cloned())
+    /// The value `map` holds for `key` (compared as stored: the node's own key), checking the
+    /// pair at `slot` first; with the pair index it was found at.
+    fn entry_map_value(&self, map: &str, key: &Value, slot: usize) -> Option<(usize, Value)> {
+        let row = self.mutable_collections.get(map)?;
+        if row.get(slot * 2) == Some(key) {
+            return row.get(slot * 2 + 1).map(|value| (slot, value.clone()));
+        }
+        row.chunks(2)
+            .position(|pair| pair.first() == Some(key))
+            .and_then(|at| row.get(at * 2 + 1).map(|value| (at, value.clone())))
     }
 
-    /// The tree node of `key` in `map`'s tree, and whether the tree is followed exactly.
-    fn tree_node(&self, map: &str, key: &Value) -> Option<usize> {
+    /// The tree node of `key` in `map`'s tree, when the tree is followed exactly.
+    fn tree_node(&mut self, map: &str, key: &Value) -> Option<usize> {
         let tree = self.red_black_trees.get(map)?;
-        (!tree.tainted).then(|| tree.index_of(key)).flatten()
+        if tree.tainted {
+            return None;
+        }
+        let stamp = (tree.mod_count(), tree.slots());
+        let fresh = self
+            .map_entries
+            .tree_memo
+            .get(map)
+            .is_some_and(|(count, len, _)| (*count, *len) == stamp);
+        if !fresh {
+            let index = tree.index_by_key();
+            self.map_entries
+                .tree_memo
+                .insert(map.to_owned(), (stamp.0, stamp.1, index));
+        }
+        let (_, _, index) = self.map_entries.tree_memo.get(map)?;
+        let at = *index.get(&crate::runtime::value_marker(key))?;
+        // The memo names a node by its key's text; the node holds that very key.
+        let tree = self.red_black_trees.get(map)?;
+        (tree.key_at(at) == Some(key)).then_some(at)
+    }
+
+    /// The pair index of `key` in `map`'s row (0 when absent: a hint only).
+    fn slot_of(&mut self, map: &str, key: &Value) -> usize {
+        let generation = self.mutable_collections.generation(map);
+        let fresh = self
+            .map_entries
+            .slot_memo
+            .get(map)
+            .is_some_and(|(at, _)| *at == generation);
+        if !fresh {
+            let index = self
+                .mutable_collections
+                .get(map)
+                .map(|row| {
+                    row.chunks(2)
+                        .enumerate()
+                        .filter_map(|(at, pair)| Some((crate::runtime::value_marker(pair.first()?), at)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.map_entries
+                .slot_memo
+                .insert(map.to_owned(), (generation, index));
+        }
+        self.map_entries
+            .slot_memo
+            .get(map)
+            .and_then(|(_, index)| index.get(&crate::runtime::value_marker(key)).copied())
+            .unwrap_or(0)
     }
 
     /// Whether this model follows `map`'s nodes: not a treeified hash table, not a tree with an
@@ -261,6 +408,18 @@ impl StdHost {
                 .red_black_trees
                 .get(map)
                 .is_some_and(|tree| tree.tainted)
+    }
+
+    /// Whether `map`'s live entries read it now: no change since they were last followed.
+    fn map_followed_now(&self, map: &str) -> bool {
+        self.map_entries.followed.get(map) == Some(&self.mod_stamp_of(map))
+    }
+
+    /// Lose `map`'s live entries (changed by a path this model did not follow).
+    fn lose_live_of(&mut self, map: &str) {
+        for entry_key in self.map_entries.live_of(map) {
+            self.map_entries.set_life(&entry_key, Life::Lost);
+        }
     }
 
     fn mint_key(&mut self, class: &str, node: bool) -> String {
@@ -297,7 +456,6 @@ impl StdHost {
             EntryMade::Node => {}
         }
         let map = map.and_then(crate::runtime::expect_ref).cloned().unwrap_or_default();
-        let stamp = self.mod_stamp_of(&map);
         let state = |life: Life, handle: &Value| EntryState {
             key: key.clone(),
             value: value.clone(),
@@ -305,35 +463,62 @@ impl StdHost {
             handle: handle.clone(),
         };
         let Some((class, mode)) = entry_mode(class_of_marker(&map)) else {
-            // A map whose entry class is not modelled.
+            // A map whose entry class is not modelled. An unmodifiable view's entries read
+            // the map it wraps (`UnmodifiableEntry` delegates to that map's entry).
+            let source = crate::runtime::Host::unmodifiable_view_source(self, &map);
+            let view = source.is_some();
+            let watched = source.unwrap_or(map);
+            let stamp = self.mod_stamp_of(&watched);
             let entry_key = self.mint_key(OPAQUE, true);
             let handle = Value::Host(HostRef::new(HostKind::OpaqueMapEntry, entry_key.clone()));
-            let opaque = state(Life::Opaque { map, stamp }, &handle);
+            let opaque = state(
+                Life::Opaque {
+                    map: watched,
+                    stamp,
+                    view,
+                },
+                &handle,
+            );
             self.map_entries.states.insert(entry_key, opaque);
             return handle;
         };
         let nulls = match mode {
             Mode::Snapshot => return fixed(self, class),
-            Mode::Concurrent | Mode::Fresh => {
-                // A new object per reading: one key each.
+            Mode::Concurrent => {
                 let entry_key = self.mint_key(class, false);
                 let handle = Value::Host(HostRef::new(HostKind::MapEntry, entry_key.clone()));
-                let life = match mode {
-                    Mode::Concurrent => Life::Concurrent { map },
-                    _ => Life::Live {
-                        map,
-                        stamp,
-                        node: None,
-                        fresh: true,
-                        nulls: true,
-                    },
-                };
                 self.map_entries
                     .states
-                    .insert(entry_key, state(life, &handle));
+                    .insert(entry_key, state(Life::Concurrent { map }, &handle));
                 return handle;
             }
-            Mode::Node { nulls } => nulls,
+            Mode::Fresh => None,
+            Mode::Node { nulls } => Some(nulls),
+        };
+        // Live entries read the map while it is where they were last followed; a change since
+        // by a path this model did not follow loses the ones it holds.
+        let now = self.mod_stamp_of(&map);
+        if self.map_entries.followed.get(&map) != Some(&now) {
+            self.lose_live_of(&map);
+            self.map_entries.followed.insert(map.clone(), now);
+        }
+        let Some(nulls) = nulls else {
+            let slot = self.slot_of(&map, key);
+            // `EnumMap`/`IdentityHashMap`: a new entry per reading, reading the map by key.
+            let entry_key = self.mint_key(class, false);
+            let handle = Value::Host(HostRef::new(HostKind::MapEntry, entry_key.clone()));
+            self.map_entries
+                .states
+                .insert(entry_key.clone(), state(Life::Fixed, &handle));
+            let life = Life::Live {
+                map,
+                node: None,
+                slot,
+                fresh: true,
+                nulls: true,
+            };
+            self.map_entries.set_life(&entry_key, life);
+            return handle;
         };
         let tree = class == "java/util/TreeMap$Entry";
         let node = if tree {
@@ -349,7 +534,8 @@ impl StdHost {
         if let Some(entry_key) = self
             .map_entries
             .nodes
-            .get(&(map.clone(), node_name.clone()))
+            .get(&map)
+            .and_then(|nodes| nodes.get(&node_name))
             && let Some(known) = self.map_entries.states.get(entry_key)
         {
             // The same node: the same handle while followed; otherwise the same key with a
@@ -361,22 +547,125 @@ impl StdHost {
         }
         let entry_key = self.mint_key(class, true);
         let handle = Value::Host(HostRef::new(HostKind::MapEntry, entry_key.clone()));
-        let life = if followed {
-            Life::Live {
-                map: map.clone(),
-                stamp,
-                node,
-                fresh: false,
-                nulls,
-            }
-        } else {
-            Life::Lost
-        };
         self.map_entries
             .states
-            .insert(entry_key.clone(), state(life, &handle));
-        self.map_entries.nodes.insert((map, node_name), entry_key);
+            .insert(entry_key.clone(), state(Life::Lost, &handle));
+        if followed {
+            let slot = self.slot_of(&map, key);
+            let life = Life::Live {
+                map: map.clone(),
+                node,
+                slot,
+                fresh: false,
+                nulls,
+            };
+            self.map_entries.set_life(&entry_key, life);
+        }
+        self.map_entries
+            .nodes
+            .entry(map)
+            .or_default()
+            .insert(node_name, entry_key);
         handle
+    }
+
+    /// A value written through an entry changes that entry's hash: the map's `entrySet()` view
+    /// lays its table out afresh (Java's `EntrySet` looks keys up in the map, never by hash).
+    fn forget_entry_view_layout(&mut self, map: &str) {
+        if let Some(view) = self
+            .entry_views
+            .get(map)
+            .and_then(crate::runtime::expect_ref)
+            .cloned()
+        {
+            self.hash_tables.remove(&view);
+        }
+    }
+
+    /// [`Self::mint_map_entry`] for every pair of `pairs` (`[k, v, k, v...]`), as a map's
+    /// `entrySet()` view is (re)built: a followed hash map's node table is read once and each
+    /// known node answered by one lookup; a new one, or any other map, goes the long way.
+    pub(crate) fn mint_map_entries(
+        &mut self,
+        map: &Value,
+        pairs: &[Value],
+        made: EntryMade,
+    ) -> Vec<Value> {
+        let marker = crate::runtime::expect_ref(map).cloned().unwrap_or_default();
+        let hash_nodes = made == EntryMade::Node
+            && matches!(
+                entry_mode(class_of_marker(&marker)),
+                Some((class, Mode::Node { .. })) if class != "java/util/TreeMap$Entry"
+            )
+            && self.nodes_followed(&marker)
+            && self.map_followed_now(&marker);
+        if !hash_nodes {
+            self.map_entries.view_memo.remove(&marker);
+            return pairs
+                .chunks(2)
+                .filter_map(|pair| match pair {
+                    [key, value] => Some(self.mint_map_entry(Some(map), key, value, made)),
+                    _ => None,
+                })
+                .collect();
+        }
+        // The previous view's handles, where its key still sits at the same position.
+        let memo = self
+            .map_entries
+            .view_memo
+            .remove(&marker)
+            .unwrap_or_default();
+        let previous = self
+            .entry_views
+            .get(&marker)
+            .and_then(crate::runtime::expect_ref)
+            .and_then(|view| self.mutable_collections.get(view));
+        let mut reused: Vec<Option<Value>> = Vec::with_capacity(pairs.len() / 2);
+        for (at, pair) in pairs.chunks(2).enumerate() {
+            reused.push(
+                (memo.get(at) == pair.first())
+                    .then(|| previous.and_then(|view| view.get(at)).cloned())
+                    .flatten(),
+            );
+        }
+        let mut handles = Vec::with_capacity(reused.len());
+        for (pair, reused) in pairs.chunks(2).zip(reused) {
+            let [key, value] = pair else {
+                continue;
+            };
+            let known = reused.or_else(|| {
+                let entry_key = self
+                    .map_entries
+                    .nodes
+                    .get(&marker)?
+                    .get(&format!("k{}", crate::runtime::value_marker(key)))?;
+                let state = self.map_entries.states.get(entry_key)?;
+                matches!(state.life, Life::Live { .. }).then(|| state.handle.clone())
+            });
+            handles.push(match known {
+                Some(handle) => handle,
+                None => self.mint_map_entry(Some(map), key, value, made),
+            });
+        }
+        // The keys, kept in place where the map only grew.
+        let mut keys = memo;
+        let count = pairs.len() / 2;
+        let same_prefix = keys.len() <= count
+            && keys
+                .iter()
+                .zip(pairs.chunks(2))
+                .all(|(old, pair)| pair.first() == Some(old));
+        if !same_prefix {
+            keys.clear();
+        }
+        keys.extend(
+            pairs
+                .chunks(2)
+                .skip(keys.len())
+                .filter_map(|pair| pair.first().cloned()),
+        );
+        self.map_entries.view_memo.insert(marker, keys);
+        handles
     }
 
     fn mod_stamp_of(&self, map: &str) -> ModStamp {
@@ -392,26 +681,41 @@ impl StdHost {
         match &state.life {
             Life::Fixed | Life::Detached => Some((state.key.clone(), state.value.clone())),
             Life::Live {
-                map, stamp, node, ..
+                map, node, slot, ..
             } => {
-                if self.mod_stamp_of(map) != *stamp {
+                if !self.map_followed_now(map) {
                     return None;
                 }
                 let key = match node {
                     Some(index) => self.red_black_trees.get(map)?.key_at(*index)?.clone(),
                     None => state.key.clone(),
                 };
-                let value = self.entry_map_value(map, &key)?;
+                let (_, value) = self.entry_map_value(map, &key, *slot)?;
                 Some((key, value))
             }
             // Its own value (`ConcurrentHashMap.MapEntry.val`).
             Life::Concurrent { .. } => Some((state.key.clone(), state.value.clone())),
             Life::Lost => None,
+            // An unmodifiable view's entry reads the wrapped map's node: live, while that map
+            // has had no structural change (a removed and re-put key would be another node).
+            Life::Opaque {
+                map,
+                stamp,
+                view: true,
+            } => {
+                if self.mod_stamp_of(map) != *stamp {
+                    return None;
+                }
+                let (_, value) = self.entry_map_value(map, &state.key, 0)?;
+                Some((state.key.clone(), value))
+            }
             // A map the host keeps no row for (an immutable literal) cannot have changed;
             // a kept one must still hold what was read, with no structural change since.
-            Life::Opaque { map, stamp } => (!self.mutable_collections.contains_key(map)
+            Life::Opaque { map, stamp, .. } => (!self.mutable_collections.contains_key(map)
                 || self.mod_stamp_of(map) == *stamp
-                    && self.entry_map_value(map, &state.key).as_ref() == Some(&state.value))
+                    && self
+                        .entry_map_value(map, &state.key, 0)
+                        .is_some_and(|(_, value)| value == state.value))
             .then(|| (state.key.clone(), state.value.clone())),
         }
     }
@@ -468,6 +772,7 @@ impl StdHost {
                     return self.unknown_host_call(r);
                 };
                 *slot = value.clone();
+                self.forget_entry_view_layout(&map);
                 let states = &mut self.map_entries.states;
                 let own = states.get_mut(handle.key()).expect("found above");
                 Ok(std::mem::replace(&mut own.value, value))
@@ -487,118 +792,146 @@ impl StdHost {
                 else {
                     return self.unknown_host_call(r);
                 };
-                Ok(std::mem::replace(slot, value))
+                let old = std::mem::replace(slot, value);
+                self.forget_entry_view_layout(&map);
+                Ok(old)
             }
             Life::Lost | Life::Opaque { .. } => self.unknown_host_call(r),
         }
     }
 
-    /// Before a call on `map`: the key and value of each of its live nodes (what a node the
-    /// call removes keeps).
-    pub(crate) fn entries_before_call(&mut self, map: &str) {
-        let live: Vec<String> = self
+    /// Before the call `name` on `map`: where its live entries stand. A call that may remove a
+    /// key also takes each live node's key and value (what a removed node keeps).
+    pub(crate) fn entries_before_call(&mut self, map: &str, name: &str) {
+        if self
             .map_entries
-            .states
-            .iter()
-            .filter(|(_, state)| matches!(&state.life, Life::Live { map: m, .. } if m == map))
-            .map(|(key, _)| key.clone())
-            .collect();
-        if live.is_empty() {
+            .by_map
+            .get(map)
+            .is_none_or(|live| live.is_empty())
+        {
             return;
         }
-        let mut taken = Vec::new();
-        for key in live {
-            let handle = self.map_entries.states[&key].handle.clone();
-            if let Some((entry_key, value)) = self.map_entry_now(&handle) {
-                taken.push((key, entry_key, value));
-            }
+        let stamp = self.mod_stamp_of(map);
+        if self.map_entries.followed.get(map) != Some(&stamp) {
+            // Changed by a path this model did not follow.
+            self.lose_live_of(map);
+            return;
         }
-        self.map_entries.before.insert(map.to_owned(), taken);
+        let taken = may_remove(name).then(|| {
+            self.map_entries
+                .live_of(map)
+                .into_iter()
+                .filter_map(|entry_key| {
+                    let handle = self.map_entries.states.get(&entry_key)?.handle.clone();
+                    let (key, value) = self.map_entry_now(&handle)?;
+                    Some((entry_key, key, value))
+                })
+                .collect()
+        });
+        self.map_entries
+            .before
+            .insert(map.to_owned(), Before { stamp, taken });
     }
 
     /// After a call on `map`: follow its live nodes. Without a structural change they stay as
-    /// they are. After one, a hash node whose key is gone is detached with what it held before
+    /// they are; after one that only inserts, too (one step for the map, #221 review B3). After
+    /// one that may remove, a hash node whose key is gone is detached with what it held before
     /// the call, and the others stay; a tree node follows its tree node (a freed one is
-    /// detached, a kept one holds whatever key `deleteEntry` left in it). A treeified table or
-    /// a tree with an unplaced key loses them all.
+    /// detached, a kept one holds whatever key `deleteEntry` left in it). A treeified table or a
+    /// tree with an unplaced key loses them all.
     pub(crate) fn entries_after_call(&mut self, map: &str) {
         let Some(before) = self.map_entries.before.remove(map) else {
             return;
         };
         let now = self.mod_stamp_of(map);
-        let followed = self.nodes_followed(map);
-        if !followed {
-            self.map_entries.lost_maps.insert(map.to_owned());
+        if now == before.stamp {
+            return;
         }
-        let live: Vec<String> = self
-            .map_entries
-            .states
-            .iter()
-            .filter(|(_, state)| matches!(&state.life, Life::Live { map: m, .. } if m == map))
-            .map(|(key, _)| key.clone())
-            .collect();
-        for entry_key in live {
-            let Life::Live {
-                stamp,
-                node,
-                fresh,
-                nulls,
-                ..
-            } = self.map_entries.states[&entry_key].life.clone()
+        if !self.nodes_followed(map) {
+            self.map_entries.lost_maps.insert(map.to_owned());
+            self.lose_live_of(map);
+            return;
+        }
+        let Some(taken) = before.taken else {
+            self.map_entries.followed.insert(map.to_owned(), now);
+            return;
+        };
+        // Where each key sits now, once: a node's check is then one lookup.
+        let slots: std::collections::HashMap<String, usize> = self
+            .mutable_collections
+            .get(map)
+            .map(|row| {
+                row.chunks(2)
+                    .enumerate()
+                    .filter_map(|(at, pair)| Some((crate::runtime::value_marker(pair.first()?), at)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for entry_key in self.map_entries.live_of(map) {
+            let Some(Life::Live {
+                node, fresh, nulls, ..
+            }) = self
+                .map_entries
+                .states
+                .get(&entry_key)
+                .map(|state| state.life.clone())
             else {
                 continue;
             };
-            let live = |stamp: ModStamp| Life::Live {
+            // What the node held before the call; one the host could not read then is lost.
+            let Some((_, key, value)) = taken.iter().find(|(held, _, _)| *held == entry_key) else {
+                self.map_entries.set_life(&entry_key, Life::Lost);
+                continue;
+            };
+            let live = |slot: usize| Life::Live {
                 map: map.to_owned(),
-                stamp,
                 node,
+                slot,
                 fresh,
                 nulls,
             };
-            // What the node held before the call; a node the host could not read then (its map
-            // changed by another path) is lost.
-            let held = before.iter().find(|(key, _, _)| *key == entry_key);
-            let life = match held {
-                _ if !followed => Life::Lost,
-                None => Life::Lost,
-                Some(_) if stamp == now => live(stamp),
-                Some((_, key, _)) => match node {
-                    // A tree node: still in the tree (holding whatever key `deleteEntry` left
-                    // in it), or freed.
-                    Some(index) => {
-                        let kept = self
-                            .red_black_trees
-                            .get(map)
-                            .and_then(|tree| tree.key_at(index))
-                            .is_some();
-                        if kept { live(now) } else { Life::Detached }
-                    }
-                    None if self.entry_map_value(map, key).is_some() => live(now),
+            let life = match node {
+                // A tree node: still in the tree (holding whatever key `deleteEntry` left in
+                // it), or freed.
+                Some(index) => match self
+                    .red_black_trees
+                    .get(map)
+                    .and_then(|tree| tree.key_at(index))
+                {
+                    Some(now_key) => live(
+                        slots
+                            .get(&crate::runtime::value_marker(now_key))
+                            .copied()
+                            .unwrap_or(0),
+                    ),
+                    None => Life::Detached,
+                },
+                None => match slots.get(&crate::runtime::value_marker(key)) {
+                    Some(slot) => live(*slot),
                     // An `EnumMap`/`IdentityHashMap` entry reads its map's slot: once its key
                     // is gone that answer is not this model's.
                     None if fresh => Life::Lost,
                     None => Life::Detached,
                 },
             };
-            let state = self
-                .map_entries
-                .states
-                .get_mut(&entry_key)
-                .expect("listed above");
-            if let (Life::Detached, Some((_, key, value))) = (&life, held) {
+            if life == Life::Detached
+                && let Some(state) = self.map_entries.states.get_mut(&entry_key)
+            {
                 state.key = key.clone();
                 state.value = value.clone();
             }
-            state.life = life;
+            self.map_entries.set_life(&entry_key, life);
         }
+        self.map_entries.followed.insert(map.to_owned(), now);
         // A detached node is never handed out again: a later reading of its key is a new node.
         let states = &self.map_entries.states;
-        self.map_entries.nodes.retain(|(m, _), entry_key| {
-            m != map
-                || states
+        if let Some(nodes) = self.map_entries.nodes.get_mut(map) {
+            nodes.retain(|_, entry_key| {
+                states
                     .get(entry_key)
                     .is_some_and(|state| state.life != Life::Detached)
-        });
+            });
+        }
     }
 }
 
@@ -617,7 +950,31 @@ fn entry_text(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<String
     Ok(Some(format!("{key}={value}")))
 }
 
+/// `IdentityHashMap`'s entries compare and hash by identity (Java 25's
+/// `IdentityHashMap.EntryIterator.Entry`), every other entry class by `equals`/`hashCode`.
+const IDENTITY_ENTRY: &str = "java/util/IdentityHashMap$EntryIterator$Entry";
+
+fn identity_entry(handle: &HostRef) -> bool {
+    handle.kind() == HostKind::MapEntry && entry_class(handle.key()) == IDENTITY_ENTRY
+}
+
+/// `a == b` where this model can tell: two handles by `same_object`, `null`s, a handle against
+/// any text or box (two objects). Two texts or boxes are `None`: their identity is not kept.
+fn same_reference(a: &Value, b: &Value) -> Option<bool> {
+    match (a, b) {
+        (Value::Ref(None), Value::Ref(None)) => Some(true),
+        (Value::Ref(None), _) | (_, Value::Ref(None)) => Some(false),
+        (Value::Host(left), Value::Host(right)) => left.same_object(right),
+        (Value::Host(_), _) | (_, Value::Host(_)) => Some(false),
+        _ => None,
+    }
+}
+
 fn entry_hash(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<i32>, NativeError> {
+    // `System.identityHashCode(key) ^ System.identityHashCode(value)`: counted.
+    if identity_entry(handle) {
+        return Ok(None);
+    }
     let Some((key, value)) = parts(handle, nested) else {
         return Ok(None);
     };
@@ -642,6 +999,13 @@ fn entry_equals(
             else {
                 return Ok(None);
             };
+            // `e.getKey() == key && e.getValue() == value`, counted where identity is unknown.
+            if identity_entry(handle) {
+                return Ok(match same_reference(&key, &other_key) {
+                    Some(true) => same_reference(&value, &other_value),
+                    answer => answer,
+                });
+            }
             Ok(match nested.equals(&key, &other_key)? {
                 Some(true) => nested.equals(&value, &other_value)?,
                 answer => answer,

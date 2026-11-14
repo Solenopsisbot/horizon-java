@@ -277,4 +277,48 @@ public final class HostMapEntries {
     m.put("a", 5);
     return e.getClass().getName() + "," + e + "," + attempt(() -> e.setValue(7)) + "," + (e == m.entrySet().iterator().next());
   }
+
+  record P(int x) {}
+
+  /** `IdentityHashMap` entries compare their key and value by `==` (#221 review B1). */
+  public static String identityKeyed() {
+    IdentityHashMap<Object, Object> m = new IdentityHashMap<>();
+    P p = new P(1);
+    P q = new P(2);
+    m.put(p, q);
+    Map.Entry<Object, Object> e = m.entrySet().iterator().next();
+    return "" + e.equals(Map.entry(new P(1), q)) + e.equals(Map.entry(p, q)) + e.equals(Map.entry(p, new P(2))) + "|"
+        + List.of(Map.entry(new P(1), q)).contains(e) + List.of(Map.entry(p, q)).contains(e) + "|"
+        + Map.entry(new P(1), new P(2)).equals(e);
+  }
+
+  /** `System.identityHashCode(k) ^ System.identityHashCode(v)` (counted). */
+  public static String identityHash() {
+    IdentityHashMap<Object, Object> m = new IdentityHashMap<>();
+    P p = new P(1);
+    P q = new P(2);
+    m.put(p, q);
+    Map.Entry<Object, Object> e = m.entrySet().iterator().next();
+    return "" + (e.hashCode() == (p.hashCode() ^ q.hashCode())) + new HashSet<>(List.of(e)).contains(Map.entry(new P(1), q));
+  }
+
+  /** A map caches its `entrySet()` view: every call answers the same object (#221 review B2). */
+  public static String entrySetSame() {
+    Map<String, Integer> h = new HashMap<>();
+    Map<String, Integer> t = new TreeMap<>(Map.of("a", 1));
+    Map<String, Integer> l = filled(new LinkedHashMap<>());
+    Set<Map.Entry<String, Integer>> view = l.entrySet();
+    l.put("c", 3);
+    return "" + (h.entrySet() == h.entrySet()) + (t.entrySet() == t.entrySet()) + (l.entrySet() == view) + view.size()
+        + view;
+  }
+
+  /** An unmodifiable view's entry reads the wrapped map's node live. */
+  public static String unmodifiableLive() {
+    Map<String, Integer> m = new HashMap<>();
+    m.put("a", 1);
+    Map.Entry<String, Integer> e = Collections.unmodifiableMap(m).entrySet().iterator().next();
+    m.put("a", 2);
+    return e.getValue() + "|" + e;
+  }
 }

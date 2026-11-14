@@ -56,12 +56,23 @@ pub struct RedBlackTree {
 }
 
 impl RedBlackTree {
-    /// The index of the node holding `key` (as stored), for a host entry that follows it
-    /// (`host_map_entry.rs`).
-    pub(crate) fn index_of(&self, key: &Value) -> Option<usize> {
+    /// How many node slots the tree has used (freed ones included).
+    pub(crate) fn slots(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// The tree's `modCount` (its structure changes with it).
+    pub(crate) fn mod_count(&self) -> u64 {
+        self.mod_count
+    }
+
+    /// Every live node's index by its key's marker (`host_map_entry.rs`'s lookup memo).
+    pub(crate) fn index_by_key(&self) -> std::collections::HashMap<String, usize> {
         self.nodes
             .iter()
-            .position(|node| node.as_ref().is_some_and(|node| node.key == *key))
+            .enumerate()
+            .filter_map(|(at, node)| Some((crate::value_marker(&node.as_ref()?.key), at)))
+            .collect()
     }
 
     /// The key node `index` holds, `None` once the node is freed.

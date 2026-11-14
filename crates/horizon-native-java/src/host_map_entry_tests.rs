@@ -195,6 +195,15 @@ fn map_entries_answer_as_java_25_or_count() {
             "weakEntries",
             Exact(r#"java.util.WeakHashMap$Entry,truetrue,5,5,7,a=7,7,null"#),
         ),
+        // `IdentityHashMap` entries compare key and value by `==`; record keys and values
+        // make identity decidable (#221 review B1).
+        ("identityKeyed", Exact(r#"falsetruefalse|falsetrue|true"#)),
+        // Their hash is `System.identityHashCode(k) ^ System.identityHashCode(v)`: counted.
+        ("identityHash", Counted),
+        // A map caches its `entrySet()` view: one object per map, following the map (B2).
+        ("entrySetSame", Exact(r#"truetruetrue3[a=1, b=2, c=3]"#)),
+        // An unmodifiable view's entry reads the wrapped map's node live.
+        ("unmodifiableLive", Exact(r#"2|a=2"#)),
     ];
     let mut failures = Vec::new();
     for (method, outcome) in &cases {

@@ -1019,8 +1019,17 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.mint_map_entry(map, key, value, made)
     }
 
-    fn entries_before_call(&mut self, marker: &str) {
-        self.inner.entries_before_call(marker);
+    fn mint_map_entries(
+        &mut self,
+        map: &Value,
+        pairs: &[Value],
+        made: crate::host_map_entry::EntryMade,
+    ) -> Vec<Value> {
+        self.inner.mint_map_entries(map, pairs, made)
+    }
+
+    fn entries_before_call(&mut self, marker: &str, name: &str) {
+        self.inner.entries_before_call(marker, name);
     }
 
     fn entries_after_call(&mut self, marker: &str) {

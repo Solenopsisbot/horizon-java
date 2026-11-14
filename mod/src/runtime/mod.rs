@@ -2348,9 +2348,25 @@ pub trait Host {
         host_map_entry::unknown_entry()
     }
 
+    /// [`Self::mint_map_entry`] over the pairs `[k, v, k, v...]` of `map`.
+    fn mint_map_entries(
+        &mut self,
+        map: &Value,
+        pairs: &[Value],
+        made: host_map_entry::EntryMade,
+    ) -> Vec<Value> {
+        pairs
+            .chunks(2)
+            .filter_map(|pair| match pair {
+                [key, value] => Some(self.mint_map_entry(Some(map), key, value, made)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Before and after a call on the map `marker`: its entries follow it
     /// (`host_map_entry.rs`).
-    fn entries_before_call(&mut self, _marker: &str) {}
+    fn entries_before_call(&mut self, _marker: &str, _name: &str) {}
 
     fn entries_after_call(&mut self, _marker: &str) {}
 
@@ -3019,6 +3035,8 @@ pub struct StdHost {
     locales: BTreeMap<String, (String, String)>,
     /// The `Map.Entry` objects the host made, by handle key (`host_map_entry.rs`).
     map_entries: host_map_entry::Entries,
+    /// Each map's `entrySet()` view, by the map's key: one per map, as Java caches it.
+    entry_views: BTreeMap<String, Value>,
     /// The two halves of every `new UUID(msb, lsb)` a jar constructed, keyed
     /// by its object key (`host_jdk_value.rs`).
     constructed_uuids: BTreeMap<String, (i64, i64)>,
@@ -3180,6 +3198,7 @@ impl StdHost {
             view_kinds: BTreeMap::new(),
             locales: BTreeMap::new(),
             map_entries: host_map_entry::Entries::default(),
+            entry_views: BTreeMap::new(),
             constructed_uuids: BTreeMap::new(),
             levels: Vec::new(),
             references: BTreeMap::new(),
@@ -4973,8 +4992,17 @@ impl Host for StdHost {
         StdHost::mint_map_entry(self, map, key, value, made)
     }
 
-    fn entries_before_call(&mut self, marker: &str) {
-        StdHost::entries_before_call(self, marker);
+    fn mint_map_entries(
+        &mut self,
+        map: &Value,
+        pairs: &[Value],
+        made: host_map_entry::EntryMade,
+    ) -> Vec<Value> {
+        StdHost::mint_map_entries(self, map, pairs, made)
+    }
+
+    fn entries_before_call(&mut self, marker: &str, name: &str) {
+        StdHost::entries_before_call(self, marker, name);
     }
 
     fn entries_after_call(&mut self, marker: &str) {
@@ -8335,24 +8363,32 @@ impl Host for StdHost {
                     ) => host_map_entry::EntryMade::Holder,
                     _ => host_map_entry::EntryMade::Node,
                 };
-                let entries: Vec<Value> = values
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|pair| self.mint_map_entry(Some(receiver), &pair[0], &pair[1], made))
-                    .collect();
+                let entries = self.mint_map_entries(receiver, &values, made);
                 // A collection of its own holding the entry handles themselves, so every
                 // reading of one node stays the same object (a `set/...` literal would print
                 // and re-parse them). Its class is the literal's (`LinkedHashSet`) until
                 // P14d1 names each answer's JDK class. It is the map's `entrySet` view: it
-                // follows the map (`refresh_map_views`), in the map's order, with no hash
-                // layout of its own (`hash_table_kind`).
-                let set = self.empty_collection("set");
-                if let (Some(marker), Some(map)) = (expect_ref(&set).cloned(), expect_ref(receiver))
-                {
+                // follows the map (`refresh_map_views`), in the map's order. Java's maps cache
+                // that view (`HashMap.entrySet` field): every call answers the same one
+                // (#221 review B2), refreshed here.
+                let map = expect_ref(receiver).cloned();
+                let cached = map
+                    .as_ref()
+                    .and_then(|map| self.entry_views.get(map))
+                    .filter(|view| {
+                        expect_ref(view)
+                            .is_some_and(|view| self.mutable_collections.contains_key(view))
+                    })
+                    .cloned();
+                let set = cached.unwrap_or_else(|| self.empty_collection("set"));
+                if let (Some(marker), Some(map)) = (expect_ref(&set).cloned(), map) {
                     self.mutable_collections.insert(marker.clone(), entries);
-                    self.note_view_copy(&marker, map);
+                    // Java's `EntrySet.contains` looks the key up in the map; this view's own
+                    // table is laid out afresh from its entries as they are now.
+                    self.hash_tables.remove(&marker);
+                    self.note_view_copy(&marker, &map);
                     self.note_view_kind(&marker, "entrySet");
+                    self.entry_views.insert(map, set.clone());
                 }
                 Ok(set)
             }

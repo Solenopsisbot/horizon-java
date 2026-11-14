@@ -753,25 +753,20 @@ impl<H: Host> Runtime<'_, H> {
                 Some("keySet") => entries.iter().step_by(2).cloned().collect(),
                 Some("values") => entries.iter().skip(1).step_by(2).cloned().collect(),
                 // The map's nodes (`host_map_entry.rs`): every reading of one is one object.
-                Some("entrySet") => {
-                    let map = crate::runtime::jar_object::stored_value(marker);
-                    entries
-                        .chunks(2)
-                        .filter_map(|pair| match pair {
-                            [key, value] => Some(self.host.mint_map_entry(
-                                Some(&map),
-                                key,
-                                value,
-                                crate::runtime::host_map_entry::EntryMade::Node,
-                            )),
-                            _ => None,
-                        })
-                        .collect()
-                }
+                Some("entrySet") => self.host.mint_map_entries(
+                    &crate::runtime::jar_object::stored_value(marker),
+                    &entries,
+                    crate::runtime::host_map_entry::EntryMade::Node,
+                ),
                 _ => continue,
             };
             self.host
                 .replace_mutable_collection(&crate::runtime::jar_object::stored_value(&view), contents);
+            // An entry view's members hash by their values, which the call may have changed:
+            // its table is laid out afresh (Java's `EntrySet` looks keys up in the map).
+            if self.host.view_copy_kind(&view).as_deref() == Some("entrySet") {
+                let _ = self.host.take_hash_table(&view);
+            }
         }
     }
 
