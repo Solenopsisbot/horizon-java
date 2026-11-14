@@ -414,6 +414,14 @@ pub enum HostKind {
     /// Gson's `TypeToken` from a factory (`get`, `getArray`): key
     /// `[serial, canonical type]` (`host_gson_type.rs`).
     GsonTypeToken,
+    /// A collection the host made (an unmodelled call's neutral answer,
+    /// `subList`, `Collections.unmodifiableList`, `List.of`, a reversed
+    /// view, ...): key `<JDK class>#neutral<n>`, `#immutable<n>` or
+    /// `#reversed<n>`, the text it used to be (`jar_object.rs`), one key per
+    /// allocation. An object like a
+    /// jar's `new ArrayList()` (a [`HostKind::JarObject`]), whose row it
+    /// shares.
+    Collection,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1674,6 +1682,16 @@ const KINDS: &[KindInfo] = &[
         // A serial per allocation.
         canonical: always_canonical,
         methods: &crate::runtime::host_gson_type::TOKEN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Collection,
+        tag: "hcoll",
+        class: ClassRule::FromKey(crate::runtime::jar_object::collection_class),
+        // The host numbers every collection it makes once.
+        canonical: always_canonical,
+        // An object: the runtime and the host's collection models answer
+        // for it by its key, as for a jar's `new ArrayList()`.
+        methods: &crate::runtime::jar_object::JAR_OBJECT,
     },
 ];
 

@@ -185,7 +185,16 @@ const CASES: &[(&str, &str, Outcome)] = &[
             why: "a jar class's ClassCastException leaves out the JVM's module/loader clause (the loader is not known outside a JVM), checkcast.rs",
         },
     ),
-    ("Rv2", "c3", Counted),
+    // `List.of(1)` is an object of Java's class, `List12` (#156 P14c): the
+    // cast throws Java 25's exact message (it was counted while the class
+    // was not kept).
+    (
+        "Rv2",
+        "c3",
+        Exact(
+            "class java.util.ImmutableCollections$List12 cannot be cast to class java.util.Optional (java.util.ImmutableCollections$List12 and java.util.Optional are in module java.base of loader 'bootstrap')",
+        ),
+    ),
     ("Rv2", "c4", Exact("falsefalse")),
     (
         "Rv2",

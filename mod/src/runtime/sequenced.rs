@@ -203,7 +203,15 @@ impl StdHost {
         let class = marker.split_once('#').map_or(marker, |(class, _)| class);
         let view = match class {
             "java/util/LinkedList" => LINKED_VIEW,
-            "java/util/ArrayList" | "java/util/ImmutableCollections$ListN" => RANDOM_ACCESS_VIEW,
+            // Every unmodifiable list the host makes (`java_immutable.rs`),
+            // as when they all reported `ListN`.
+            "java/util/ArrayList"
+            | "java/util/ImmutableCollections$ListN"
+            | "java/util/ImmutableCollections$List12"
+            | "java/util/Collections$EmptyList"
+            | "java/util/Collections$SingletonList"
+            | "com/google/common/collect/RegularImmutableList"
+            | "com/google/common/collect/SingletonImmutableList" => RANDOM_ACCESS_VIEW,
             _ if marker == "list" || marker.starts_with("list/") => RANDOM_ACCESS_VIEW,
             _ => return None,
         };
@@ -211,7 +219,9 @@ impl StdHost {
         let view_marker = format!("{view}#reversed{}", self.reversed_views.len());
         self.reversed_views
             .insert(view_marker.clone(), (marker.to_owned(), modifiable));
-        Some(Value::Ref(Some(view_marker)))
+        // A view of its own (#156 P14c): `list.reversed() == list.reversed()`
+        // is false, as each call makes a new `ReverseOrderListView`.
+        Some(crate::runtime::jar_object::collection(view_marker))
     }
 
     /// A member of a reversed view: a mutator maps onto its list, and

@@ -395,10 +395,18 @@ impl<H: Host> Runtime<'_, H> {
                 self.host_collection_kind(receiver) == Some(object_methods::CollectionKind::Map)
                     && self
                         .host_collection_class(receiver)
-                        // `tree_map.rs` runs `TreeMap.replaceAll`.
+                        // `tree_map.rs` runs `TreeMap.replaceAll`;
+                        // `java_immutable.rs` the unmodifiable maps that own
+                        // their entries (`Map.of`'s, `Collections.emptyMap()`,
+                        // `singletonMap`).
                         .is_some_and(|class| {
                             !class.starts_with("java/util/ImmutableCollections")
-                                && class != "java/util/TreeMap"
+                                && !matches!(
+                                    class.as_str(),
+                                    "java/util/TreeMap"
+                                        | "java/util/Collections$EmptyMap"
+                                        | "java/util/Collections$SingletonMap"
+                                )
                         })
             })
     }
