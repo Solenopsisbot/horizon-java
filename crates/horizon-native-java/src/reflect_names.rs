@@ -204,7 +204,7 @@ impl<H: Host> Runtime<'_, H> {
                     frame: None,
                 });
             }
-            return Ok(Some(Value::Ref(Some(enclosing))));
+            return Ok(Some(crate::host_class::class_value(&enclosing)));
         }
         let Some(Some(outer)) = nesting.own_row() else {
             return Ok(Some(Value::Ref(None)));
@@ -231,7 +231,7 @@ impl<H: Host> Runtime<'_, H> {
                 frame: None,
             });
         }
-        Ok(Some(Value::Ref(Some(outer))))
+        Ok(Some(crate::host_class::class_value(&outer)))
     }
 }
 

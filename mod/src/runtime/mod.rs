@@ -5595,8 +5595,9 @@ impl Host for StdHost {
                 }
             }
             // commons-lang3 ships with the game, and settings libraries box a
-            // field's type through it (Carpet's `ParsedRule`). A primitive's
-            // class marker is its name, as the wrapper `TYPE` statics answer.
+            // field's type through it (Carpet's `ParsedRule`, which looks the
+            // answer up in a map keyed by `X.class`). A primitive's `Class` is
+            // keyed by its name, as the wrapper `TYPE` statics answer.
             (
                 "org/apache/commons/lang3/ClassUtils",
                 "primitiveToWrapper" | "wrapperToPrimitive",
@@ -5626,12 +5627,23 @@ impl Host for StdHost {
                     }
                 });
                 Ok(match mapped {
-                    Some(mapped) => Value::Ref(Some(mapped.to_owned())),
+                    Some(mapped) => host_class::class_value(mapped),
                     // A non-primitive passes through `primitiveToWrapper`
                     // unchanged; `wrapperToPrimitive` answers null for it.
                     None if to_wrapper => class.clone(),
                     None => Value::Ref(None),
                 })
+            }
+            // A `Class` against class-marker text of its name, until #156 P13c
+            // (`host_class.rs`): counted, the old answer kept.
+            ("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z")
+                if host_class::handle_against_same_text(
+                    Self::argument(r, args, 0)?,
+                    Self::argument(r, args, 1)?,
+                ) =>
+            {
+                self.unknown_host_call(r)?;
+                Ok(Value::Int(1))
             }
             ("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z") => Ok(
                 Value::Int((Self::argument(r, args, 0)? == Self::argument(r, args, 1)?) as i32),
@@ -7681,9 +7693,8 @@ impl Host for StdHost {
                 ));
             };
             return match (r.name.as_str(), r.descriptor.as_str()) {
-                ("get" | "type", "()Ljava/lang/Object;" | "()Ljava/lang/Class;") => {
-                    Ok(Value::Ref(Some(provider.to_owned())))
-                }
+                ("get", "()Ljava/lang/Object;") => Ok(Value::Ref(Some(provider.to_owned()))),
+                ("type", "()Ljava/lang/Class;") => Ok(host_class::class_value(provider)),
                 _ => Err(NativeError::MissingMethod(format!(
                     "java/util/ServiceLoader$Provider#{}{}",
                     r.name, r.descriptor
@@ -9331,10 +9342,15 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/EntrypointContainer",
                 "getEntrypointClass",
                 "()Ljava/lang/Class;",
-            ) => Ok(Value::Ref(
-                host_fabric_runtime::entrypoint_container_parts(receiver)
-                    .map(|parts| parts.class.replace('/', ".")),
-            )),
+            ) => Ok(
+                host_fabric_runtime::entrypoint_container_parts(receiver).map_or(
+                    Value::Ref(None),
+                    |parts| {
+                        // `fabric.mod.json` names it in binary form (`demo.Main`).
+                        host_class::class_value(&parts.class.replace('.', "/"))
+                    },
+                ),
+            ),
             (
                 "net/fabricmc/loader/api/EntrypointContainer"
                 | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
@@ -41751,7 +41767,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Ref(Some("demo.Main".into()))
+            host_class::class_value("demo/Main")
         );
         assert_eq!(
             host.invoke_instance(
