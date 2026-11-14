@@ -155,7 +155,9 @@ impl<H: Host> Runtime<'_, H> {
         };
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("getType", "()Ljava/lang/reflect/Type;") => canonical,
-            ("getRawType", "()Ljava/lang/Class;") => Value::Ref(Some(raw_type(&node))),
+            ("getRawType", "()Ljava/lang/Class;") => {
+                crate::runtime::host_class::class_value(&raw_type(&node))
+            }
             ("toString", "()Ljava/lang/String;") => Value::Ref(Some(type_to_string(&node))),
             // `o instanceof TypeToken && GsonTypes.equals(type, o.type)`.
             ("equals", "(Ljava/lang/Object;)Z") => {
@@ -193,7 +195,7 @@ impl<H: Host> Runtime<'_, H> {
                 "getRawType",
                 "()Ljava/lang/reflect/Type;",
                 GenericType::Parameterized { raw, .. },
-            ) => Value::Ref(Some(raw.clone())),
+            ) => crate::runtime::host_class::class_value(raw),
             (
                 "getOwnerType",
                 "()Ljava/lang/reflect/Type;",
