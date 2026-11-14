@@ -158,9 +158,12 @@ const CASES: &[(&str, Outcome)] = &[
         "returnJdk",
         Exact("demo.Refl$IStr:java.lang.String|demo.Refl$IStr:java.lang.String"),
     ),
-    // A JDK class outside the table (`StringBuilder`): counted (Java:
-    // `demo.Refl$ISb:java.lang.StringBuilder`).
-    ("returnJdkUnknown", Counted),
+    // `StringBuilder`, in the table since #156 P12b1 (a class jars `new`):
+    // exact. A class outside it is counted (`fixture_jar_objects.rs`).
+    (
+        "returnJdkUnknown",
+        Exact("demo.Refl$ISb:java.lang.StringBuilder"),
+    ),
     // Arrays rank by element type and held classes by their hierarchy.
     (
         "returnKnown",

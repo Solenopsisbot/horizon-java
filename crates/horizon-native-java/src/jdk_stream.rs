@@ -374,10 +374,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let Some(items) = self.host.mutable_collection_values(&list) else {
             return Ok(None);
         };
-        let mut values = items
-            .iter()
-            .map(|item| super::parse_collection_value(item))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut values = items.clone();
         // `ArrayList.sort` sorts its own array, which a comparator that
         // throws leaves part-merged; `List.sort`'s default sorts a copy and
         // writes nothing back then.
@@ -391,7 +388,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let changed_under = |this: &mut Self| -> Result<Option<bool>, NativeError> {
             let structural = this.capture_mod_count(&list) != expected;
             let now = this.host.mutable_collection_values(&list);
-            Ok((structural || now.as_ref() != Some(&items)).then_some(structural))
+            let same = now.is_some_and(|now| crate::same_items(&now, &items));
+            Ok((structural || !same).then_some(structural))
         };
         let sorted = match self.sort_in_place(&mut values, &comparator) {
             Ok(()) => values,

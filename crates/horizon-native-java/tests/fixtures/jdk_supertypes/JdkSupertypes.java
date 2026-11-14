@@ -5,7 +5,8 @@ import java.util.TreeSet;
 
 /**
  * Prints `src/jdk_supertypes_25.txt`: for each class the runtime's JDK hierarchy answers for, its
- * flags and every supertype (getSuperclass/getInterfaces, transitively, the class itself left out),
+ * flags, every supertype (getSuperclass/getInterfaces, transitively, the class itself left out),
+ * its direct superclass (`-` for none) and its direct interfaces in declaration order,
  * then every package of every system module and the module that holds it (a JDK class's
  * supertypes can only come from these).
  * Run on OpenJDK 25: `java JdkSupertypes.java > ../../../src/jdk_supertypes_25.txt`.
@@ -40,6 +41,107 @@ public final class JdkSupertypes {
     "java.lang.invoke.MethodType", "java.lang.invoke.MethodHandle",
     "java.lang.invoke.MethodHandles$Lookup", "java.lang.invoke.ConstantCallSite",
     "java.lang.CharSequence",
+    // The private JDK classes the skeletons allocate for a jar's collection (`jdk_skeletons/`).
+    "java.util.AbstractList$Itr", "java.util.AbstractList$ListItr", "java.util.AbstractList$SubList",
+    "java.util.AbstractList$RandomAccessSubList", "java.util.AbstractList$SubList$1",
+    "java.util.AbstractMap$1", "java.util.AbstractMap$2", "java.util.AbstractMap$KeyIterator",
+    "java.util.AbstractMap$ValueIterator", "java.util.AbstractSequentialList",
+    "java.util.AbstractMap$SimpleImmutableEntry",
+    // The JDK classes jars construct (`new`, or `super()` from a subclass) in at least 10
+    // corpus jars (corpus-xl, mega, neoforge; constructor references in the class files), and
+    // the interfaces they are cast to: a jar object of one is answered exactly (#156 P12b1).
+    "java.lang.IllegalArgumentException", "java.lang.RuntimeException",
+    "java.lang.IllegalStateException", "java.lang.StringBuilder", "java.lang.AssertionError",
+    "java.lang.MatchException", "java.lang.UnsupportedOperationException",
+    "java.lang.NullPointerException", "java.io.InputStreamReader", "java.io.IOException",
+    "java.util.concurrent.atomic.AtomicInteger", "java.io.BufferedReader",
+    "java.lang.Exception", "java.util.concurrent.atomic.AtomicBoolean",
+    "java.util.NoSuchElementException", "java.lang.IndexOutOfBoundsException",
+    "java.io.FileInputStream", "java.util.Random",
+    "java.util.concurrent.atomic.AtomicReference", "java.io.OutputStreamWriter",
+    "java.util.Properties", "java.io.StringReader", "java.lang.ThreadLocal",
+    "java.io.FileWriter", "java.io.ByteArrayInputStream", "java.lang.ref.WeakReference",
+    "java.io.FileReader", "java.net.URI", "java.util.concurrent.atomic.AtomicLong",
+    "java.io.BufferedWriter", "java.io.ByteArrayOutputStream",
+    "java.util.concurrent.CompletableFuture", "java.io.FileOutputStream",
+    "java.io.StringWriter", "java.text.DecimalFormat", "java.math.BigInteger",
+    "java.math.BigDecimal", "java.io.PrintWriter", "java.util.AbstractList",
+    "java.util.BitSet", "java.lang.ClassCastException", "java.util.Date",
+    "java.util.AbstractCollection", "java.io.BufferedInputStream",
+    "java.util.AbstractMap$SimpleEntry", "java.net.URL", "java.text.SimpleDateFormat",
+    "java.io.DataInputStream", "java.util.UUID", "java.util.ConcurrentModificationException",
+    "java.io.Reader", "java.util.AbstractMap", "java.io.BufferedOutputStream",
+    "java.util.concurrent.locks.ReentrantLock", "java.io.EOFException", "java.lang.Error",
+    "java.io.FileNotFoundException", "java.lang.ArrayIndexOutOfBoundsException",
+    "java.nio.file.SimpleFileVisitor", "java.lang.NumberFormatException",
+    "java.io.DataOutputStream", "java.util.AbstractSet",
+    "java.util.concurrent.locks.ReentrantReadWriteLock",
+    "java.util.concurrent.LinkedBlockingQueue", "java.lang.OutOfMemoryError",
+    "java.awt.Color", "java.nio.file.NoSuchFileException",
+    "java.util.concurrent.ThreadPoolExecutor", "java.util.concurrent.CancellationException",
+    "java.io.Writer", "java.util.StringJoiner", "java.lang.Throwable",
+    "java.util.concurrent.locks.StampedLock", "java.util.TimerTask", "java.util.Timer",
+    "java.awt.image.BufferedImage", "java.lang.ref.ReferenceQueue", "java.io.InputStream",
+    "java.util.zip.GZIPOutputStream", "java.io.OutputStream",
+    "java.lang.IncompatibleClassChangeError", "java.io.RandomAccessFile",
+    "java.text.ParsePosition", "java.net.InetSocketAddress",
+    "java.util.concurrent.ScheduledThreadPoolExecutor", "java.lang.StringBuffer",
+    "java.lang.ArithmeticException", "java.lang.ClassNotFoundException",
+    "java.text.ParseException", "java.util.GregorianCalendar",
+    "java.util.zip.GZIPInputStream", "java.lang.ref.SoftReference",
+    "java.io.InvalidObjectException", "java.util.concurrent.CountDownLatch",
+    "java.lang.ThreadGroup", "java.security.SecureRandom",
+    "javax.annotation.processing.AbstractProcessor", "java.lang.ExceptionInInitializerError",
+    "java.lang.InterruptedException", "java.util.EmptyStackException",
+    "java.io.UncheckedIOException", "java.util.concurrent.atomic.AtomicIntegerArray",
+    "java.util.concurrent.CompletionException", "java.io.FilterInputStream",
+    "java.util.zip.ZipEntry", "java.util.concurrent.atomic.AtomicReferenceArray",
+    "java.util.concurrent.ArrayBlockingQueue", "java.util.concurrent.Semaphore",
+    "java.util.jar.Manifest", "java.util.concurrent.FutureTask", "java.util.StringTokenizer",
+    "java.io.PushbackInputStream", "java.util.AbstractQueue",
+    "java.io.InvalidClassException", "java.util.concurrent.LinkedBlockingDeque",
+    "java.util.zip.ZipFile", "java.lang.ProcessBuilder", "java.io.PrintStream",
+    "java.security.InvalidParameterException", "java.util.concurrent.atomic.AtomicLongArray",
+    "java.util.concurrent.TimeoutException", "java.nio.charset.CharsetEncoder",
+    "java.nio.charset.CharsetDecoder", "java.nio.charset.Charset",
+    "javax.crypto.spec.SecretKeySpec", "java.util.Scanner",
+    "java.text.StringCharacterIterator", "java.awt.Rectangle",
+    "java.util.AbstractMap$SimpleImmutableEntry", "java.util.Locale",
+    "java.util.zip.Inflater", "java.lang.InternalError", "java.lang.ClassLoader",
+    "java.util.zip.InflaterInputStream", "java.net.PasswordAuthentication",
+    "java.util.concurrent.atomic.LongAdder", "java.util.zip.Deflater", "javax.swing.JFrame",
+    "java.net.Proxy", "java.util.zip.ZipOutputStream",
+    "java.security.spec.X509EncodedKeySpec", "java.text.MessageFormat",
+    "java.net.Authenticator", "java.io.FilterOutputStream", "javax.swing.JPanel",
+    "java.util.concurrent.locks.AbstractQueuedSynchronizer", "javax.swing.JFileChooser",
+    "java.util.concurrent.RejectedExecutionException", "java.awt.Dimension",
+    "javax.swing.JLabel", "java.util.zip.ZipInputStream", "java.lang.NoSuchFieldException",
+    "java.nio.BufferOverflowException", "java.util.Spliterators$AbstractSpliterator",
+    "java.io.UTFDataFormatException", "java.lang.NoSuchMethodException",
+    "java.util.concurrent.ForkJoinPool", "java.lang.ref.PhantomReference",
+    "java.io.NotSerializableException", "java.text.Format",
+    "java.util.concurrent.ExecutionException", "java.sql.Date", "java.sql.Timestamp",
+    "java.lang.reflect.InvocationTargetException", "java.util.zip.CRC32",
+    "java.nio.file.FileAlreadyExistsException", "java.util.concurrent.ForkJoinWorkerThread",
+    "java.net.DatagramSocket", "java.security.DigestInputStream",
+    "java.lang.IllegalAccessException", "java.net.URISyntaxException", "java.net.Socket",
+    "java.util.concurrent.SynchronousQueue", "java.util.concurrent.PriorityBlockingQueue",
+    "java.sql.Time", "java.awt.BorderLayout", "javax.swing.JButton",
+    "java.awt.event.WindowAdapter", "java.lang.SecurityException",
+    "java.awt.event.MouseAdapter", "java.awt.datatransfer.UnsupportedFlavorException",
+    "java.util.Formatter", "javax.swing.filechooser.FileNameExtensionFilter",
+    "javax.swing.JScrollPane", "java.util.jar.JarFile", "java.awt.Point",
+    "java.lang.UnsatisfiedLinkError", "java.time.DateTimeException",
+    "java.io.UnsupportedEncodingException", "java.lang.ClassValue",
+    "java.util.concurrent.ForkJoinTask", "java.util.jar.JarOutputStream",
+    "javax.crypto.spec.IvParameterSpec", "java.io.InterruptedIOException",
+    "java.lang.InstantiationException", "java.nio.BufferUnderflowException",
+    "java.lang.SecurityManager", "java.util.concurrent.Executor",
+    "java.util.concurrent.ExecutorService", "java.util.concurrent.ScheduledExecutorService",
+    "java.util.concurrent.BlockingQueue", "java.lang.AutoCloseable", "java.lang.Runnable",
+    "java.util.concurrent.Callable", "java.lang.Iterable", "java.util.Collection",
+    "java.util.List", "java.util.Set", "java.util.Map", "java.util.Queue", "java.util.Deque",
+    "java.lang.Comparable", "java.lang.Appendable",
   };
 
   static void walk(Class<?> c, Set<String> out) {
@@ -59,7 +161,12 @@ public final class JdkSupertypes {
       walk(c, supers);
       supers.remove(c.getName().replace('.', '/'));
       String flags = c.isInterface() ? "interface" : Modifier.isFinal(c.getModifiers()) ? "final" : "class";
-      System.out.println("class\t" + c.getName().replace('.', '/') + "\t" + flags + "\t" + String.join(" ", supers));
+      Class<?> superclass = c.getSuperclass();
+      String direct = superclass == null ? "-" : superclass.getName().replace('.', '/');
+      Set<String> declared = new java.util.LinkedHashSet<>();
+      for (Class<?> i : c.getInterfaces()) declared.add(i.getName().replace('.', '/'));
+      System.out.println("class\t" + c.getName().replace('.', '/') + "\t" + flags + "\t" + String.join(" ", supers)
+          + "\t" + direct + "\t" + String.join(" ", declared));
     }
     // Each system package with the module that holds it (`Class.getModule()` of a JDK class).
     Set<String> packages = new TreeSet<>();

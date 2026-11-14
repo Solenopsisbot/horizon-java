@@ -335,7 +335,10 @@ impl StdHost {
                 let name = expect_ref(receiver)?
                     .strip_prefix(MOD_ENVIRONMENT)?
                     .strip_prefix('/')?;
-                let side = Self::argument(r, args, 0).ok().map(enum_name).unwrap_or("");
+                let side = Self::argument(r, args, 0)
+                    .ok()
+                    .and_then(crate::host_fabric_runtime::env_type_name)
+                    .unwrap_or_default();
                 Some(Ok(Value::Int(i32::from(
                     name == "UNIVERSAL" || name == side,
                 ))))

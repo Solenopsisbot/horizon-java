@@ -146,7 +146,13 @@ impl StdHost {
     fn guava_parts(&mut self, value: &Value) -> Result<Option<Vec<Value>>, NativeError> {
         let marker = match value {
             Value::Ref(None) => return Err(npe()),
+            // A `String` is no `Iterable`, whatever it spells.
+            Value::Ref(Some(_)) if crate::jar_object::spells_key(value) => return Ok(None),
             Value::Ref(Some(marker)) => marker,
+            // A collection a jar `new`ed, by its key (`jar_object.rs`).
+            Value::Host(_) if crate::jar_object::is_object(value) => {
+                crate::expect_ref(value).ok_or_else(npe)?
+            }
             // A host handle (a `ServiceLoader`, ...) is an `Iterable` whose
             // elements only the runtime knows: counted.
             _ => return Ok(None),
@@ -155,11 +161,7 @@ impl StdHost {
             return Ok(Some(values[(*index).min(values.len())..].to_vec()));
         }
         match runtime_collection_values(self, value) {
-            Ok(values) => values
-                .iter()
-                .map(|value| parse_collection_value(value))
-                .collect::<Result<Vec<_>, _>>()
-                .map(Some),
+            Ok(values) => Ok(Some(values)),
             Err(_) => Ok(None),
         }
     }

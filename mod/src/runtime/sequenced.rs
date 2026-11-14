@@ -79,9 +79,10 @@ pub(crate) fn supertypes(class: &str) -> &'static [&'static str] {
 
 impl StdHost {
     /// The elements a reversed view reads: its list's current ones, backwards.
-    pub(crate) fn reversed_view_values(&self, marker: &str) -> Option<Vec<String>> {
+    pub(crate) fn reversed_view_values(&self, marker: &str) -> Option<Vec<Value>> {
         let (base, _) = self.reversed_views.get(marker)?;
-        let mut values = host_collection_values(self, &Value::Ref(Some(base.clone()))).ok()?;
+        let mut values =
+            host_collection_values(self, &crate::runtime::jar_object::stored_value(base)).ok()?;
         values.reverse();
         Some(values)
     }
@@ -127,7 +128,7 @@ impl StdHost {
     fn end_value(&self, receiver: &Value, first: bool) -> Result<Value, NativeError> {
         let values = host_collection_values(self, receiver)?;
         let end = if first { values.first() } else { values.last() };
-        parse_collection_value(end.ok_or_else(no_such_element)?)
+        end.cloned().ok_or_else(no_such_element)
     }
 
     /// The mutable table behind `marker`, seeded from its current elements
@@ -138,10 +139,7 @@ impl StdHost {
         marker: &str,
     ) -> Result<&mut Vec<Value>, NativeError> {
         if !self.mutable_collections.contains_key(marker) {
-            let values = host_collection_values(self, receiver)?
-                .iter()
-                .map(|value| parse_collection_value(value))
-                .collect::<Result<Vec<_>, _>>()?;
+            let values = host_collection_values(self, receiver)?;
             self.mutable_collections.insert(marker.to_owned(), values);
         }
         Ok(self
@@ -228,7 +226,7 @@ impl StdHost {
     ) -> Option<Result<Value, NativeError>> {
         let name = r.name.as_str();
         if name == "reversed" && r.descriptor.starts_with("()L") {
-            return Some(Ok(Value::Ref(Some(base.to_owned()))));
+            return Some(Ok(crate::runtime::jar_object::stored_value(base)));
         }
         if !java_immutable::is_mutator(name) {
             return None;
@@ -236,7 +234,7 @@ impl StdHost {
         if !modifiable {
             return Some(Err(unsupported()));
         }
-        let list = Value::Ref(Some(base.to_owned()));
+        let list = crate::runtime::jar_object::stored_value(base);
         let value = || args.first().cloned().unwrap_or(Value::Ref(None));
         Some(match (name, r.descriptor.as_str()) {
             ("add", "(Ljava/lang/Object;)Z") => self

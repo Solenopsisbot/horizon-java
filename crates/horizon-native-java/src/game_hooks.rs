@@ -657,7 +657,7 @@ fn is_host_value_class(owner: &str) -> bool {
 
 /// A value marker the bootstrap host built and models the members of.
 fn is_host_value_marker(marker: &str) -> bool {
-    marker.starts_with("component/") || marker.starts_with("uuid/")
+    marker.starts_with("uuid/")
 }
 
 fn uuid_text_of(uuid: u128) -> String {
@@ -775,16 +775,24 @@ impl<H: Host> GameHookHost<'_, H> {
             ("getName" | "getDisplayName", "()Lnet/minecraft/network/chat/Component;")
                 if entity =>
             {
-                fact(
-                    object
-                        .name
-                        .as_deref()
-                        .map(|name| Value::Ref(Some(format!("component/literal/{name}")))),
-                )
+                fact(object.name.as_deref().map(crate::host_component::literal))
             }
             ("sendSystemMessage", "(Lnet/minecraft/network/chat/Component;)V") if player => {
                 let uuid = object.uuid.ok_or_else(|| unmodelled(marker, r))?;
-                let text = args.first().map(component_text).unwrap_or_default();
+                // The component as it is when sent (`host_component.rs`).
+                let text = match args.first() {
+                    Some(value) => {
+                        match crate::facade_text::json_now(value, self.inner.component_states()) {
+                            Some(json) => crate::facade_text::plain(&json),
+                            // A component no read resolves (past the bound, a cycle).
+                            None if crate::host_component::is_component(value) => {
+                                return Err(unmodelled(marker, r));
+                            }
+                            None => expect_ref(value).cloned().unwrap_or_default(),
+                        }
+                    }
+                    None => String::new(),
+                };
                 self.context
                     .effects
                     .push(GameHookEffect::SystemMessage { player: uuid, text });
@@ -998,6 +1006,31 @@ fn is_fabric_event_invoker(value: &Value) -> bool {
 }
 
 impl<H: Host> Host for GameHookHost<'_, H> {
+    fn component_states(&self) -> Option<&crate::host_component::States> {
+        self.inner.component_states()
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut crate::host_component::States> {
+        self.inner.component_states_mut()
+    }
+
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        self.inner.feedback_calls_supplier(source, broadcast)
+    }
+
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        self.inner.send_feedback(r, component, broadcast)
+    }
+
+    fn note_entrypoint_constructed(&mut self, class: &str) {
+        self.inner.note_entrypoint_constructed(class);
+    }
+
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         // An instance-field read the callbacks never wrote reaches the host
         // too. A Mixin `@Shadow` field is the game object's own field, which
@@ -1115,7 +1148,7 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.invoke_instance(r, receiver, args)
     }
 
-    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<String>> {
+    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         self.inner.mutable_collection_values(value)
     }
 

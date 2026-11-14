@@ -182,7 +182,9 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         // A host handle prints its kind's `toString` (`host_ref.rs`); one
         // whose held value has no text here is counted.
-        if let Value::Host(handle) = value {
+        if let Value::Host(handle) = value
+            && !crate::jar_object::is_object_handle(handle)
+        {
             return match self.host_ref_text(handle, class, method)? {
                 Some(text) => Ok(Some(Value::Ref(Some(text)))),
                 None => self
@@ -190,6 +192,10 @@ impl<H: Host> Runtime<'_, H> {
                     .unknown_operand_call(&object_to_string())
                     .map(Some),
             };
+        }
+        // A `String` spelling an object's key is that text.
+        if crate::jar_object::spells_key(value) {
+            return Ok(None);
         }
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
@@ -247,13 +253,15 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<String, NativeError> {
-        if let Value::Host(handle) = value {
+        if let Value::Host(handle) = value
+            && !crate::jar_object::is_object_handle(handle)
+        {
             if let Some(text) = self.host_ref_text(handle, class, method)? {
                 return Ok(text);
             }
             self.host.unknown_operand_call(&object_to_string())?;
         }
-        if matches!(value, Value::Ref(Some(_))) {
+        if matches!(value, Value::Ref(Some(_))) || crate::jar_object::is_object(value) {
             match self.runtime_value_of(value, class, method)? {
                 Some(Value::Ref(Some(text))) => return Ok(text),
                 Some(_) => return Ok("null".into()),
@@ -341,7 +349,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         };
         // A builder argument keeps the builder model's own path.
-        if expect_ref(value).is_some_and(|marker| self.string_builders.contains_key(marker)) {
+        if self.builder_text(value).is_some() {
             return Ok(None);
         }
         let Some(text) = self.runtime_value_of(value, class, method)? else {

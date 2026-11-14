@@ -173,7 +173,7 @@ impl<H: Host> Runtime<'_, H> {
         // The host keeps the view's source beside it; reading the elements
         // already goes through it, so only the rules need the source.
         let source = self.host.unmodifiable_view_source(marker)?;
-        Some(Value::Ref(Some(source)))
+        Some(crate::runtime::jar_object::stored_value(&source))
     }
 
     /// Whether the host's marker comparison can differ from Java for

@@ -94,7 +94,9 @@ use crate::runtime::{NativeError, Value};
 #[derive(Clone)]
 pub struct HostRef {
     kind: HostKind,
-    key: Arc<str>,
+    /// A `String` (not `str`) so that a jar object's key reads back as the
+    /// `&String` the text readers take (`expect_ref`, [`Self::key_text`]).
+    key: Arc<String>,
     origin: u64,
 }
 
@@ -359,6 +361,41 @@ pub enum HostKind {
     /// A modelled JDK spliterator over jar code (`jdk_spliterators.rs`): key
     /// `iter:<n>` or `ra:<n>`, which names its class.
     Spliterator,
+    /// Fabric Loader's `FabricLoaderImpl.INSTANCE` (`host_fabric_runtime.rs`).
+    FabricLoaderInstance,
+    /// The loader's one `MappingResolver`.
+    FabricMappingResolver,
+    /// An `EnvType` constant: key its name.
+    FabricEnvType,
+    /// An `EntrypointContainer`: key its kind, class, provider and the
+    /// requested type.
+    FabricEntrypointContainer,
+    /// A `PayloadTypeRegistry`: key its direction.
+    FabricPayloadTypes,
+    /// A `ResourceLoader`: key its `PackType`.
+    FabricResourceLoader,
+    /// An object `new` (or a model) allocated: key `class#n`
+    /// (`jar_object.rs`), one key per allocation.
+    JarObject,
+    /// A chat component (`MutableComponent`): key a serial per allocation, then its vanilla
+    /// JSON, keys sorted
+    /// (`host_component.rs`).
+    Component,
+    /// DataFixerUpper's `Pair.of(..)`: key `[serial, first, second]`
+    /// (`host_codec.rs`).
+    DfuPair,
+    /// An unmodelled codec call's answer: key its declared codec type
+    /// (`host_codec.rs`).
+    OpaqueCodec,
+    /// A codec the attachment model builds: key `compound-tag` or
+    /// `codec:<n>`/`map:<n>` (`host_codec.rs`, `attachment_codec.rs`).
+    ModelledCodec,
+    /// A `java.lang.reflect.Type` that is no class (`ParameterizedType`,
+    /// `TypeVariable`, `WildcardType`, `GenericArrayType`): key the node
+    /// (`host_reflect_type.rs`).
+    ReflectType,
+    /// An `AnnotatedType`: key the type it annotates.
+    AnnotatedType,
     /// Gson's `FormattingStyle`: key `[id, newline, indent, space]`, `id` a
     /// constant's name or a serial per allocation (`host_gson.rs`).
     FormattingStyle,
@@ -425,6 +462,13 @@ pub(crate) trait Nested {
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError>;
     /// `String.valueOf(value)`.
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError>;
+    /// The vanilla JSON a chat component holds now (its host's state,
+    /// `host_component.rs`); `None` where this context cannot read the
+    /// host's table (the caller counts).
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
 }
 
 /// `toString()` of a handle.
@@ -536,6 +580,7 @@ pub(crate) type InstanceOfClassFn = fn(&str, &str, &dyn ClassHierarchy) -> Optio
 
 /// The kinds with a [`ClassSide`], in `KINDS` order.
 const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
+    (HostKind::DfuPair, &crate::runtime::host_codec::PAIR_CLASS_SIDE),
     (
         HostKind::GameEvent,
         &crate::runtime::host_game_event::EVENT_CLASS_SIDE,
@@ -551,6 +596,14 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::AttachmentBuilder,
         &crate::runtime::host_attachment::BUILDER_CLASS_SIDE,
+    ),
+    (
+        HostKind::FabricEnvType,
+        &crate::runtime::host_fabric_runtime::ENV_TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::Component,
+        &crate::runtime::host_component::COMPONENT_CLASS_SIDE,
     ),
     (
         HostKind::FormattingStyle,
@@ -1417,6 +1470,130 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::runtime::jdk_spliterators::JDK_SPLITERATOR,
     },
     KindInfo {
+        kind: HostKind::FabricLoaderInstance,
+        tag: "fli",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_fabric_runtime::loader_types,
+        },
+        // `FabricLoaderImpl.INSTANCE`.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_fabric_runtime::EXACT_OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricMappingResolver,
+        tag: "fmr",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_fabric_runtime::mapping_resolver_types,
+        },
+        // Made once and kept.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_fabric_runtime::EXACT_OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricEnvType,
+        tag: "fenv",
+        // A final enum: its class is exact, with its class side.
+        class: ClassRule::FromKey(crate::runtime::host_fabric_runtime::env_type_class),
+        // An enum constant.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_fabric_runtime::ENV_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricEntrypointContainer,
+        tag: "fepc",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_fabric_runtime::entrypoint_container_types,
+        },
+        // A new container per entry on every call.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricPayloadTypes,
+        tag: "fpt",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_fabric_runtime::payload_types_types,
+        },
+        // One of four static constants.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricResourceLoader,
+        tag: "frl",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_fabric_runtime::resource_loader_types,
+        },
+        // One per `PackType` (`IMPL_MAP`).
+        canonical: always_canonical,
+        methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::JarObject,
+        tag: "obj",
+        class: ClassRule::FromKey(crate::runtime::jar_object::class_of_key),
+        // `Runtime::new_object` numbers every allocation once.
+        canonical: always_canonical,
+        methods: &crate::runtime::jar_object::JAR_OBJECT,
+    },
+    KindInfo {
+        kind: HostKind::Component,
+        tag: "comp",
+        class: ClassRule::FromKey(crate::runtime::host_component::component_class),
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_component::COMPONENT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::DfuPair,
+        tag: "dpair",
+        class: ClassRule::FromKey(crate::runtime::host_codec::pair_class),
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_codec::PAIR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::OpaqueCodec,
+        tag: "ocdc",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_codec::opaque_codec_types,
+        },
+        // A static field's codec is one object; a method result's key is its
+        // declared type alone, and two such handles prove nothing.
+        canonical: crate::runtime::host_codec::opaque_canonical,
+        methods: &crate::runtime::host_codec::OPAQUE_CODEC_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ModelledCodec,
+        tag: "mcdc",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_codec::modelled_codec_types,
+        },
+        // One node, one object.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ReflectType,
+        tag: "rtyp",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_reflect_type::type_types,
+        },
+        // Built afresh by every reflective call.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_reflect_type::TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AnnotatedType,
+        tag: "rann",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_reflect_type::annotated_types,
+        },
+        // Built afresh by every reflective call.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_reflect_type::ANNOTATED_METHODS,
+    },
+    KindInfo {
         kind: HostKind::FormattingStyle,
         tag: "gfmt",
         class: ClassRule::FromKey(crate::runtime::host_gson::style_class),
@@ -1528,10 +1705,10 @@ impl HostKind {
 impl HostRef {
     /// A handle with `key` as it is (a number, a name). A key that holds
     /// values is built with [`Self::of_values`].
-    pub(crate) fn new(kind: HostKind, key: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn new(kind: HostKind, key: impl Into<String>) -> Self {
         Self {
             kind,
-            key: key.into(),
+            key: Arc::new(key.into()),
             origin: NEXT_ORIGIN.fetch_add(1, AtomicOrdering::Relaxed),
         }
     }
@@ -1565,6 +1742,11 @@ impl HostRef {
     }
 
     pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// [`Self::key`] as the `&String` a text reader takes.
+    pub(crate) fn key_text(&self) -> &String {
         &self.key
     }
 

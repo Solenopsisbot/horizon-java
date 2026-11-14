@@ -9,13 +9,13 @@
 //! interface counted, any other class a proved `false`.
 //!
 //! **Key** (`HostRef::of_values`): `[serial, type]`, the serial minted per allocation (each `of`
-//! is a new object: one key, one object) and `type` the runtime's `Type` value for the token,
-//! still a text marker (a class name or a `type/` generic marker, #156 P10c's family). P10c must
-//! key it as its handle instead.
+//! is a new object: one key, one object) and `type` the token's `Type` value itself: a class
+//! marker or #156 P10c's type handle (`host_reflect_type.rs`), never its text. `getType()` hands
+//! that very value back, as Guava's `runtimeType` field does.
 //!
 //! **Object methods** (`TypeToken`'s own): `equals` is `runtimeType.equals(that.runtimeType)`:
-//! exact for one token, and for two whose types are both plain classes (equal exactly when the
-//! class is); counted otherwise, since a generic marker may spell one type two ways.
+//! the JDK's structural `Type.equals` (`host_reflect_type::nodes_equal`): exact where it can
+//! compare, counted where it cannot (a variable whose declaration is unknown...).
 //! `hashCode` is `runtimeType.hashCode()`, an identity hash for a class: counted (main answered
 //! the marker text's hash). `toString` is `Types.toString(runtimeType)`, the type's name.
 
@@ -36,32 +36,32 @@ const SUPERTYPES: [&str; 4] = [
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(0);
 
-/// A new token of the type `inner` (`TypeToken.of`).
-pub(crate) fn token(inner: &str) -> Value {
+/// A new token of the type `inner` (`TypeToken.of`): a class marker or a type handle.
+pub(crate) fn token(inner: &Value) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::TypeToken,
         &[
             Value::Long(NEXT_TOKEN.fetch_add(1, Ordering::Relaxed) as i64),
-            Value::Ref(Some(inner.to_owned())),
+            inner.clone(),
         ],
     ))
 }
 
-/// The type a token handle holds, `None` for any other value.
-pub(crate) fn token_type(value: &Value) -> Option<String> {
+/// The `Type` a token handle holds, `None` for any other value.
+pub(crate) fn token_type(value: &Value) -> Option<Value> {
     let Value::Host(handle) = value else {
         return None;
     };
     handle_type(handle)
 }
 
-fn handle_type(handle: &HostRef) -> Option<String> {
+fn handle_type(handle: &HostRef) -> Option<Value> {
     if handle.kind() != HostKind::TypeToken {
         return None;
     }
-    match handle.values()?.as_slice() {
-        [_, Value::Ref(Some(inner))] => Some(inner.clone()),
-        _ => None,
+    match <[Value; 2]>::try_from(handle.values()?) {
+        Ok([_, inner]) => Some(inner),
+        Err(_) => None,
     }
 }
 
@@ -69,26 +69,21 @@ pub(crate) fn token_class(_: &str) -> &str {
     SIMPLE_TYPE_TOKEN
 }
 
-/// Whether a type marker is a plain class (no generic structure).
-fn plain_class(inner: &str) -> bool {
-    crate::decode_generic_type(inner).is_none()
+/// `runtimeType.equals(that.runtimeType)`: the JDK's structural equality of the two types,
+/// `None` where it cannot be told.
+pub(crate) fn types_equal(a: &Value, b: &Value) -> Option<bool> {
+    let (a, b) = (
+        crate::host_reflect_type::type_node(a)?,
+        crate::host_reflect_type::type_node(b)?,
+    );
+    crate::host_reflect_type::nodes_equal(&a, &b)
 }
 
-/// `TypeToken.equals` between two types: equal markers are one type; two plain classes are
-/// different types when their names differ; anything else is unknown.
-pub(crate) fn types_equal(a: &str, b: &str) -> Option<bool> {
-    if a == b {
-        return Some(true);
-    }
-    (plain_class(a) && plain_class(b)).then_some(false)
-}
-
-/// `Types.toString(type)`: a class's name, a generic type as Java prints it.
-pub(crate) fn type_text(inner: &str) -> String {
-    crate::decode_generic_type(inner).map_or_else(
-        || crate::class_type_display(inner),
-        |node| crate::generic_type_display(&node),
-    )
+/// `Types.toString(type)`: a class's name, a generic type as the JDK prints it.
+pub(crate) fn type_text(inner: &Value) -> Option<String> {
+    Some(crate::generic_type_display(
+        &crate::host_reflect_type::type_node(inner)?,
+    ))
 }
 
 fn class_instance_of(class: &str, wanted: &str, hierarchy: &dyn ClassHierarchy) -> Option<bool> {
@@ -129,7 +124,7 @@ fn token_equals(
 }
 
 pub(crate) const TOKEN_METHODS: Methods = Methods {
-    to_string: |handle, _| Ok(handle_type(handle).map(|inner| type_text(&inner))),
+    to_string: |handle, _| Ok(handle_type(handle).and_then(|inner| type_text(&inner))),
     hash_code: |_, _| Ok(None),
     equals: token_equals,
     instance_of: |_, wanted, hierarchy| class_instance_of(SIMPLE_TYPE_TOKEN, wanted, hierarchy),

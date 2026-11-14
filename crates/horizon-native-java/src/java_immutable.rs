@@ -117,10 +117,7 @@ impl StdHost {
 
     /// The elements a collection argument holds, parsed.
     fn elements(&self, value: &Value) -> Result<Vec<Value>, NativeError> {
-        crate::host_collection_values(self, value)?
-            .iter()
-            .map(|item| crate::parse_collection_value(item))
-            .collect()
+        crate::host_collection_values(self, value)
     }
 
     /// The unmodifiable factories, or `None` for any other static call.
@@ -246,9 +243,9 @@ impl StdHost {
     }
 
     /// The elements a view reads: its source's current ones.
-    pub(crate) fn view_values(&self, marker: &str) -> Option<Vec<String>> {
+    pub(crate) fn view_values(&self, marker: &str) -> Option<Vec<Value>> {
         let source = self.unmodifiable_collections.get(marker)?.as_ref()?;
-        let source = Value::Ref(Some(source.clone()));
+        let source = crate::jar_object::stored_value(source);
         self.mutable_values(&source)
             .or_else(|| crate::collection_values(&source).ok())
     }
@@ -274,7 +271,7 @@ impl StdHost {
         if (r.name.as_str(), r.descriptor.as_str()) != ("equals", "(Ljava/lang/Object;)Z") {
             return None;
         }
-        let receiver = Value::Ref(Some(marker.to_owned()));
+        let receiver = crate::jar_object::stored_value(marker);
         let mine = self.elements(&receiver).ok()?;
         let Ok(theirs) = self.elements(args.first()?) else {
             return Some(Ok(Value::Int(0)));

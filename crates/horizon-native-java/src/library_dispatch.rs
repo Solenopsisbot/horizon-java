@@ -478,18 +478,31 @@ impl<H: Host> Runtime<'_, H> {
     pub(super) fn library_instance_of(&self, value: &Value, wanted: &str) -> bool {
         // A host handle answers by its kind's row (`host_ref.rs`); an unknown
         // answer is `instance_of_is_guess`'s to count.
+        // A handle answers by its kind's row; an object's "yes" is its
+        // class's chain (a Mixin-added interface, a JDK supertype), and any
+        // other answer goes on to the object paths below.
         if let Value::Host(handle) = value {
-            return handle.instance_of(wanted, self) == Some(true);
+            let row = handle.instance_of(wanted, self) == Some(true);
+            if row || !crate::jar_object::is_object_handle(handle) {
+                return row;
+            }
         }
         // Every array is a handle: no other value is one, however spelled.
         if wanted.starts_with('[') {
             return false;
         }
+        // A `String` spelling an object's key is a `String`, nothing else.
+        if let Value::Ref(Some(text)) = value
+            && crate::jar_object::spells_key(value)
+        {
+            return crate::value_class::string_instance_of(text, wanted);
+        }
         unboxed_instance_of(value, wanted)
             || expect_ref(value).is_some_and(|marker| {
                 self.proxy_instance_of(marker, wanted)
-                    || crate::value_class::string_instance_of(marker, wanted)
-                    || crate::gson_tree::instance_of(marker, wanted)
+                    || matches!(value, Value::Ref(_))
+                        && crate::value_class::string_instance_of(marker, wanted)
+                    || crate::gson_tree::instance_of(value, wanted)
             })
     }
 
@@ -497,15 +510,15 @@ impl<H: Host> Runtime<'_, H> {
     /// applies.
     pub(super) fn value_instance_of(&self, value: &Value, wanted: &str) -> bool {
         self.library_instance_of(value, wanted)
-            || expect_ref(value).is_some_and(|marker| {
-                self.live_stream_instance_of(marker, wanted) == Some(true)
-                    || self.object_is_instance_of(marker, wanted)
-                    || self.host.host_instance_of(marker, wanted)
-                    || crate::jdk_model::platform_instance_of(marker, wanted)
-                    || generic_type_instance_of(marker, wanted)
-                    || (wanted == "java/lang/Class"
-                        && class_marker_like(marker, self.classes, &self.linked))
-            })
+            || !crate::jar_object::spells_key(value)
+                && expect_ref(value).is_some_and(|marker| {
+                    self.live_stream_instance_of(marker, wanted) == Some(true)
+                        || self.object_is_instance_of(marker, wanted)
+                        || self.host.host_instance_of(marker, wanted)
+                        || crate::jdk_model::platform_instance_of(marker, wanted)
+                        || (wanted == "java/lang/Class"
+                            && class_marker_like(marker, self.classes, &self.linked))
+                })
     }
 
     /// `Class.isInstance(value)` and `Class.cast(value)` with the
@@ -530,11 +543,44 @@ impl<H: Host> Runtime<'_, H> {
         };
         let value = args.first().cloned().unwrap_or(Value::Ref(None));
         let is_null = matches!(value, Value::Ref(None));
+        // A `String` (plain text, or text spelling an object's key): a final
+        // class whose supertypes are known, so both answer exactly, and a
+        // failed `cast` throws Java's `Cannot cast java.lang.String to X`.
+        if let Value::Ref(Some(text)) = &value
+            && crate::value_class::is_plain_string(text)
+        {
+            let instance = wanted == "java/lang/Object"
+                || crate::value_class::string_instance_of(text, &wanted);
+            if r.name == "isInstance" {
+                return Ok(Some(Value::Int(i32::from(instance))));
+            }
+            if instance {
+                return Ok(Some(value));
+            }
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/ClassCastException".into(),
+                message: Some(format!(
+                    "Cannot cast java.lang.String to {}",
+                    wanted.replace('/', ".")
+                )),
+                frame: None,
+            });
+        }
         // A primitive class has no instances; `int.class.isInstance(1)` is
         // false on the JVM too. A host handle answers by its kind's row, an
         // unknown answer counted (`checkcast.rs`).
         let instance = match &value {
-            Value::Host(handle) => self.handle_instance_of(handle, &wanted)?,
+            Value::Host(handle) if !crate::jar_object::is_object_handle(handle) => {
+                self.handle_instance_of(handle, &wanted)?
+            }
+            // An object of a JDK class against a JDK type: Java 25's table, or
+            // counted when the class is outside it (`checkcast.rs`).
+            Value::Host(handle)
+                if !self.value_instance_of(&value, &wanted)
+                    && self.jdk_object_instance_of(&value, &wanted).is_some() =>
+            {
+                self.handle_instance_of(handle, &wanted)?
+            }
             _ => {
                 !is_null
                     && !PRIMITIVE_CLASSES.contains(&wanted.as_str())
@@ -822,13 +868,13 @@ impl<H: Host> Runtime<'_, H> {
             }
             wrapped = next;
         }
-        let Value::Ref(Some(_)) = wrapped else {
+        if wrapped == Value::Ref(None) {
             return Err(NativeError::UncaughtException {
                 class: "java/lang/NullPointerException".into(),
                 message: None,
                 frame: None,
             });
-        };
+        }
         let inner = MethodRef {
             owner: "java/io/InputStream".into(),
             name: r.name.clone(),
@@ -1074,10 +1120,7 @@ impl<H: Host> Runtime<'_, H> {
         let Ok(items) = runtime_collection_values(&*self.host, receiver) else {
             return Ok(None);
         };
-        let values = items
-            .iter()
-            .map(|item| parse_collection_value(item))
-            .collect::<Result<Vec<_>, _>>()?;
+        let values = items;
         // `toArray(IntFunction)` is `toArray(generator.apply(0))`
         // (`Collection`'s default): the generated array names the class.
         let target = match r.descriptor.as_str() {

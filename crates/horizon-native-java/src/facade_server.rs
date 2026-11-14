@@ -516,6 +516,59 @@ const EVENT_LOOPS: &[&str] = &[
 ];
 
 impl<H: crate::Host> crate::Runtime<'_, H> {
+    /// `CommandSourceStack.sendSuccess(supplier, broadcast)` on the running
+    /// command's source: vanilla calls `supplier.get()` inside the call, and
+    /// only when the feedback goes somewhere (`StdHost::brigadier_feedback_calls_supplier`),
+    /// so the supplier runs now, or not at all, and its component is sent as
+    /// it is then. `None` for any other call.
+    fn invoke_send_success(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "net/minecraft/commands/CommandSourceStack"
+            || r.name != "sendSuccess"
+            || r.descriptor != "(Ljava/util/function/Supplier;Z)V"
+        {
+            return Ok(None);
+        }
+        let (Some(source), [supplier, broadcast]) = (receiver, args) else {
+            return Ok(None);
+        };
+        let broadcast = matches!(broadcast, Value::Int(flag) if *flag != 0);
+        match self.host.feedback_calls_supplier(source, broadcast) {
+            None => Ok(None),
+            Some(None) => self.host.unknown_operand_call(r).map(Some),
+            Some(Some(false)) => Ok(Some(Value::Void)),
+            Some(Some(true)) => {
+                let component = match self.invoke_callback(supplier, &[])? {
+                    Some(component) => component,
+                    None => {
+                        let get = MethodRef {
+                            owner: "java/util/function/Supplier".into(),
+                            name: "get".into(),
+                            descriptor: "()Ljava/lang/Object;".into(),
+                        };
+                        match self.dispatch_owner(&get, 0xb9, Some(supplier)) {
+                            Some((owner, true)) => self.invoke(
+                                &owner,
+                                &get.name,
+                                &get.descriptor,
+                                Some(supplier.clone()),
+                                &[],
+                            )?,
+                            _ => return self.host.unknown_operand_call(r).map(Some),
+                        }
+                    }
+                };
+                self.host.send_feedback(r, &component, broadcast).map(Some)
+            }
+        }
+    }
+}
+
+impl<H: crate::Host> crate::Runtime<'_, H> {
     /// Server-façade calls that run jar code, which the host cannot do: a
     /// saved-data type's constructor (`facade_saved_data.rs`) and a
     /// runnable handed to the server's event loop. `None` for every other
@@ -527,6 +580,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         if let Some(value) = self.invoke_saved_data(r, receiver, args)? {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.invoke_send_success(r, receiver, args)? {
             return Ok(Some(value));
         }
         // Chat components with style and arguments (`facade_text.rs`).

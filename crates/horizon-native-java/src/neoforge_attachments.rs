@@ -721,13 +721,15 @@ impl<H: Host> Runtime<'_, H> {
                 if spec.serializable() {
                     return Err(illegal_state("Serializer already set"));
                 }
-                let codec = expect_ref(&arg(0)).cloned().unwrap_or_default();
-                spec.serializer = if state.codecs.is_map_codec(&codec) {
-                    Serializer::MapCodec { codec, predicate }
-                } else {
-                    Serializer::Unmodelled(format!(
-                        "a MapCodec not built from CompoundTag.CODEC, flatXmap and fieldOf ({codec})"
-                    ))
+                let codec = crate::host_codec::modelled_codec_key(&arg(0)).map(str::to_owned);
+                spec.serializer = match codec {
+                    Some(codec) if state.codecs.is_map_codec(&codec) => {
+                        Serializer::MapCodec { codec, predicate }
+                    }
+                    _ => Serializer::Unmodelled(format!(
+                        "a MapCodec not built from CompoundTag.CODEC, flatXmap and fieldOf ({})",
+                        crate::value_text(&arg(0))
+                    )),
                 };
             }
             ("copyOnDeath", "()Lnet/neoforged/neoforge/attachment/AttachmentType$Builder;") => {

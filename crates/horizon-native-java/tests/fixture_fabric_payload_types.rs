@@ -7,7 +7,7 @@
 #[path = "support/scratch.rs"]
 mod scratch;
 
-use horizon_native_java::{NativeJar, StdHost, Value, dispatch_payload_frame};
+use horizon_native_java::{HostKind, NativeJar, StdHost, Value, dispatch_payload_frame};
 use std::{collections::BTreeMap, fs, io::Write, path::Path, process::Command};
 use zip::write::SimpleFileOptions;
 
@@ -189,7 +189,11 @@ fn payload_type_registry_records_direction_type_and_codec() {
         .iter()
         .find(|row| row.direction == "playToClient")
         .expect("clientbound play row");
-    assert!(matches!(sync.codec, Value::Ref(Some(_))), "{sync:?}");
+    // The codec object the jar built (`class#n`).
+    assert!(
+        matches!(&sync.codec, Value::Host(handle) if handle.kind() == HostKind::JarObject),
+        "{sync:?}"
+    );
     assert!(matches!(sync.handler, Value::Ref(Some(_))), "{sync:?}");
     let hello = rows
         .iter()

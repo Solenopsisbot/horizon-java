@@ -308,19 +308,10 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
             "net/fabricmc/fabric/api/resource/v1/ResourceLoader",
             "get",
             "(Lnet/minecraft/server/packs/PackType;)Lnet/fabricmc/fabric/api/resource/v1/ResourceLoader;",
-        ) => {
-            let kind = args
-                .first()
-                .map(expect_string)
-                .unwrap_or("SERVER_DATA")
-                .rsplit('/')
-                .next()
-                .unwrap_or("SERVER_DATA")
-                .to_owned();
-            Some(Ok(Value::Ref(Some(format!(
-                "fabric-resource-loader/{kind}"
-            )))))
-        }
+        ) => args
+            .first()
+            .and_then(crate::host_fabric_runtime::resource_loader)
+            .map(Ok),
         _ => None,
     }
 }
@@ -385,11 +376,7 @@ pub(crate) fn instance_call(
     {
         return logger_call(r, &name);
     }
-    let marker = expect_ref(receiver)?;
-    if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
-        return charset_call(r, canonical, args);
-    }
-    if let Some(kind) = marker.strip_prefix("fabric-resource-loader/") {
+    if crate::host_fabric_runtime::is_resource_loader(receiver) {
         return match (r.name.as_str(), r.descriptor.as_str()) {
             // Registration is kept nowhere: with no resource reload modelled,
             // there is no event to fire the listener from, and pretending one
@@ -402,11 +389,12 @@ pub(crate) fn instance_call(
                 "addListenerOrdering",
                 "(Lnet/minecraft/resources/Identifier;Lnet/minecraft/resources/Identifier;)V",
             ) => Some(Ok(Value::Void)),
-            ("toString", "()Ljava/lang/String;") => {
-                Some(Ok(Value::Ref(Some(format!("ResourceLoader[{kind}]")))))
-            }
             _ => None,
         };
+    }
+    let marker = expect_ref(receiver)?;
+    if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
+        return charset_call(r, canonical, args);
     }
     if let Some(pattern) = marker.strip_prefix("regex-pattern/") {
         return match (r.name.as_str(), r.descriptor.as_str()) {
@@ -642,12 +630,7 @@ impl crate::StdHost {
         if matches!(source, Value::Ref(None)) {
             return Some(Err(null_pointer()));
         }
-        let values = match super::host_collection_values(self, source).and_then(|items| {
-            items
-                .iter()
-                .map(|item| super::parse_collection_value(item))
-                .collect::<Result<Vec<_>, _>>()
-        }) {
+        let values = match super::host_collection_values(self, source) {
             Ok(values) => values,
             Err(error) => return Some(Err(error)),
         };
@@ -838,9 +821,6 @@ fn platform_supertypes(class: &str) -> &'static [&'static str] {
 /// `marker instanceof wanted` for a boxed value or a JDK collection object
 /// (`java/util/ArrayList#3`, `java/util/LinkedHashMap#neutral0`).
 pub(crate) fn platform_instance_of(marker: &str, wanted: &str) -> bool {
-    if crate::reflect_generic::annotated_type_instance_of(marker, wanted) {
-        return true;
-    }
     let Some((class, _)) = marker.split_once('#') else {
         return false;
     };
@@ -964,12 +944,6 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                     return Ok(None);
                 };
                 items
-                    .iter()
-                    .map(|item| {
-                        crate::parse_collection_value(item)
-                            .unwrap_or_else(|_| Value::Ref(Some(item.clone())))
-                    })
-                    .collect()
             }
             _ => return Ok(None),
         };
@@ -979,12 +953,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let mut parts = Vec::with_capacity(elements.len());
         for value in std::iter::once(separator).chain(&elements) {
             let text = match value {
-                Value::Ref(Some(marker)) if self.string_builders.contains_key(marker) => {
-                    self.string_builders[marker].clone()
+                value if self.builder_text(value).is_some() => {
+                    self.builder_text(value).cloned().unwrap_or_default()
                 }
-                Value::Ref(Some(_))
-                    if crate::jar_object::packaged_object_class(value).is_some() =>
-                {
+                value if crate::jar_object::packaged_object_class(value).is_some() => {
                     match self.runtime_value_of(value, "java/lang/String", "join")? {
                         Some(Value::Ref(Some(text))) => text,
                         Some(_) => "null".to_owned(),
@@ -1070,7 +1042,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let Some(marker) = expect_ref(receiver) else {
             return Ok(None);
         };
-        let text = match self.string_builders.get(marker) {
+        let text = match self.builder_text(receiver) {
             Some(text) => text.clone(),
             None if crate::jar_object::packaged_object_class(receiver).is_some() => {
                 return Ok(None);

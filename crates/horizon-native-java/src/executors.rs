@@ -199,15 +199,21 @@ fn state_marker<H: Host>(
 ) -> Result<Option<String>, NativeError> {
     match receiver {
         None | Some(Value::Ref(None)) => Err(native_npe()),
-        // Only an object `new` built keeps its state under its text: a jar's
+        // Only an object `new` built keeps its state under its key: a jar's
         // own (`AbstractExecutorService` subclass) or a JDK executor a jar
-        // constructs (`new ThreadPoolExecutor(..)`). A `String` spelled like
-        // a pool's marker (`"executor#0"`) is no executor, so its call goes
-        // on to be counted, never reaching a real pool's state. (Allocation
-        // markers are still text until #156 P12b.)
-        Some(Value::Ref(Some(marker))) => Ok(crate::jar_object::key_class(marker)
-            .is_some_and(|class| rt.class(class).is_some() || JDK_EXECUTORS.contains(&class))
-            .then(|| marker.clone())),
+        // constructs (`new ThreadPoolExecutor(..)`), a handle either way
+        // (#156 P12b). A `String` spelled like one's key
+        // (`"java/util/concurrent/ThreadPoolExecutor#0"`) is no executor, so
+        // its call goes on to be counted, never reaching a real pool's state.
+        Some(value) if crate::jar_object::is_object(value) => {
+            Ok(crate::jar_object::object_class(value)
+                .is_some_and(|class| rt.class(class).is_some() || JDK_EXECUTORS.contains(&class))
+                .then(|| {
+                    crate::jar_object::object_key(value)
+                        .unwrap_or_default()
+                        .to_owned()
+                }))
+        }
         Some(value) => Ok(host_executors::allocation(value, kind).map(str::to_owned)),
     }
 }
@@ -295,7 +301,7 @@ pub(super) fn invoke_thread_factory<H: Host>(
     rt: &mut Runtime<'_, H>,
     r: &MethodRef,
     receiver: Option<&Value>,
-    _args: &[Value],
+    args: &[Value],
 ) -> Option<Value> {
     if receiver
         .and_then(|factory| host_executors::allocation(factory, HostKind::ThreadFactory))
@@ -305,7 +311,64 @@ pub(super) fn invoke_thread_factory<H: Host>(
     {
         return None;
     }
-    Some(rt.new_object("java/lang/Thread"))
+    let thread = rt.new_object("java/lang/Thread");
+    if let Some(key) = crate::jar_object::object_key(&thread) {
+        let target = args.first().cloned().unwrap_or(Value::Ref(None));
+        rt.fields.insert(format!("{key}|{THREAD_TARGET}"), target);
+    }
+    Some(thread)
+}
+
+/// The synthetic field a constructed thread keeps its `Runnable` under
+/// (`null` when it was given none).
+const THREAD_TARGET: &str = "#threadTarget";
+
+/// `Thread`'s own members the runtime answers on a thread the jar constructed
+/// (#194): `<init>` keeps the `Runnable` target (the host records the rest,
+/// `parked_threads.rs`), and `Thread.run()` is Java 25's
+/// `if (target != null) target.run()`. A jar subclass's override of `run()` is
+/// dispatched to before this; a thread whose constructor did not run here is
+/// left to the host, which counts it.
+pub(super) fn invoke_thread<H: Host>(
+    rt: &mut Runtime<'_, H>,
+    r: &MethodRef,
+    receiver: Option<&Value>,
+    args: &[Value],
+) -> Result<Option<Value>, NativeError> {
+    let Some(key) = receiver
+        .and_then(crate::jar_object::object_key)
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
+    let field = format!("{key}|{THREAD_TARGET}");
+    // `Thread`'s own members; `run()` also when the call names a jar subclass
+    // that inherits it (`carrier.run()` on `class Carrier extends Thread`):
+    // only a thread constructed here keeps a target.
+    if r.owner != "java/lang/Thread" && !(r.name == "run" && rt.fields.contains_key(&field)) {
+        return Ok(None);
+    }
+    match (r.name.as_str(), r.descriptor.as_str()) {
+        ("<init>", descriptor) => {
+            let target = crate::descriptor_arguments(descriptor)
+                .iter()
+                .position(|parameter| parameter == "Ljava/lang/Runnable;")
+                .and_then(|index| args.get(index))
+                .cloned()
+                .unwrap_or(Value::Ref(None));
+            rt.fields.insert(field, target);
+            Ok(None)
+        }
+        ("run", "()V") => match rt.fields.get(&field).cloned() {
+            Some(Value::Ref(None)) => Ok(Some(Value::Void)),
+            Some(target) => {
+                run_runnable(rt, &target)?;
+                Ok(Some(Value::Void))
+            }
+            None => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }
 
 fn invoke_future<H: Host>(
