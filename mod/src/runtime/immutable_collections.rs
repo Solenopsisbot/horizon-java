@@ -135,19 +135,26 @@ impl<H: Host> Runtime<'_, H> {
                 Probe::Empty(slot) => table.slots[slot] = Some(collection_item_marker(key)),
                 Probe::Unknown => {
                     // An identity-hashed element: kept, at a slot no run can
-                    // name. A handle beside an equal-keyed one is a duplicate
-                    // only as the proved same object; maybe one object, maybe
-                    // two, is counted (never merged by key).
+                    // name. A handle is a duplicate of a stored handle its
+                    // row's `equals` matches (equal objects hash alike, so
+                    // Java's probe meets it): the proved same object for an
+                    // identity kind, equal contents for a value kind (a chat
+                    // component). An unknown answer is counted, never merged
+                    // by key.
                     if let Value::Host(handle) = key {
-                        let marker = collection_item_marker(key);
-                        for stored in table.slots.iter().flatten() {
-                            if *stored != marker {
+                        let stored_handles: Vec<Value> = table
+                            .slots
+                            .iter()
+                            .flatten()
+                            .map(|stored| parse_collection_value(stored))
+                            .collect::<Result<_, _>>()?;
+                        for other in stored_handles {
+                            if !matches!(other, Value::Host(_)) {
                                 continue;
                             }
-                            let Value::Host(other) = parse_collection_value(stored)? else {
-                                continue;
-                            };
-                            match handle.same_object(&other) {
+                            match handle
+                                .equals(&other, &mut object_methods::RuntimeNested::new(self))?
+                            {
                                 Some(true) => {
                                     let text =
                                         self.value_of_text(key, "Ljava/lang/Object;", "", "of")?;
