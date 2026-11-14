@@ -480,3 +480,72 @@ public final class Main {
         "{refused:?}"
     );
 }
+
+/// A refused plugin's session is rolled back (statics, heap), and the
+/// entrypoint runs after it. Its objects must get numbers no earlier object
+/// had: the session may have reached higher ones, and a rollback that
+/// rewound the counter made the entrypoint's first new object look like one
+/// a collection had freed (#226 review). Nothing is collected while a
+/// session may still be rolled back. Java 25 runs `Main`'s body to
+/// `0123…39`.
+#[test]
+fn a_rolled_back_session_never_hands_its_object_numbers_out_again() {
+    let broken = "package demo;
+public class BrokenPlugin extends Base {
+    static final class Junk { int a; Junk(int a) { this.a = a; } }
+    public void onLoad(String mixinPackage) {
+        for (int i = 0; i < 3000; i++) { Junk j = new Junk(i); j.a++; }
+        Unmodelled.call();
+    }
+}
+";
+    let base = "package demo;
+import java.util.*;
+import org.objectweb.asm.tree.ClassNode;
+import org.spongepowered.asm.mixin.extensibility.*;
+public abstract class Base implements IMixinConfigPlugin {
+    public String getRefMapperConfig() { return null; }
+    public boolean shouldApplyMixin(String target, String mixin) { return true; }
+    public void acceptTargets(Set<String> mine, Set<String> others) {}
+    public List<String> getMixins() { return null; }
+    public void preApply(String t, ClassNode n, String m, IMixinInfo i) {}
+    public void postApply(String t, ClassNode n, String m, IMixinInfo i) {}
+}
+";
+    let main = "package demo;
+public final class Main {
+    public static String RESULT;
+    static final class Cell { int v; String name; Cell(int v, String n) { this.v = v; this.name = n; } }
+    public void onInitialize() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 40; i++) { Cell c = new Cell(i, \"c\"); sb.append(c.v); }
+        RESULT = sb.toString();
+    }
+}
+";
+    let fixture = Fixture::build(
+        "rollback-numbers",
+        &[("demo/Base.java", base), ("demo/BrokenPlugin.java", broken)],
+        &[(
+            "broken.mixins.json",
+            "demo.BrokenPlugin",
+            &["StoppedDeclined"],
+        )],
+        main,
+    );
+    let jar = fixture.load();
+    let mut host = jar.seed_host(
+        StdHost::new()
+            .with_environment_type("SERVER")
+            .with_strict_unknown_host_calls(),
+    );
+    use horizon_native_java::Host as _;
+    jar.execute("demo.Main", None, "main", &mut host).unwrap();
+    let result = host
+        .persistent_class_state()
+        .0
+        .get("demo/Main#RESULTLjava/lang/String;")
+        .cloned();
+    let java: String = (0..40).map(|i| i.to_string()).collect();
+    assert_eq!(result, Some(horizon_native_java::Value::Ref(Some(java))));
+}

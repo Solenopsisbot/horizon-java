@@ -134,23 +134,40 @@ impl StdHost {
         self.posted_events.truncate(mark.posted_events);
     }
 
-    /// Keep `value`, and whatever it reaches, alive across heap collections:
-    /// a value the embedder holds between invocations, which the jar's own
-    /// roots may no longer name. Every value crossing the public API (an
-    /// invocation's receiver, arguments and result, a game hook's answer)
-    /// is pinned already; [`Self::unpin`] releases one the embedder dropped.
-    pub fn pin(&mut self, value: &Value) {
+    /// Keep `value`, and whatever it reaches, alive across heap collections
+    /// until [`Self::release`]: a value the embedder holds from one
+    /// invocation to a later one, which the jar's own roots may no longer
+    /// name (#226 review).
+    ///
+    /// An invocation's receiver, arguments and result are kept through that
+    /// invocation's own store without this (collections run only when a
+    /// top-level call ends, so they are safe while the embedder has them in
+    /// hand); one the embedder keeps across later calls must be retained.
+    /// Holds are counted: two `retain`s need two `release`s.
+    pub fn retain(&mut self, value: &Value) {
         if let Some(text) = pin_text(value) {
-            self.pinned.insert(text.to_owned());
+            *self.retained.entry(text.to_owned()).or_default() += 1;
         }
     }
 
-    /// Release a value [`Self::pin`] kept: collections may free it (and what
-    /// only it reached) once the jar no longer reaches it either.
-    pub fn unpin(&mut self, value: &Value) {
-        if let Some(text) = pin_text(value) {
-            self.pinned.remove(text);
+    /// Drop one [`Self::retain`] hold on `value`: once none is left,
+    /// collections may free it (and what only it reached) when the jar no
+    /// longer reaches it either.
+    pub fn release(&mut self, value: &Value) {
+        if let Some(text) = pin_text(value)
+            && let Some(holds) = self.retained.get_mut(text)
+        {
+            *holds -= 1;
+            if *holds == 0 {
+                self.retained.remove(text);
+            }
         }
+    }
+
+    /// How many distinct values [`Self::retain`] keeps: an embedder that
+    /// never releases what it retains shows here as a count that only grows.
+    pub fn retained_count(&self) -> usize {
+        self.retained.len()
     }
 
     pub(crate) fn take_resident_heap(&mut self) -> JavaHeap {
@@ -174,8 +191,9 @@ impl StdHost {
         // bound is on the live set: garbage between collections may exceed
         // it, which keeps a live set near the bound from collecting on
         // every store (#226 review).
-        if entries > heap.live.saturating_mul(2).saturating_add(COLLECT_SLACK)
-            || over_count_guard(&heap)
+        if !self.collections_paused
+            && (entries > heap.live.saturating_mul(2).saturating_add(COLLECT_SLACK)
+                || over_count_guard(&heap))
         {
             collect(&mut heap, self, &roots);
             heap.live = heap_entries(&heap, self);
@@ -213,9 +231,8 @@ impl StdHost {
         for field in self.persistent_static_fields.values() {
             value(field, out);
         }
-        // What crossed the public API (`StdHost::pin`): an embedder may
-        // hold it between invocations.
-        out.extend(self.pinned.iter().map(String::as_str));
+        // What the embedder holds between invocations (`StdHost::retain`).
+        out.extend(self.retained.keys().map(String::as_str));
         // Only the logged calls the log is read back for (event
         // registrations, `events::read_back_call`). Every other call is
         // history: a constructor's receiver is the new object itself, and
@@ -403,7 +420,7 @@ fn collectable(marker: &str) -> bool {
     crate::jar_object::collection_key(marker).is_some()
 }
 
-/// The text a pin keeps: a handle's key, or a reference's text that may name
+/// The text a hold keeps: a handle's key, or a reference's text that may name
 /// an object (a marker, a callback's captures). A plain `String` holds no
 /// object, and pinning each would grow the set by every string an
 /// invocation answered.
@@ -754,15 +771,19 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// [`Self::persist_resident_heap`] for an invocation the embedder made:
-    /// its receiver, arguments and result cross to the embedder, which may
-    /// hold them between invocations, so they are pinned (`StdHost::pin`)
-    /// before the store collects (#226 review).
+    /// its receiver, arguments and result are in the embedder's hands, so
+    /// they are roots of this store's collection (#226 review). Later stores
+    /// keep them only if the jar reaches them or the embedder retained them
+    /// (`StdHost::retain`), so a call made every tick keeps nothing.
     pub(crate) fn persist_resident_heap_crossing(
         &mut self,
         crossing: &[Value],
     ) -> Result<(), NativeError> {
-        self.host.pin_values(crossing);
-        self.persist_resident_heap()
+        let roots = crossing
+            .iter()
+            .filter_map(|value| value_text(value).map(str::to_owned))
+            .collect();
+        self.persist_resident_heap_with(roots)
     }
 
     /// [`Self::persist_resident_heap`] with texts the caller keeps outside the

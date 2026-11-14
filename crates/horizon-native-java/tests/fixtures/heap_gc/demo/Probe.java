@@ -108,6 +108,19 @@ public final class Probe {
         return (Supplier<String>) c::show;
     }
 
+    /** A `StringBuilder` the caller gets back. */
+    public static Object makeBuilder() {
+        garbage(3000);
+        StringBuilder sb = new StringBuilder();
+        sb.append("abc");
+        return sb;
+    }
+
+    public static String readBuilder(Object o) {
+        StringBuilder sb = (StringBuilder) o;
+        return sb.toString() + sb.length();
+    }
+
     public static String read(Object o) {
         return ((Cell) o).show();
     }

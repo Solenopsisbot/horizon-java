@@ -233,11 +233,22 @@ impl NativeJar {
             if let Some(heap) = &heap {
                 let _ = host.store_persistent_heap(heap.clone());
             }
+            // Nothing is collected while the session may still be rolled
+            // back: a collection would free (and prune host rows of) objects
+            // the restored statics name again (#226 review). The session is
+            // bounded by its budget.
+            host.pause_collections(true);
             let session = self.plugin_session(config, plugin, index, &configs, side, host);
+            host.pause_collections(false);
             if session.report.refused.is_some() {
                 let _ = host.store_persistent_class_state(fields, initialized);
-                if let Some(heap) = heap {
-                    let _ = host.take_persistent_heap();
+                if let Some(mut heap) = heap {
+                    // Keys are never handed out twice: the restored heap goes
+                    // on from the numbers the session reached.
+                    if let Some(session_heap) = host.take_persistent_heap() {
+                        heap.next_object = heap.next_object.max(session_heap.next_object);
+                        heap.next_array = heap.next_array.max(session_heap.next_array);
+                    }
                     let _ = host.store_persistent_heap(heap);
                 }
             }

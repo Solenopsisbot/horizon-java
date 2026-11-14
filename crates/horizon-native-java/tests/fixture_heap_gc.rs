@@ -75,10 +75,13 @@ fn read(
     }
 }
 
-/// The caller holds a returned object, a held one, a returned `ArrayList`
+/// The caller gets an object back past 3,000 garbage objects and reads it
+/// in the next call (Java 25: `40returned`): an invocation's result is a
+/// root of its own store. It retains a held object, a returned `ArrayList`
 /// and a returned bound method reference across the run (Java 25:
-/// `40returned`, then [`HELD`]); one it released is collected, and reading
-/// it fails by name rather than answering `0null` (#226 review).
+/// [`HELD`]). An object and a `StringBuilder` it did not retain are
+/// collected, and reading either fails by name rather than answering `0null`
+/// (#226 review).
 ///
 /// `setup` keeps one object through a static, a `HashMap`, an `Object[]` and
 /// an `IdentityHashMap` key, a chain behind it reached only through its
@@ -101,12 +104,16 @@ fn objects_nothing_reaches_are_collected_and_kept_ones_stay_identical() {
         read(&fixture, &mut host, "read", &returned),
         Ok("40returned".into())
     );
+    // Kept across later calls: retained, as an embedder holding them must.
     let held = make(&fixture, &mut host, "makeHeld");
     let list = make(&fixture, &mut host, "makeReturnedList");
     let lambda = make(&fixture, &mut host, "makeReturnedLambda");
-    // One the caller released: collected, and then never read as defaults.
-    let released = make(&fixture, &mut host, "makeHeld");
-    host.unpin(&released);
+    for kept in [&held, &list, &lambda] {
+        host.retain(kept);
+    }
+    // Not retained: collected, and then never read as defaults.
+    let dropped = make(&fixture, &mut host, "makeHeld");
+    let builder = make(&fixture, &mut host, "makeBuilder");
     let start = std::time::Instant::now();
     let mut most = 0;
     for _ in 0..TICKS {
@@ -126,14 +133,33 @@ fn objects_nothing_reaches_are_collected_and_kept_ones_stay_identical() {
     .map(Result::unwrap)
     .join("|");
     assert_eq!(held, HELD);
-    let freed = read(&fixture, &mut host, "read", &released).unwrap_err();
-    assert!(
-        freed.contains("was collected while still reachable"),
-        "a collected object read as {freed}"
-    );
+    for (method, value) in [("read", &dropped), ("readBuilder", &builder)] {
+        let freed = read(&fixture, &mut host, method, value).unwrap_err();
+        assert!(
+            freed.contains("was collected while still reachable"),
+            "{method}: a collected object read as {freed}"
+        );
+    }
+    assert_eq!(host.retained_count(), 3);
     assert_eq!(call(&fixture, &mut host, "check"), ORACLE);
     assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());
     // Two objects with three fields each per callback: without collection
     // the heap would hold about 600,000 fields.
     assert!(most < 5_000, "{most} live fields: nothing was collected");
+}
+
+/// An embedder calling a method that returns a new object on every call, and
+/// keeping none of them, keeps nothing: each result is a root only of its
+/// own call's store (#226 review: pinned for ever, they reached the bound).
+#[test]
+fn results_the_embedder_does_not_retain_are_collected() {
+    let fixture = javac_fixture::Fixture::build("heap-gc-results", &[("demo/Probe.java", PROBE)]);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let mut most = 0;
+    for _ in 0..20_000 {
+        make(&fixture, &mut host, "makeHeld");
+        most = most.max(host.resident_heap().instance_fields());
+    }
+    assert_eq!(host.retained_count(), 0);
+    assert!(most < 5_000, "{most} live fields: results stayed rooted");
 }

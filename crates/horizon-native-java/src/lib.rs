@@ -2687,16 +2687,15 @@ pub trait Host {
         Ok(())
     }
 
-    /// Keep values that crossed to the embedder (an invocation's receiver,
-    /// arguments and result) alive across the resident heap's collections
-    /// (`StdHost::pin`). A host without a resident heap keeps everything.
-    fn pin_values(&mut self, _values: &[Value]) {}
-
     /// Whether the resident heap collected the object `key` (`class#n`), so
     /// a read of its fields is a missed root, never its fields' defaults.
     fn object_collected(&self, _key: &str) -> bool {
         false
     }
+
+    /// Hold off (`true`) or allow again the resident heap's collections:
+    /// while a run may still be rolled back, nothing is freed.
+    fn pause_collections(&mut self, _paused: bool) {}
 
     /// Run a jar method somewhere else before its body runs.
     ///
@@ -3077,11 +3076,14 @@ pub struct StdHost {
     /// fields, arrays, builders and enum identity of what its statics and
     /// registered callbacks still reach.
     heap: heap::JavaHeap,
-    /// Values the embedder may hold between invocations (`StdHost::pin`):
-    /// roots of the heap's collections.
-    pinned: BTreeSet<String>,
+    /// Values the embedder holds between invocations (`StdHost::retain`),
+    /// with their hold counts: roots of the heap's collections.
+    retained: BTreeMap<String, usize>,
     /// The jar objects collections freed (`heap::FreedObjects`).
     freed_objects: heap::FreedObjects,
+    /// No collection runs (`Host::pause_collections`): a run that may be
+    /// rolled back is in progress.
+    collections_paused: bool,
     /// Bounded diagnostics for calls outside the modeled host surface.
     unknown_host_calls: BTreeMap<String, usize>,
     /// The threads the jar made and started (`parked_threads.rs`).
@@ -3217,8 +3219,9 @@ impl StdHost {
             persistent_static_fields: BTreeMap::new(),
             persistent_initialized_classes: std::collections::BTreeSet::new(),
             heap: heap::JavaHeap::default(),
-            pinned: BTreeSet::new(),
+            retained: BTreeMap::new(),
             freed_objects: heap::FreedObjects::default(),
+            collections_paused: false,
             unknown_host_calls: BTreeMap::new(),
             threads: parked_threads::ThreadTable::default(),
             strict_unknown_host_calls: false,
@@ -10075,14 +10078,12 @@ impl Host for StdHost {
         self.store_resident_heap(heap)
     }
 
-    fn pin_values(&mut self, values: &[Value]) {
-        for value in values {
-            self.pin(value);
-        }
-    }
-
     fn object_collected(&self, key: &str) -> bool {
         self.freed_objects.holds_key(key)
+    }
+
+    fn pause_collections(&mut self, paused: bool) {
+        self.collections_paused = paused;
     }
 }
 
@@ -17053,7 +17054,8 @@ impl NativeJar {
         // callback sees what this one changed (`heap.rs`).
         let resident = runtime.adopt_resident_heap();
         // What the embedder handed over, and below what it gets back: it may
-        // hold either between invocations (`StdHost::pin`).
+        // hold either until this call's store ends (`StdHost::retain` for
+        // longer).
         let mut crossing: Vec<Value> = receiver.iter().chain(args).cloned().collect();
         let result = runtime.invoke(
             &target.owner,
@@ -17212,7 +17214,8 @@ impl NativeJar {
         };
         let resident = runtime.adopt_resident_heap();
         // What the embedder handed over, and below what it gets back: it may
-        // hold either between invocations (`StdHost::pin`).
+        // hold either until this call's store ends (`StdHost::retain` for
+        // longer).
         let mut crossing: Vec<Value> = receiver.iter().chain(args).cloned().collect();
         let result = runtime.invoke(&class_name, method, descriptor, receiver, args);
         // A failed run keeps what it wrote before failing, as a JVM would.
