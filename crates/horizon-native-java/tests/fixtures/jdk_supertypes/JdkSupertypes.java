@@ -1,14 +1,28 @@
+import java.lang.module.ModuleDescriptor;
 import java.lang.module.ModuleFinder;
 import java.lang.reflect.Modifier;
+import java.net.URI;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
  * Prints `src/jdk_supertypes_25.txt`: for each class the runtime's JDK hierarchy answers for, its
  * flags, every supertype (getSuperclass/getInterfaces, transitively, the class itself left out),
- * its direct superclass (`-` for none) and its direct interfaces in declaration order,
- * then every package of every system module and the module that holds it (a JDK class's
- * supertypes can only come from these).
+ * its direct superclass (`-` for none), its direct interfaces in declaration order, and which of
+ * `equals`/`hashCode`/`toString`/`compareTo` its objects run some JDK class's own body for
+ * rather than `Object`'s (`-` for none, and for an interface); then, per package, that last fact
+ * for every public class of every package the boot layer's system modules export to everyone (a
+ * jar can extend or build no other JDK class), as `Simple=flags` (`e`quals, `h`ashCode,
+ * `t`oString, `c`ompareTo, `-` for none); then every package of every system module and the
+ * module that holds it (a JDK class's supertypes can only come from these).
  * Run on OpenJDK 25: `java JdkSupertypes.java > ../../../src/jdk_supertypes_25.txt`.
  */
 public final class JdkSupertypes {
@@ -148,12 +162,31 @@ public final class JdkSupertypes {
     "java.util.concurrent.Callable", "java.lang.Iterable", "java.util.Collection",
     "java.util.List", "java.util.Set", "java.util.Map", "java.util.Queue", "java.util.Deque",
     "java.lang.Comparable", "java.lang.Appendable",
+    // The siblings of the classes above whose Object members the #217 fixture reads: the other
+    // adders and accumulators, and the other checksums.
+    "java.util.concurrent.atomic.DoubleAdder", "java.util.concurrent.atomic.LongAccumulator",
+    "java.util.concurrent.atomic.DoubleAccumulator", "java.util.zip.Adler32",
+    "java.util.zip.CRC32C",
   };
 
   static void walk(Class<?> c, Set<String> out) {
     if (c == null || !out.add(c.getName().replace('.', '/'))) return;
     walk(c.getSuperclass(), out);
     for (Class<?> i : c.getInterfaces()) walk(i, out);
+  }
+
+  /**
+   * The members of `equals`, `hashCode`, `toString` and `compareTo` that `c` declares or inherits
+   * from a superclass other than `Object` (`compareTo`: any `Comparable`), comma-separated.
+   */
+  static String overrides(Class<?> c) throws Exception {
+    if (c.isInterface()) return "-";
+    java.util.List<String> own = new java.util.ArrayList<>();
+    if (c.getMethod("equals", Object.class).getDeclaringClass() != Object.class) own.add("equals");
+    if (c.getMethod("hashCode").getDeclaringClass() != Object.class) own.add("hashCode");
+    if (c.getMethod("toString").getDeclaringClass() != Object.class) own.add("toString");
+    if (Comparable.class.isAssignableFrom(c)) own.add("compareTo");
+    return own.isEmpty() ? "-" : String.join(",", own);
   }
 
   public static void main(String[] args) throws Exception {
@@ -172,7 +205,38 @@ public final class JdkSupertypes {
       Set<String> declared = new java.util.LinkedHashSet<>();
       for (Class<?> i : c.getInterfaces()) declared.add(i.getName().replace('.', '/'));
       System.out.println("class\t" + c.getName().replace('.', '/') + "\t" + flags + "\t" + String.join(" ", supers)
-          + "\t" + direct + "\t" + String.join(" ", declared));
+          + "\t" + direct + "\t" + String.join(" ", declared) + "\t" + overrides(c));
+    }
+    // Every public class of every unqualified export of the boot layer's system modules: what
+    // each runs of Object's members (#217). A class a jar extends or builds is one of these.
+    Map<String, List<String>> objects = new TreeMap<>();
+    FileSystem jrt = FileSystems.getFileSystem(URI.create("jrt:/"));
+    for (Module module : ModuleLayer.boot().modules()) {
+      if (ModuleFinder.ofSystem().find(module.getName()).isEmpty()) continue;
+      for (ModuleDescriptor.Exports export : module.getDescriptor().exports()) {
+        if (export.isQualified()) continue;
+        Path dir = jrt.getPath("/modules", module.getName(), export.source().replace('.', '/'));
+        if (!Files.isDirectory(dir)) continue;
+        List<String> entries = objects.computeIfAbsent(export.source().replace('.', '/'), k -> new ArrayList<>());
+        try (var files = Files.list(dir)) {
+          for (Path file : (Iterable<Path>) files.sorted()::iterator) {
+            String simple = file.getFileName().toString();
+            if (!simple.endsWith(".class") || simple.contains("-info.")) continue;
+            simple = simple.substring(0, simple.length() - ".class".length());
+            Class<?> c = Class.forName(module, export.source() + "." + simple);
+            if (c == null || c.isInterface() || !Modifier.isPublic(c.getModifiers())) continue;
+            String own = overrides(c);
+            StringBuilder flags = new StringBuilder();
+            for (String member : own.split(",")) if (!member.equals("-")) flags.append(member.charAt(0));
+            entries.add(simple + "=" + (flags.length() == 0 ? "-" : flags));
+          }
+        }
+      }
+    }
+    for (var entry : objects.entrySet()) {
+      if (!entry.getValue().isEmpty()) {
+        System.out.println("object\t" + entry.getKey() + "\t" + String.join(" ", entry.getValue()));
+      }
     }
     // Each system package with the module that holds it (`Class.getModule()` of a JDK class).
     Set<String> packages = new TreeSet<>();
