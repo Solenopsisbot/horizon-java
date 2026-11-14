@@ -396,15 +396,19 @@ impl CommandText {
         }
     }
 
-    /// The text of a component marker (`component/literal/...`).
+    /// The text of a component (`host_component.rs`), or a string's own text.
     fn of(value: &Value) -> Self {
-        let raw = expect_string(value);
-        if let Some(key) = raw.strip_prefix("component/translatable/") {
-            return Self::key(key);
+        if let Some(key) = crate::host_component::bare_key(value) {
+            return Self::key(&key);
         }
-        if raw.starts_with(crate::facade_text::JSON_PREFIX)
-            && let Some(json) = crate::facade_text::to_json(value)
-        {
+        if let Some(text) = crate::host_component::bare_literal(value) {
+            return Self {
+                text,
+                translate: false,
+                component: None,
+            };
+        }
+        if let Some(json) = crate::facade_text::to_json(value) {
             return Self {
                 text: crate::facade_text::plain(&json),
                 translate: false,
@@ -412,10 +416,7 @@ impl CommandText {
             };
         }
         Self {
-            text: raw
-                .strip_prefix("component/literal/")
-                .unwrap_or(raw)
-                .to_owned(),
+            text: expect_string(value).to_owned(),
             translate: false,
             component: None,
         }
@@ -1431,6 +1432,17 @@ impl StdHost {
                 _ => None,
             };
         }
+        // Styling a command's message with a style object: the text stays, the
+        // style is dropped (`withStyle(ChatFormatting)`/`withColor(int)` are
+        // `facade_text.rs`'s).
+        if matches!(
+            r.owner.as_str(),
+            "net/minecraft/network/chat/MutableComponent" | "net/minecraft/network/chat/Component"
+        ) && crate::host_component::is_component(receiver)
+            && matches!(name, "withStyle" | "withColor" | "setStyle")
+        {
+            return Some(Ok(receiver.clone()));
+        }
         if let Value::Host(_) = receiver {
             // What a model does not answer is an unmodelled call: counted
             // (and refused by a strict host, as a running command's is),
@@ -1497,16 +1509,6 @@ impl StdHost {
             };
             let value = coords.split(',').nth(at)?.parse().ok()?;
             return Some(Ok(Value::Int(value)));
-        }
-        // Styling a command's message: the text stays, the style is dropped
-        // (component markers carry text only).
-        if matches!(
-            r.owner.as_str(),
-            "net/minecraft/network/chat/MutableComponent" | "net/minecraft/network/chat/Component"
-        ) && text.starts_with("component/")
-            && matches!(name, "withStyle" | "withColor" | "setStyle")
-        {
-            return Some(Ok(receiver.clone()));
         }
         None
     }

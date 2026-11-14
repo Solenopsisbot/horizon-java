@@ -67,6 +67,7 @@ mod heap;
 mod hook_shapes;
 mod host_array;
 mod host_attachment;
+mod host_component;
 mod host_brigadier;
 mod host_config;
 mod host_entry;
@@ -9758,21 +9759,20 @@ fn identifier_value(namespace: &str, path: &str) -> Value {
     host_ids::identifier(namespace, path)
 }
 
+/// A new `literal` or `translatable` component (`host_component.rs`).
 fn component_value(kind: &str, text: &str) -> Value {
-    Value::Ref(Some(format!("component/{kind}/{text}")))
+    match kind {
+        "translatable" => host_component::translatable(text),
+        _ => host_component::literal(text),
+    }
 }
 
+/// A component's text (`getString()`), or a string argument's own text.
 fn component_text(value: &Value) -> String {
-    let raw = expect_ref(value).map_or("", |value| value.as_str());
-    // A styled component or one with arguments (`facade_text.rs`).
-    if raw.starts_with(facade_text::JSON_PREFIX) {
-        return facade_text::to_json(value)
-            .map_or_else(String::new, |json| facade_text::plain(&json));
+    match facade_text::to_json(value) {
+        Some(json) => facade_text::plain(&json),
+        None => expect_ref(value).cloned().unwrap_or_default(),
     }
-    raw.strip_prefix("component/literal/")
-        .or_else(|| raw.strip_prefix("component/translatable/"))
-        .unwrap_or(raw)
-        .to_owned()
 }
 
 fn identifier_parse(value: &str) -> Value {

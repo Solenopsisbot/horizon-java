@@ -39,9 +39,8 @@
 //! before this surface existed; `player` and `level` read `null` then, which
 //! is true while the client is starting.
 //!
-//! Chat components are text markers (`component/literal/<text>` or
-//! `component/translatable/<key>`); a style (`withStyle`, `withColor`,
-//! `Style`) is kept as legacy codes inside that text (`client_text.rs`).
+//! Chat components are host handles of their vanilla JSON (`host_component.rs`); a
+//! style object (`withStyle(Style)`, `Style`) is kept as legacy codes (`client_text.rs`).
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -578,17 +577,17 @@ fn cut(text: &str) -> String {
 /// A drawn or sent text argument: a `String` or a component marker (a
 /// `FormattedCharSequence` is the component it came from). `None` for null.
 fn text_arg(value: &Value) -> Option<ClientText> {
-    let text = expect_ref(value)?;
-    if let Some(literal) = text.strip_prefix("component/literal/") {
-        return Some(ClientText::Literal(cut(literal)));
+    if let Some(literal) = crate::host_component::bare_literal(value) {
+        return Some(ClientText::Literal(cut(&literal)));
     }
-    if let Some(key) = text.strip_prefix("component/translatable/") {
-        return Some(ClientText::Translatable(cut(key)));
+    if let Some(key) = crate::host_component::bare_key(value) {
+        return Some(ClientText::Translatable(cut(&key)));
     }
-    if let Some(json) = text.strip_prefix(crate::facade_text::JSON_PREFIX) {
+    if let Some(json) = crate::facade_text::to_json(value) {
         // Bounded by the component model itself (64 KiB).
-        return Some(ClientText::Json(json.to_owned()));
+        return Some(ClientText::Json(json.to_string()));
     }
+    let text = expect_ref(value)?;
     Some(ClientText::Literal(cut(text)))
 }
 
@@ -1139,6 +1138,11 @@ impl StdHost {
         if let Some(event) = crate::host_game_event::fired_event(receiver) {
             return self.client_event_call(event.name(), r, args);
         }
+        // A component's style calls (`client_text.rs`); an unlisted member keeps
+        // the host's own component model.
+        if crate::host_component::is_component(receiver) {
+            return text::component_call(receiver, r, args).map(Ok);
+        }
         let text = expect_ref(receiver)?.clone();
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
         // `NonNullList` is a `List`: the inventory's lists answer as one.
@@ -1210,17 +1214,14 @@ impl StdHost {
         // Components, styles, text colours and formatting constants
         // (`client_text.rs`); an unlisted component member keeps the host's
         // own component model.
-        if text.starts_with("component/")
-            || text.starts_with("client/style/")
+        if text.starts_with("client/style/")
             || text.starts_with("client/text-color/")
             || text.starts_with("enum/net/minecraft/ChatFormatting/")
         {
             if let Some(value) = text::text_call(&text, r, args) {
                 return Some(Ok(value));
             }
-            if text.starts_with("component/")
-                || text.starts_with("enum/")
-                || self.client.frame.is_none()
+            if text.starts_with("enum/") || self.client.frame.is_none()
             {
                 return None;
             }

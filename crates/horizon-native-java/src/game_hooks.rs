@@ -657,7 +657,7 @@ fn is_host_value_class(owner: &str) -> bool {
 
 /// A value marker the bootstrap host built and models the members of.
 fn is_host_value_marker(marker: &str) -> bool {
-    marker.starts_with("component/") || marker.starts_with("uuid/")
+    marker.starts_with("uuid/")
 }
 
 fn uuid_text_of(uuid: u128) -> String {
@@ -779,7 +779,7 @@ impl<H: Host> GameHookHost<'_, H> {
                     object
                         .name
                         .as_deref()
-                        .map(|name| Value::Ref(Some(format!("component/literal/{name}")))),
+                        .map(crate::host_component::literal),
                 )
             }
             ("sendSystemMessage", "(Lnet/minecraft/network/chat/Component;)V") if player => {

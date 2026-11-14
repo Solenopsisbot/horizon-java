@@ -350,6 +350,9 @@ pub enum HostKind {
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
+    /// A chat component (`MutableComponent`): key its vanilla JSON, keys sorted
+    /// (`host_component.rs`).
+    Component,
 }
 
 /// How a kind's Java class follows from its key.
@@ -533,6 +536,10 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::AttachmentBuilder,
         &crate::host_attachment::BUILDER_CLASS_SIDE,
+    ),
+    (
+        HostKind::Component,
+        &crate::host_component::COMPONENT_CLASS_SIDE,
     ),
 ];
 
@@ -1363,6 +1370,14 @@ const KINDS: &[KindInfo] = &[
         // builder, two equal keys from two runs prove nothing.
         canonical: never_canonical,
         methods: &crate::stream_pipeline::STREAM_BUILDER,
+    },
+    KindInfo {
+        kind: HostKind::Component,
+        tag: "comp",
+        class: ClassRule::FromKey(crate::host_component::component_class),
+        // Every factory call makes a new object.
+        canonical: never_canonical,
+        methods: &crate::host_component::COMPONENT_METHODS,
     },
 ];
 
