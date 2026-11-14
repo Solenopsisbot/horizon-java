@@ -629,7 +629,7 @@ public abstract class Base implements IMixinConfigPlugin {
 }
 
 /// What Java 25 printed for `DAZZLECONF_MAIN`'s `onInitialize` (`RESULT`).
-const DAZZLECONF_JAVA: &str = "0[];2[java.lang.Integer=ints, java.lang.Long=longs]";
+const DAZZLECONF_JAVA: &str = "0[];1[java.lang.Integer=ints]";
 
 /// DazzleConf's `ConfigurationOptions.Builder` → `ValueSerialiserMap.of(Map)`.
 const DAZZLECONF_MAIN: &str = r#"package demo;
@@ -653,11 +653,6 @@ public final class Main {
         public String toString() { return "ints"; }
     }
 
-    static final class Longs implements Serialiser<Long> {
-        public Class<Long> getTargetClass() { return Long.class; }
-        public String toString() { return "longs"; }
-    }
-
     /** `ValueSerialiserMap.of(Map)`. */
     static String of(Map<Class<?>, ? extends Serialiser<?>> serialisers) {
         Map<Class<?>, Serialiser<?>> copy = new HashMap<>(serialisers);
@@ -676,11 +671,11 @@ public final class Main {
     }
 
     public void onInitialize() {
-        // DazzleConf's defaults first (an empty builder), then the jar's own serialisers.
+        // DazzleConf's defaults first (an empty builder), then the jar's own serialiser. One: a `HashMap`
+        // keyed by two `Class`es iterates in identity-hash order, which no run reproduces (counted).
         Map<Class<?>, Serialiser<?>> defaults = new HashMap<>();
         Map<Class<?>, Serialiser<?>> mine = new HashMap<>();
         mine.put(Integer.class, new Ints());
-        mine.put(Long.class, new Longs());
         String result;
         try {
             result = of(defaults) + ";" + of(mine);
