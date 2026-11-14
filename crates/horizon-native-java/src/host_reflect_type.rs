@@ -74,10 +74,12 @@ fn text(value: &str) -> Value {
     Value::Ref(Some(value.to_owned()))
 }
 
-/// The value a type node is: a class's marker, or a `Type` handle.
+/// The value a type node is: a class's `Class` object (#156 P13b1), or a
+/// `Type` handle. A class nested in a handle (a type argument, a bound, an
+/// array's component) is that `Class` too, read back by [`type_node`].
 pub(crate) fn type_value(node: &GenericType) -> Value {
     let values = match node {
-        GenericType::Class(name) => return text(name),
+        GenericType::Class(name) => return crate::host_class::class_value(name),
         GenericType::Parameterized { raw, owner, args } => {
             let mut values = vec![
                 text("P"),

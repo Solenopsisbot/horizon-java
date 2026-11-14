@@ -6689,14 +6689,14 @@ impl Host for StdHost {
             match (r.name.as_str(), r.descriptor.as_str(), field.descriptor) {
                 ("getName", "()Ljava/lang/String;", _) => return Ok(Value::Ref(Some(field.name))),
                 ("getType", "()Ljava/lang/Class;", Some(descriptor)) => {
-                    return Ok(Value::Ref(Some(erased_field_type(&descriptor))));
+                    return Ok(host_class::class_value(&erased_field_type(&descriptor)));
                 }
                 ("getModifiers", "()I", _) => {
                     return Ok(Value::Int(i32::from(field.access.unwrap_or(0))));
                 }
                 // The class whose field table the lookup found it in.
                 ("getDeclaringClass", "()Ljava/lang/Class;", _) => {
-                    return Ok(Value::Ref(Some(field.class)));
+                    return Ok(host_class::class_value(&field.class));
                 }
                 _ => {}
             }
@@ -10331,6 +10331,11 @@ fn bounded_captured_markers(values: &[Value]) -> String {
 fn collection_item_marker(value: &Value) -> String {
     match value {
         Value::Ref(Some(value)) => format!("r{value}"),
+        // A `Class` keys as the class marker it was until #156 P13c
+        // (`host_class.rs`): a collection a jar filled with `X.class` finds
+        // the class a producer not yet moved still answers as text (and a
+        // `String` spelled like it, as before).
+        Value::Host(host) if host.kind() == HostKind::Class => format!("r{}", host.key()),
         // A handle's own text form, unescaped like a reference's
         // (`HostRef::encode`).
         Value::Host(host) => host.encode(),
@@ -12310,7 +12315,7 @@ fn type_descriptor(value: &GenericType) -> Option<String> {
 }
 
 /// Materialize one type node as the value `Field.getGenericType` and friends
-/// hand back. A plain class is the class marker itself, so
+/// hand back. A plain class is its `Class` object, so
 /// `getGenericType() == String.class` and `getRawType() == List.class` hold;
 /// every other shape is a `java.lang.reflect.Type` handle.
 fn generic_type_value(value: &GenericType) -> Value {

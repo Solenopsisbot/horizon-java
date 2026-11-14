@@ -513,7 +513,9 @@ impl<H: Host> Runtime<'_, H> {
             ("getType", "()Ljava/lang/reflect/Type;") => {
                 crate::host_reflect_type::type_from_text(&inner)
             }
-            ("getRawType", "()Ljava/lang/Class;") => Value::Ref(Some(Self::raw_class(&inner))),
+            ("getRawType", "()Ljava/lang/Class;") => {
+                crate::host_class::class_value(&Self::raw_class(&inner))
+            }
             ("wrap", "()Lcom/google/common/reflect/TypeToken;") => {
                 Self::token_value(boxed_class(&inner).unwrap_or(&inner))
             }
