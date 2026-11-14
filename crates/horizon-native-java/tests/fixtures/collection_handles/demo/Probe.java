@@ -101,7 +101,9 @@ public final class Probe {
             + b(List.of() == List.of()) + b(Set.of() == Set.of()) + b(Map.of() == Map.of())
             + b(Collections.emptyList() == Collections.emptyList()) + b(Collections.emptySet() == Collections.emptySet())
             + b(Collections.emptyMap() == Collections.emptyMap()) + b((Object) List.of() == Collections.emptyList())
-            + b(List.of() == Stream.of().toList()) + "|" + ids.size() + ids.get(a) + "|" + equal.size() + equal.get(a);
+            + b(List.of() == Stream.of().toList()) + "|" + ids.size() + ids.get(a) + "|" + equal.size() + equal.get(a)
+            + "|" + b(source.reversed() == source.reversed()) + b(source.reversed().equals(source.reversed()))
+            + name(source.reversed()) + source.reversed();
     }
 
     /** A write to one host-made list never shows in another. */

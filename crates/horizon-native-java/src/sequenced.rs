@@ -219,7 +219,9 @@ impl StdHost {
         let view_marker = format!("{view}#reversed{}", self.reversed_views.len());
         self.reversed_views
             .insert(view_marker.clone(), (marker.to_owned(), modifiable));
-        Some(Value::Ref(Some(view_marker)))
+        // A view of its own (#156 P14c): `list.reversed() == list.reversed()`
+        // is false, as each call makes a new `ReverseOrderListView`.
+        Some(crate::jar_object::collection(view_marker))
     }
 
     /// A member of a reversed view: a mutator maps onto its list, and

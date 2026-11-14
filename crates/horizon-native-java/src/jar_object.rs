@@ -33,11 +33,12 @@
 //!
 //! **Host-made collections** (#156 P14c) are objects too, of
 //! [`HostKind::Collection`]: an unmodelled call's neutral answer, `subList`,
-//! an unmodifiable view, `List.of`. Their keys are the text they used to be,
-//! `<JDK class>#neutral<n>` and `<JDK class>#immutable<n>` ([`collection_key`]),
-//! so the host's tables keep their rows, and they share the object row: the
-//! readers below answer for both kinds alike, as for a jar's own
-//! `new ArrayList()`. A `String` spelling such a key is a `String`.
+//! an unmodifiable view, `List.of`, a reversed view. Their keys are the text
+//! they used to be, `<JDK class>#neutral<n>`, `#immutable<n>` and
+//! `#reversed<n>` ([`collection_key`]), so the host's tables keep their rows,
+//! and they share the object row: the readers below answer for both kinds
+//! alike, as for a jar's own `new ArrayList()`. A `String` spelling such a
+//! key is a `String`.
 
 use crate::Value;
 use crate::host_ref::{HostKind, HostRef, Methods, instance_of_class};
@@ -82,14 +83,16 @@ pub(crate) fn collection(key: String) -> Value {
     Value::Host(HostRef::new(HostKind::Collection, key))
 }
 
-/// A host-made collection's key: `(class, n)` for `<class>#neutral<n>` or
-/// `<class>#immutable<n>`, a JDK class (no `#`, `:`, space, `.`, `,` or
-/// `\\`). The host wrote it; a `String` spelled so is no collection.
+/// A host-made collection's key: `(class, n)` for `<class>#neutral<n>`,
+/// `<class>#immutable<n>` or a reversed view's `<class>#reversed<n>`, a JDK
+/// (or Guava) class with no `#`, `:`, space, `.`, `,` or `\\`. The host
+/// wrote it; a `String` spelled so is no collection.
 pub(crate) fn collection_key(text: &str) -> Option<(&str, &str)> {
     let (class, rest) = text.split_once('#')?;
     let number = rest
         .strip_prefix("neutral")
-        .or_else(|| rest.strip_prefix("immutable"))?;
+        .or_else(|| rest.strip_prefix("immutable"))
+        .or_else(|| rest.strip_prefix("reversed"))?;
     (!class.is_empty()
         && !class.contains([':', ' ', '.', ',', '\\'])
         && !number.is_empty()

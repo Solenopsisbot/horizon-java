@@ -397,9 +397,10 @@ pub enum HostKind {
     /// An `AnnotatedType`: key the type it annotates.
     AnnotatedType,
     /// A collection the host made (an unmodelled call's neutral answer,
-    /// `subList`, `Collections.unmodifiableList`, `List.of`, ...): key
-    /// `<JDK class>#neutral<n>` or `<JDK class>#immutable<n>`, the text it
-    /// used to be (`jar_object.rs`), one key per allocation. An object like a
+    /// `subList`, `Collections.unmodifiableList`, `List.of`, a reversed
+    /// view, ...): key `<JDK class>#neutral<n>`, `#immutable<n>` or
+    /// `#reversed<n>`, the text it used to be (`jar_object.rs`), one key per
+    /// allocation. An object like a
     /// jar's `new ArrayList()` (a [`HostKind::JarObject`]), whose row it
     /// shares.
     Collection,

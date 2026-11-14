@@ -55,7 +55,7 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 ///   `Object.getClass` names (`class_of_value`), including `true`/`false`;
 /// - a host marker `<class>#<kind>`: a `#` after a non-empty,
 ///   separator-free class. An object's key, `<class>#<n>` or a host-made
-///   collection's `<class>#neutral<n>`/`<class>#immutable<n>`, is a handle,
+///   collection's `<class>#neutral<n>`/`#immutable<n>`/`#reversed<n>`, is a handle,
 ///   never text (#156 P12b, P14c), so a text spelled like one is a `String`;
 /// - a callback or comparator: a leading `@`; an array class: a whole
 ///   descriptor (`[I`, `[Ljava/lang/String;`);
@@ -229,6 +229,7 @@ mod tests {
             // Spelled like a host-made collection's key (#156 P14c).
             "java/util/ArrayList#neutral0",
             "java/util/ImmutableCollections$ListN#immutable3",
+            "java/util/ReverseOrderListView$Rand#reversed0",
         ] {
             assert!(is_plain_string(text), "{text:?} should be a string");
         }
