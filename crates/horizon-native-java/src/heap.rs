@@ -134,6 +134,25 @@ impl StdHost {
         self.posted_events.truncate(mark.posted_events);
     }
 
+    /// Keep `value`, and whatever it reaches, alive across heap collections:
+    /// a value the embedder holds between invocations, which the jar's own
+    /// roots may no longer name. Every value crossing the public API (an
+    /// invocation's receiver, arguments and result, a game hook's answer)
+    /// is pinned already; [`Self::unpin`] releases one the embedder dropped.
+    pub fn pin(&mut self, value: &Value) {
+        if let Some(text) = pin_text(value) {
+            self.pinned.insert(text.to_owned());
+        }
+    }
+
+    /// Release a value [`Self::pin`] kept: collections may free it (and what
+    /// only it reached) once the jar no longer reaches it either.
+    pub fn unpin(&mut self, value: &Value) {
+        if let Some(text) = pin_text(value) {
+            self.pinned.remove(text);
+        }
+    }
+
     pub(crate) fn take_resident_heap(&mut self) -> JavaHeap {
         let live = self.heap.live;
         let heap = std::mem::take(&mut self.heap);
@@ -149,8 +168,14 @@ impl StdHost {
         heap.live = self.heap.live;
         let roots = std::mem::take(&mut heap.roots);
         let entries = heap_entries(&heap, self);
+        // Collect once the heap doubled past what the last collection kept
+        // (so a collection's cost is paid once per as many new entries as
+        // live ones), or past twice the bound, whichever comes first. The
+        // bound is on the live set: garbage between collections may exceed
+        // it, which keeps a live set near the bound from collecting on
+        // every store (#226 review).
         if entries > heap.live.saturating_mul(2).saturating_add(COLLECT_SLACK)
-            || over_count_bound(&heap)
+            || over_count_guard(&heap)
         {
             collect(&mut heap, self, &roots);
             heap.live = heap_entries(&heap, self);
@@ -161,15 +186,15 @@ impl StdHost {
                     "the jar's Java objects hold about {bytes} bytes after collection, over the resident bound of {MAX_RESIDENT_BYTES}"
                 )));
             }
+            if over_count_bound(&self.heap) {
+                return Err(NativeError::Metadata(format!(
+                    "the jar's Java objects keep {} fields and {} arrays after collection, over the resident bound of {MAX_RESIDENT_FIELDS} fields or {MAX_RESIDENT_ARRAYS} arrays",
+                    self.heap.fields.len(),
+                    self.heap.arrays.len()
+                )));
+            }
         } else {
             self.heap = heap;
-        }
-        if over_count_bound(&self.heap) {
-            return Err(NativeError::Metadata(format!(
-                "the jar's Java objects keep {} fields and {} arrays after collection, over the resident bound of {MAX_RESIDENT_FIELDS} fields or {MAX_RESIDENT_ARRAYS} arrays",
-                self.heap.fields.len(),
-                self.heap.arrays.len()
-            )));
         }
         Ok(())
     }
@@ -188,6 +213,9 @@ impl StdHost {
         for field in self.persistent_static_fields.values() {
             value(field, out);
         }
+        // What crossed the public API (`StdHost::pin`): an embedder may
+        // hold it between invocations.
+        out.extend(self.pinned.iter().map(String::as_str));
         // Only the logged calls the log is read back for (event
         // registrations, `events::read_back_call`). Every other call is
         // history: a constructor's receiver is the new object itself, and
@@ -372,6 +400,17 @@ fn collectable(marker: &str) -> bool {
     })
 }
 
+/// The text a pin keeps: a handle's key, or a reference's text that may name
+/// an object (a marker, a callback's captures). A plain `String` holds no
+/// object, and pinning each would grow the set by every string an
+/// invocation answered.
+fn pin_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::Ref(Some(text)) if crate::value_class::is_plain_string(text) => None,
+        other => value_text(other),
+    }
+}
+
 /// The receiver of an instance-field key (`receiver|owner#name desc`).
 fn field_receiver(key: &str) -> &str {
     key.rsplit_once('|').map_or(key, |(receiver, _)| receiver)
@@ -391,14 +430,64 @@ fn over_count_bound(heap: &JavaHeap) -> bool {
     heap.fields.len() > MAX_RESIDENT_FIELDS || heap.arrays.len() > MAX_RESIDENT_ARRAYS
 }
 
+/// Twice the bound: a heap this large collects whatever its live baseline.
+fn over_count_guard(heap: &JavaHeap) -> bool {
+    heap.fields.len() > 2 * MAX_RESIDENT_FIELDS || heap.arrays.len() > 2 * MAX_RESIDENT_ARRAYS
+}
+
+/// The allocation numbers of the jar objects collections freed, as ranges
+/// (`start → end`, exclusive). Keys are never reused, so a freed number stays
+/// freed; the gaps between ranges are live objects, so the ranges are as many
+/// as the live set at most. A field of a freed object read or written later
+/// is a missed root, which the runtime refuses by name instead of answering
+/// the field's default (`Runtime::live_field_key`, #226 review).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct FreedObjects {
+    ranges: BTreeMap<usize, usize>,
+}
+
+impl FreedObjects {
+    pub(crate) fn contains(&self, n: usize) -> bool {
+        self.ranges
+            .range(..=n)
+            .next_back()
+            .is_some_and(|(_, &end)| n < end)
+    }
+
+    fn insert(&mut self, n: usize) {
+        if self.contains(n) {
+            return;
+        }
+        let (mut start, mut end) = (n, n + 1);
+        if let Some((&before, &before_end)) = self.ranges.range(..n).next_back()
+            && before_end == n
+        {
+            start = before;
+            self.ranges.remove(&before);
+        }
+        if let Some(after_end) = self.ranges.remove(&(n + 1)) {
+            end = after_end;
+        }
+        self.ranges.insert(start, end);
+    }
+
+    /// Whether the object `key` (`class#n`) was collected.
+    pub(crate) fn holds_key(&self, key: &str) -> bool {
+        crate::jar_object::parse_key(key)
+            .and_then(|(_, number)| number.parse().ok())
+            .is_some_and(|n| self.contains(n))
+    }
+}
+
 fn value_bytes(value: &Value) -> usize {
     value_text(value).map_or(8, str::len)
 }
 
 /// The text a value names other objects through: a reference's, or a host
 /// handle's key (an `Optional`'s key is its held value's marker, so a jar
-/// object held only by an optional stays reachable).
-fn value_text(value: &Value) -> Option<&str> {
+/// object held only by an optional stays reachable). Every root walker uses
+/// this, never a projection that drops a kind (#226 review).
+pub(crate) fn value_text(value: &Value) -> Option<&str> {
     match value {
         Value::Ref(Some(text)) => Some(text),
         Value::Host(host) => Some(host.key()),
@@ -546,6 +635,9 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             collectable.scan(text, &mut pending);
         }
     }
+    // The objects any per-object table keeps a row for: only these need
+    // `keyed_texts`'s lookups as the trace reaches them.
+    let keyed_keys: HashSet<String> = host.keyed_table_keys().map(str::to_owned).collect();
     let mut reached = BTreeSet::new();
     let mut found = Vec::new();
     while let Some(marker) = pending.pop() {
@@ -583,14 +675,26 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             }
         }
         // What the host keeps for this object in a table keyed by it.
-        let mut keyed = Vec::new();
-        host.keyed_texts(&marker, &mut keyed);
-        for text in &keyed {
-            collectable.scan(text, &mut found);
+        if keyed_keys.contains(&marker) {
+            let mut keyed = Vec::new();
+            host.keyed_texts(&marker, &mut keyed);
+            for text in &keyed {
+                collectable.scan(text, &mut found);
+            }
         }
         pending.extend(found.drain(..).filter(|next| !reached.contains(next)));
     }
     let keep = |marker: &str| !collectable.markers.contains(marker) || reached.contains(marker);
+    // A freed jar object's number, so a later read of its fields is refused
+    // by name rather than answered with defaults.
+    for marker in &collectable.markers {
+        if !reached.contains(marker)
+            && let Some((_, number)) = crate::jar_object::parse_key(marker)
+            && let Ok(number) = number.parse()
+        {
+            host.freed_objects.insert(number);
+        }
+    }
     heap.fields.retain(|key, _| keep(field_receiver(key)));
     heap.arrays.retain(|key, _| keep(key));
     heap.string_builders.retain(|key, _| keep(key));
@@ -632,6 +736,18 @@ impl<H: Host> Runtime<'_, H> {
     /// answered `true`.
     pub(crate) fn persist_resident_heap(&mut self) -> Result<(), NativeError> {
         self.persist_resident_heap_with(Vec::new())
+    }
+
+    /// [`Self::persist_resident_heap`] for an invocation the embedder made:
+    /// its receiver, arguments and result cross to the embedder, which may
+    /// hold them between invocations, so they are pinned (`StdHost::pin`)
+    /// before the store collects (#226 review).
+    pub(crate) fn persist_resident_heap_crossing(
+        &mut self,
+        crossing: &[Value],
+    ) -> Result<(), NativeError> {
+        self.host.pin_values(crossing);
+        self.persist_resident_heap()
     }
 
     /// [`Self::persist_resident_heap`] with texts the caller keeps outside the

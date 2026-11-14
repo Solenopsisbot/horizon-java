@@ -1209,6 +1209,14 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.store_persistent_heap(heap)
     }
 
+    fn pin_values(&mut self, values: &[Value]) {
+        self.inner.pin_values(values);
+    }
+
+    fn object_collected(&self, key: &str) -> bool {
+        self.inner.object_collected(key)
+    }
+
     fn empty_mutable_collection(&mut self, kind: &str) -> Option<Value> {
         self.inner.empty_mutable_collection(kind)
     }
@@ -1618,11 +1626,25 @@ impl NativeJar {
                 state.fields = game;
             }
             state.arrays.clear();
+            // Every value a game object's field holds, of any kind (an
+            // `Optional` names its object in its key), through the heap's
+            // one root text (#226 review).
             let roots = state
                 .fields
                 .values()
-                .filter_map(|value| crate::runtime::game_object::text(value).cloned())
+                .filter_map(|value| crate::runtime::heap::value_text(value).map(str::to_owned))
                 .collect();
+            // What the firing hands the game: each callback's result and the
+            // value a target returns, which the game may hold.
+            let mut crossing = results.clone();
+            crossing.extend(
+                returned
+                    .as_ref()
+                    .and_then(|returned| returned.as_ref().ok())
+                    .cloned()
+                    .flatten(),
+            );
+            runtime.host.pin_values(&crossing);
             let persistence = runtime.persist_class_state();
             let heap = runtime.persist_resident_heap_with(roots);
             outcome?;
