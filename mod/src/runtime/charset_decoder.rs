@@ -31,7 +31,6 @@ use super::*;
 
 const DECODER: &str = "java/nio/charset/CharsetDecoder";
 const ACTION: &str = "java/nio/charset/CodingErrorAction";
-const ACTION_PREFIX: &str = "coding-error-action/";
 const DECODER_PREFIX: &str = "charset-decoder/UTF-8/";
 
 /// One decoder's settable state: (malformed action, unmappable action,
@@ -52,7 +51,7 @@ fn iae(message: &str) -> NativeError {
 }
 
 fn action(name: &str) -> Value {
-    Value::Ref(Some(format!("{ACTION_PREFIX}{name}")))
+    crate::runtime::host_jdk_constant::coding_error_action(name)
 }
 
 impl StdHost {
@@ -89,12 +88,6 @@ impl StdHost {
             );
             return Some(Ok(Value::Ref(Some(decoder))));
         }
-        if r.owner == ACTION
-            && r.name == "toString"
-            && let Some(name) = marker.strip_prefix(ACTION_PREFIX)
-        {
-            return Some(Ok(Value::Ref(Some(name.to_owned()))));
-        }
         if r.owner != DECODER {
             return None;
         }
@@ -105,8 +98,7 @@ impl StdHost {
                 "onMalformedInput" | "onUnmappableCharacter",
                 "(Ljava/nio/charset/CodingErrorAction;)Ljava/nio/charset/CharsetDecoder;",
             ) => {
-                let Some(name) = expect_ref(&argument())
-                    .and_then(|value| value.strip_prefix(ACTION_PREFIX))
+                let Some(name) = crate::runtime::host_jdk_constant::coding_error_action_name(&argument())
                     .map(str::to_owned)
                 else {
                     return Some(match argument() {

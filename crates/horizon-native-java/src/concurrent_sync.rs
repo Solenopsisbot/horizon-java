@@ -225,7 +225,7 @@ fn to_nanos(unit: Option<&Value>, amount: i64) -> Result<Option<i64>, NativeErro
             "Cannot invoke \"java.util.concurrent.TimeUnit.toNanos(long)\" because \"unit\" is null",
         ));
     }
-    let Some(name) = expect_ref(unit).and_then(|marker| marker.strip_prefix("time-unit/")) else {
+    let Some(name) = crate::host_jdk_constant::time_unit_name(unit) else {
         return Ok(None);
     };
     let factor: i128 = match name {

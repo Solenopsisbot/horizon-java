@@ -86,6 +86,7 @@ mod host_guava;
 mod host_ids;
 mod host_invoke;
 mod host_jdk;
+mod host_jdk_constant;
 mod host_list_iterator;
 mod host_mixin;
 mod host_neoforge_loader;
@@ -4338,8 +4339,7 @@ impl StdHost {
         if r.owner != "java/util/concurrent/TimeUnit" {
             return Ok(None);
         }
-        let Some(unit) = expect_ref(receiver).and_then(|marker| marker.strip_prefix("time-unit/"))
-        else {
+        let Some(unit) = host_jdk_constant::time_unit_name(receiver) else {
             return Ok(None);
         };
         let factor = match unit {
@@ -4960,7 +4960,7 @@ impl Host for StdHost {
                 "NANOSECONDS" | "MICROSECONDS" | "MILLISECONDS" | "SECONDS" | "MINUTES" | "HOURS"
                 | "DAYS",
                 "Ljava/util/concurrent/TimeUnit;",
-            ) => Ok(Value::Ref(Some(format!("time-unit/{}", r.name)))),
+            ) => Ok(host_jdk_constant::time_unit(&r.name)),
             ("java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;") => Ok(boolean_value(true)),
             ("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;") => Ok(boolean_value(false)),
             // The wrapper's integer bounds and sizes. `Long`, `Float` and
@@ -5047,15 +5047,15 @@ impl Host for StdHost {
             ("java/lang/Double", "POSITIVE_INFINITY", "D") => Ok(Value::Float(f64::INFINITY)),
             ("java/lang/Double", "NEGATIVE_INFINITY", "D") => Ok(Value::Float(f64::NEG_INFINITY)),
             ("java/util/Locale", "US", "Ljava/util/Locale;") => {
-                Ok(Value::Ref(Some("locale/US".into())))
+                Ok(host_jdk_constant::locale("en", "US"))
             }
             // `toLowerCase(Locale.ROOT)` is the locale-neutral case mapping a
             // plugin or config reader uses on mod and class names.
             ("java/util/Locale", "ROOT", "Ljava/util/Locale;") => {
-                Ok(Value::Ref(Some("locale/ROOT".into())))
+                Ok(host_jdk_constant::locale("", ""))
             }
             ("java/util/Locale", "ENGLISH", "Ljava/util/Locale;") => {
-                Ok(Value::Ref(Some("locale/ENGLISH".into())))
+                Ok(host_jdk_constant::locale("en", ""))
             }
 
             (
@@ -5198,7 +5198,7 @@ impl Host for StdHost {
                 "(Ljava/util/Locale;)Ljava/text/NumberFormat;",
             ) => {
                 let locale = Self::argument(r, args, 0)?;
-                if !matches!(locale, Value::Ref(Some(marker)) if marker == "locale/US") {
+                if host_jdk_constant::locale_parts(locale) != Some(("en", "US")) {
                     return Err(NativeError::Metadata(
                         "java/text/NumberFormat.getIntegerInstance supports only Locale.US".into(),
                     ));
@@ -6726,17 +6726,15 @@ impl Host for StdHost {
             };
             return Ok(Value::Ref(Some(format_integer_us(value))));
         }
-        if r.owner == "java/util/Locale" {
-            let marker = expect_ref(receiver)
-                .ok_or_else(|| NativeError::Metadata("malformed Locale marker".into()))?;
-            // (language, country, language tag, toString), as the JDK answers
-            // `Locale.US`, `Locale.ROOT` and `Locale.ENGLISH`.
-            let (language, country, tag, text) = match marker.as_str() {
-                "locale/US" => ("en", "US", "en-US", "en_US"),
-                "locale/ROOT" => ("", "", "und", ""),
-                "locale/ENGLISH" => ("en", "", "en", "en"),
-                _ => return Err(NativeError::Metadata("unsupported Locale marker".into())),
+        // `equals`/`hashCode` are the kind's row (`host_jdk_constant.rs`).
+        if r.owner == "java/util/Locale" && !matches!(r.name.as_str(), "equals" | "hashCode") {
+            // A `Locale` constant (`host_jdk_constant.rs`): its language and country.
+            let Some((language, country)) = host_jdk_constant::locale_parts(receiver) else {
+                return Err(NativeError::Metadata("unsupported Locale value".into()));
             };
+            let tag = jdk_locale_thread::language_tag(language, country);
+            let text = jdk_locale_thread::locale_text(language, country);
+            let (tag, text) = (tag.as_str(), text.as_str());
             let text_value = |text: &str| Ok(Value::Ref(Some(text.to_owned())));
             return match (r.name.as_str(), r.descriptor.as_str()) {
                 ("getLanguage", "()Ljava/lang/String;") => text_value(language),
@@ -11007,9 +11005,6 @@ fn value_text(value: &Value) -> String {
             // A marker whose Java `toString` is its payload: string
             // concatenation goes through `String.valueOf`, not the modelled
             // instance method.
-            if let Some(value) = value.strip_prefix("regex-pattern/") {
-                return value.to_owned();
-            }
             // A stream never prints its marker (`stream_pipeline.rs`).
             if stream_pipeline::is_stream_marker(value) {
                 return stream_pipeline::STREAM_TEXT.into();
@@ -39300,7 +39295,7 @@ mandatory = true
                 descriptor: "Ljava/util/Locale;".into(),
             })
             .unwrap();
-        assert_eq!(locale, Value::Ref(Some("locale/US".into())));
+        assert_eq!(host_jdk_constant::locale_parts(&locale), Some(("en", "US")));
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -39349,7 +39344,7 @@ mandatory = true
                     name: "getIntegerInstance".into(),
                     descriptor: "(Ljava/util/Locale;)Ljava/text/NumberFormat;".into(),
                 },
-                &[Value::Ref(Some("locale/FRANCE".into()))],
+                &[host_jdk_constant::locale("fr", "FR")],
             )
             .unwrap_err();
         assert!(error.to_string().contains("only Locale.US"));

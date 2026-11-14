@@ -399,6 +399,18 @@ pub enum HostKind {
     ReflectType,
     /// An `AnnotatedType`: key the type it annotates.
     AnnotatedType,
+    /// A `TimeUnit` constant: key its name (`host_jdk_constant.rs`).
+    TimeUnit,
+    /// A `CodingErrorAction` constant: key its name.
+    CodingErrorAction,
+    /// A `Character.UnicodeBlock` constant: key its name.
+    UnicodeBlock,
+    /// A `Locale` constant: key `<language>_<country>`.
+    Locale,
+    /// A compiled `Pattern`: key `[serial, text]`.
+    RegexPattern,
+    /// NeoForge's `ArtifactVersion`: key its text.
+    ArtifactVersion,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1589,6 +1601,56 @@ const KINDS: &[KindInfo] = &[
         // Built afresh by every reflective call.
         canonical: never_canonical,
         methods: &crate::host_reflect_type::ANNOTATED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::TimeUnit,
+        tag: "tunit",
+        class: ClassRule::Fixed("java/util/concurrent/TimeUnit"),
+        // One object per constant.
+        canonical: always_canonical,
+        methods: &crate::host_jdk_constant::TIME_UNIT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CodingErrorAction,
+        tag: "cea",
+        class: ClassRule::Fixed("java/nio/charset/CodingErrorAction"),
+        // One object per constant.
+        canonical: always_canonical,
+        methods: &crate::host_jdk_constant::CODING_ERROR_ACTION_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::UnicodeBlock,
+        tag: "ublk",
+        class: ClassRule::Fixed("java/lang/Character$UnicodeBlock"),
+        // One object per constant.
+        canonical: always_canonical,
+        methods: &crate::host_jdk_constant::UNICODE_BLOCK_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Locale,
+        tag: "loc",
+        class: ClassRule::Fixed("java/util/Locale"),
+        // `new Locale(..)` is a new object of an equal key.
+        canonical: never_canonical,
+        methods: &crate::host_jdk_constant::LOCALE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::RegexPattern,
+        tag: "rpat",
+        class: ClassRule::Fixed("java/util/regex/Pattern"),
+        // A serial per `compile`.
+        canonical: always_canonical,
+        methods: &crate::host_jdk_constant::PATTERN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ArtifactVersion,
+        tag: "artv",
+        class: ClassRule::Unknown {
+            declared: crate::host_jdk_constant::artifact_version_types,
+        },
+        // A mod's version object; another with the same text may be another object.
+        canonical: never_canonical,
+        methods: &crate::host_jdk_constant::ARTIFACT_VERSION_METHODS,
     },
 ];
 

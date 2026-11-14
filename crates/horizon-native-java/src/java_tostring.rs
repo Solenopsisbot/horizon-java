@@ -31,11 +31,7 @@ pub(crate) fn owner(value: &Value) -> Option<String> {
     let prefix = [
         ("uuid/", "java/util/UUID"),
         ("duration/", "java/time/Duration"),
-        ("regex-pattern/", "java/util/regex/Pattern"),
         ("charset/", "java/nio/charset/Charset"),
-        ("coding-error-action/", "java/nio/charset/CodingErrorAction"),
-        ("locale/", "java/util/Locale"),
-        ("unicode-block/", "java/lang/Character$UnicodeBlock"),
         // `key + "=" + value` (`Map.entry`, an entry from `entrySet()`).
         ("map-entry/", "java/util/Map$Entry"),
     ];

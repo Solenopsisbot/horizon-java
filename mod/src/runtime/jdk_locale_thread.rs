@@ -33,24 +33,10 @@ fn thread_id(thread: &Value) -> Option<i64> {
     object.parse::<i64>().ok().map(|id| id.saturating_add(2))
 }
 
-/// The (language, country) a locale marker names.
-///
-/// `locale/US`, `locale/ROOT` and `locale/ENGLISH` are the static constants;
-/// a constructed locale is `locale/<language>_<country>` (either half may be
-/// empty, as `new Locale("en")` is).
-fn locale_parts(marker: &str) -> Option<(&str, &str)> {
-    match marker.strip_prefix("locale/")? {
-        "US" => Some(("en", "US")),
-        "ROOT" => Some(("", "")),
-        "ENGLISH" => Some(("en", "")),
-        rest => rest.split_once('_'),
-    }
-}
-
 /// The language tag the JDK's `Locale.toLanguageTag` builds for a
 /// language/country pair: the language, `und` when it is empty, then the
 /// country after a hyphen when that is not empty.
-fn language_tag(language: &str, country: &str) -> String {
+pub(crate) fn language_tag(language: &str, country: &str) -> String {
     let language = if language.is_empty() { "und" } else { language };
     if country.is_empty() {
         language.to_owned()
@@ -62,7 +48,7 @@ fn language_tag(language: &str, country: &str) -> String {
 /// `sun.util.locale.BaseLocale.hashCode`: characters folded with 31 from
 /// zero, in language→script→region→variant order, each lower-cased. Script and
 /// variant are always empty for a locale this model builds.
-fn locale_hash(language: &str, country: &str) -> i32 {
+pub(crate) fn locale_hash(language: &str, country: &str) -> i32 {
     fn codes(text: &str) -> impl Iterator<Item = i32> + '_ {
         text.chars().map(|character| {
             let mut lowered = character.to_lowercase();
@@ -78,7 +64,7 @@ fn locale_hash(language: &str, country: &str) -> i32 {
 }
 
 /// The `java.util.Locale` spelling: `language`, then `_country` when set.
-fn locale_text(language: &str, country: &str) -> String {
+pub(crate) fn locale_text(language: &str, country: &str) -> String {
     if country.is_empty() {
         language.to_owned()
     } else {
@@ -122,12 +108,7 @@ impl StdHost {
                 _ => None,
             };
         }
-        let (language, country) = if let Some(parts) = self.locales.get(marker).cloned() {
-            parts
-        } else {
-            let (language, country) = locale_parts(marker)?;
-            (language.to_owned(), country.to_owned())
-        };
+        let (language, country) = self.locales.get(marker).cloned()?;
         Some(match (r.name.as_str(), r.descriptor.as_str()) {
             ("getLanguage", "()Ljava/lang/String;") => Ok(string(&language)),
             ("getCountry", "()Ljava/lang/String;") => Ok(string(&country)),
@@ -141,8 +122,14 @@ impl StdHost {
             ("equals", "(Ljava/lang/Object;)Z") => {
                 let other = args
                     .first()
-                    .and_then(expect_ref)
-                    .and_then(|other| locale_parts(other))
+                    .and_then(|other| {
+                        crate::runtime::host_jdk_constant::locale_parts(other).or_else(|| {
+                            let marker = expect_ref(other)?;
+                            self.locales
+                                .get(marker)
+                                .map(|(l, c)| (l.as_str(), c.as_str()))
+                        })
+                    })
                     .map(|(l, c)| (l.to_owned(), c.to_owned()));
                 Ok(Value::Int(i32::from(
                     other == Some((language.clone(), country.clone())),

@@ -289,11 +289,6 @@ fn invalid_code_point(code_point: i32) -> NativeError {
     }
 }
 
-/// The marker of a `Character.UnicodeBlock` constant. The JDK keeps one
-/// instance per block, so two markers are the same block exactly when their
-/// texts are equal, which is what `==` compares.
-const BLOCK_PREFIX: &str = "unicode-block/";
-
 /// Whether `name` is a block `UnicodeBlock.of` can answer.
 fn known_block(name: &str) -> bool {
     !name.is_empty() && table::BLOCK_RUNS.iter().any(|&(_, block)| block == name)
@@ -315,9 +310,11 @@ fn unicode_block_of(r: &MethodRef, args: &[Value]) -> Option<Result<Value, Nativ
     }
     let at = table::BLOCK_RUNS.partition_point(|&(start, _)| start <= code_point as u32) - 1;
     let name = table::BLOCK_RUNS[at].1;
-    Some(Ok(Value::Ref(
-        (!name.is_empty()).then(|| format!("{BLOCK_PREFIX}{name}")),
-    )))
+    Some(Ok(if name.is_empty() {
+        Value::Ref(None)
+    } else {
+        crate::host_jdk_constant::unicode_block(name)
+    }))
 }
 
 /// `getstatic Character$UnicodeBlock.NAME` for a block `of` can answer. The
@@ -326,15 +323,12 @@ pub(crate) fn unicode_block_static(r: &MethodRef) -> Option<Value> {
     (r.owner == "java/lang/Character$UnicodeBlock"
         && r.descriptor == "Ljava/lang/Character$UnicodeBlock;"
         && known_block(&r.name))
-    .then(|| Value::Ref(Some(format!("{BLOCK_PREFIX}{}", r.name))))
+    .then(|| crate::host_jdk_constant::unicode_block(&r.name))
 }
 
 /// `toString()` of a block: its constant's name.
 pub(crate) fn unicode_block_instance(r: &MethodRef, receiver: &Value) -> Option<Value> {
-    let Value::Ref(Some(marker)) = receiver else {
-        return None;
-    };
-    let name = marker.strip_prefix(BLOCK_PREFIX)?;
+    let name = crate::host_jdk_constant::unicode_block_name(receiver)?;
     (r.name == "toString" && r.descriptor == "()Ljava/lang/String;")
         .then(|| Value::Ref(Some(name.to_owned())))
 }
