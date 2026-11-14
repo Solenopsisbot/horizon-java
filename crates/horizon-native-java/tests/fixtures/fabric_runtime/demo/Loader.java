@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 import net.fabricmc.api.EnvType;
+import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.resource.v1.ResourceLoader;
 import net.fabricmc.loader.api.FabricLoader;
@@ -79,21 +80,79 @@ public final class Loader {
             + ids.get(ResourceLoader.get(PackType.SERVER_DATA)) + ids.get(ResourceLoader.get(PackType.CLIENT_RESOURCES));
     }
 
-    /** The containers and instances of the run's `main` entrypoint that the answers know exactly. */
+    /** The containers of the run's `main` entrypoint: provider, type, and the empty list for no entries. */
     public static String entrypoints(FabricLoader l) {
-        EntrypointContainer<Object> c = l.getEntrypointContainers("main", Object.class).get(0);
-        Object instance = c.getEntrypoint();
-        return "" + l.getEntrypointContainers("main", Object.class).size() + (c.getProvider() == l.getModContainer("probe-fixture").get())
-            + c.getProvider().getMetadata().getId() + (instance instanceof Probe) + (((Object) c) instanceof EntrypointContainer)
-            + l.getEntrypointContainers("absent", Object.class).size();
+        EntrypointContainer<ModInitializer> c = l.getEntrypointContainers("main", ModInitializer.class).get(0);
+        return "" + l.getEntrypointContainers("main", ModInitializer.class).size()
+            + (c.getProvider() == l.getModContainer("probe-fixture").get()) + c.getProvider().getMetadata().getId()
+            + (((Object) c) instanceof EntrypointContainer) + l.getEntrypointContainers("absent", Object.class).size()
+            + (((Object) l.getEntrypoints("absent", Object.class)) == l.getEntrypoints("absent", Runnable.class));
     }
 
-    /** Two calls' containers are new objects; the instance is cached per requested type. */
-    public static String entrypointIdentity(FabricLoader l) {
-        EntrypointContainer<Object> c = l.getEntrypointContainers("main", Object.class).get(0);
-        EntrypointContainer<Object> d = l.getEntrypointContainers("main", Object.class).get(0);
-        return "" + (c == d) + c.equals(d) + (c.getEntrypoint() == d.getEntrypoint())
-            + (l.getEntrypoints("main", Object.class).get(0) == c.getEntrypoint());
+    /**
+     * Inside the entrypoint's own `onInitialize`: `getEntrypoints("main", ModInitializer.class)` and its container's
+     * `getEntrypoint()` are this very object (the loader made it for that type and runs it); each call is a new
+     * list with that object.
+     */
+    public static String entrypointSelf(Object self, FabricLoader l) {
+        Object fromList = l.getEntrypoints("main", ModInitializer.class).get(0);
+        Object fromContainer = l.getEntrypointContainers("main", ModInitializer.class).get(0).getEntrypoint();
+        IdentityHashMap<Object, Integer> m = new IdentityHashMap<>();
+        m.put(self, 1);
+        return "" + (fromList == self) + fromContainer.equals(self) + self.equals(fromList) + List.of(self).contains(fromList)
+            + m.containsKey(fromList) + (fromContainer == fromList) + (fromList instanceof Probe)
+            + "|" + l.getEntrypoints("main", ModInitializer.class).equals(l.getEntrypoints("main", ModInitializer.class))
+            + (((Object) l.getEntrypoints("main", ModInitializer.class)) == l.getEntrypoints("main", ModInitializer.class))
+            + (((Object) l.getEntrypointContainers("main", ModInitializer.class)) == l.getEntrypointContainers("main", ModInitializer.class));
+    }
+
+    /**
+     * Another requested type: `Object` is a new instance cached for that type, `Runnable` (which `demo.Probe` is
+     * not) is Fabric's `EntrypointException`, eagerly from `getEntrypoints` and lazily from a container's
+     * `getEntrypoint()`; two calls' containers are new objects.
+     */
+    public static String otherTypes(FabricLoader l) {
+        StringBuilder out = new StringBuilder();
+        try {
+            out.append(l.getEntrypoints("main", Object.class).get(0) == l.getEntrypoints("main", ModInitializer.class).get(0));
+        } catch (Throwable e) {
+            out.append(e.getClass().getSimpleName());
+        }
+        out.append('|');
+        try {
+            out.append(l.getEntrypoints("main", Runnable.class).size());
+        } catch (Throwable e) {
+            out.append(e.getClass().getSimpleName()).append(':').append(e.getMessage());
+        }
+        out.append('|');
+        try {
+            out.append(l.getEntrypointContainers("main", Runnable.class).get(0).getEntrypoint() != null);
+        } catch (Throwable e) {
+            out.append(e.getClass().getSimpleName()).append(':').append(e.getMessage());
+        }
+        out.append('|');
+        try {
+            EntrypointContainer<ModInitializer> c = l.getEntrypointContainers("main", ModInitializer.class).get(0);
+            EntrypointContainer<ModInitializer> d = l.getEntrypointContainers("main", ModInitializer.class).get(0);
+            out.append(c == d).append(c.equals(d)).append(
+                l.getEntrypointContainers("main", ModInitializer.class).equals(l.getEntrypointContainers("main", ModInitializer.class)));
+        } catch (Throwable e) {
+            out.append(e.getClass().getSimpleName());
+        }
+        return out.toString();
+    }
+
+    /** `EnvType`'s exact class, and a `TreeSet` mixing it with a `String`. */
+    public static String envClass() {
+        Object c = EnvType.CLIENT;
+        String mixed;
+        try {
+            mixed = "" + new TreeSet<Object>(List.of(EnvType.SERVER)).contains("SERVER");
+        } catch (ClassCastException e) {
+            mixed = "CCE";
+        }
+        return mixed + "|" + (c.getClass() == EnvType.class) + c.getClass().getName() + EnvType.class.getSuperclass().getName()
+            + EnvType.class.isInterface();
     }
 
     /** Strings spelled like the old markers, or a handle's text, are no loader object. */

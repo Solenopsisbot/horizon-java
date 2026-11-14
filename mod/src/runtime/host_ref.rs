@@ -356,10 +356,9 @@ pub enum HostKind {
     FabricMappingResolver,
     /// An `EnvType` constant: key its name.
     FabricEnvType,
-    /// An `EntrypointContainer`: key its kind, class and provider.
+    /// An `EntrypointContainer`: key its kind, class, provider and the
+    /// requested type.
     FabricEntrypointContainer,
-    /// An entrypoint instance: key its class and provider.
-    FabricEntrypointInstance,
     /// A `PayloadTypeRegistry`: key its direction.
     FabricPayloadTypes,
     /// A `ResourceLoader`: key its `PackType`.
@@ -547,6 +546,10 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::AttachmentBuilder,
         &crate::runtime::host_attachment::BUILDER_CLASS_SIDE,
+    ),
+    (
+        HostKind::FabricEnvType,
+        &crate::runtime::host_fabric_runtime::ENV_TYPE_CLASS_SIDE,
     ),
 ];
 
@@ -1401,9 +1404,8 @@ const KINDS: &[KindInfo] = &[
     KindInfo {
         kind: HostKind::FabricEnvType,
         tag: "fenv",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_fabric_runtime::env_type_types,
-        },
+        // A final enum: its class is exact, with its class side.
+        class: ClassRule::FromKey(crate::runtime::host_fabric_runtime::env_type_class),
         // An enum constant.
         canonical: always_canonical,
         methods: &crate::runtime::host_fabric_runtime::ENV_TYPE_METHODS,
@@ -1415,16 +1417,6 @@ const KINDS: &[KindInfo] = &[
             declared: crate::runtime::host_fabric_runtime::entrypoint_container_types,
         },
         // A new container per entry on every call.
-        canonical: never_canonical,
-        methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
-    },
-    KindInfo {
-        kind: HostKind::FabricEntrypointInstance,
-        tag: "fepi",
-        class: ClassRule::Unknown {
-            declared: crate::runtime::host_fabric_runtime::entrypoint_instance_types,
-        },
-        // Cached per requested type, which the key does not hold.
         canonical: never_canonical,
         methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
     },

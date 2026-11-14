@@ -23,16 +23,20 @@ use horizon_native_java::StdHost;
 /// `ModCandidateImpl.createPlain`) added to the loader's mod map and to its
 /// `EntrypointStorage` with the default language adapter, as `setupMods`
 /// does, for `"entrypoints":{"main":["demo.Probe"]}` (Fabric's parser takes
-/// only the list form; the fixture jar's string form means the same). Fabric
+/// only the list form; the fixture jar's string form means the same), then
+/// run with `invokeEntrypoints("main", ModInitializer.class,
+/// ModInitializer::onInitialize)` (Horizon runs the same entrypoint). Fabric
 /// API 0.165.0's `fabric-api-base`, `fabric-networking-api-v1` and
 /// `fabric-resource-loader-v1` and the 26.3 server are on the class path.
 const ORACLE: &str = "\
+entrypointSelf=truetruetruetruetruetruetrue|truefalsefalse
 loader=truetruetruetruetruetrueartruefalse|truetruefalse
 envType=CLIENT|CLIENT01-1sCLIENT0SERVER12true|truetruetruefalsetrue|[CLIENT, SERVER]CLIENTcnull11
+envClass=CCE|truenet.fabricmc.api.EnvTypejava.lang.Enumfalse
 payloads=truefalsefalsetruetruepnulltrue
 resources=truefalsetruetruednull
-entrypoints=1trueprobe-fixturetruetrue0
-entrypointIdentity=falsefalsetruetrue
+entrypoints=1trueprobe-fixturetrue0true
+otherTypes=false|EntrypointException:Exception while loading entries for entrypoint 'main' provided by 'probe-fixture'|EntrypointException:Exception while loading entries for entrypoint 'main' provided by 'probe-fixture'|falsefalsefalse
 spelled=Stringtrue-1040676293falsefalsefalsefalsefalsefalsefalsefalsefabric-loader!,Stringtrue-1221724595falsefalsefalsefalsefalsefalsefalsefalsefabric-mapping-resolver!,Stringtrue1990584267falsefalsefalsefalsefalsefalsefalsefalseCLIENT!,Stringtrue-1852497085falsefalsefalsefalsefalsefalsefalsefalseSERVER!,Stringtrue3145783falsefalsefalsefalsefalsefalsefalsefalsefli:!,Stringtrue-952377214falsefalsefalsefalsefalsefalsefalsefalsefenv:rSERVER!,Stringtrue1041408092falsefalsefalsefalsefalsefalsefalsefalsefpt:rplayToClient!,Stringtrue-116919410falsefalsefalsefalsefalsefalsefalsefalsefrl:rSERVER_DATA!,falsefalsefalsefabric-entrypoint/main/demo/Probe/probe-fixture!,falsefalsefalsefabric-payload-types/playToClient!,falsefalsefalsefabric-resource-loader/SERVER_DATA!,falsefalsefalsefabric-entrypoint-instance/demo/Probe!,12sfalse
 forged=CCECCE
 ";
@@ -69,10 +73,16 @@ fn sources() -> Vec<(String, String)> {
     out
 }
 
-/// Run `method` on a dedicated server's host seeded from the fixture jar
-/// (`probe-fixture`, entrypoint `main` = `demo.Probe`): its text and what it
-/// counted.
+/// Run the fixture jar's `main` entrypoint (`demo.Probe`, mod
+/// `probe-fixture`) on a dedicated server's host, as the loader does, then
+/// `method`: its text and what the run counted.
 fn run(test: &str, method: &str) -> (String, Vec<(String, usize)>) {
+    let (text, unknown, _) = run_with_output(test, method);
+    (text, unknown)
+}
+
+/// [`run`], and what the entrypoint printed.
+fn run_with_output(test: &str, method: &str) -> (String, Vec<(String, usize)>, String) {
     let sources = sources();
     let sources = sources
         .iter()
@@ -82,39 +92,74 @@ fn run(test: &str, method: &str) -> (String, Vec<(String, usize)>) {
     let mut host = fixture
         .jar
         .seed_host(StdHost::new().with_environment_type("SERVER"));
+    fixture
+        .jar
+        .execute("demo.Probe", None, "main", &mut host)
+        .unwrap_or_else(|error| panic!("main entrypoint failed: {error}"));
+    let printed = host.take_stdout();
     let text = fixture.text_on(&mut host, method);
-    (text, host.unknown_host_calls())
+    (text, host.unknown_host_calls(), printed)
 }
 
 /// The loader and its mapping resolver are one object each (`==`, `equals`,
 /// `IdentityHashMap`, host lists, `instanceof`); `getEnvironmentType()` is the
 /// `EnvType` constant itself; `EnvType`'s constants are one object each in
 /// declaration order (`name`, `ordinal`, `compareTo`, a `switch`, `values()`,
-/// `valueOf`, `Collections.sort`, `TreeSet`, `Map.of`); the payload type
-/// registries and resource loaders are one per direction and per `PackType`;
-/// an entrypoint container's provider is the mod's one container and its
-/// instance an instance of the entrypoint class: all as Java 25 answers, with
+/// `valueOf`, `Collections.sort`, `TreeSet`, `Map.of`), and its class is
+/// exact (`getClass`, its name and superclass, a `TreeSet` mixing it with a
+/// `String` throwing `ClassCastException`); the payload type registries and
+/// resource loaders are one per direction and per `PackType`; an entrypoint
+/// container's provider is the mod's one container, and no entries is the
+/// one empty list. Inside its own `onInitialize`, the entrypoint gets itself
+/// back from `getEntrypoints("main", ModInitializer.class)` and from its
+/// container's `getEntrypoint()` (`==`, `equals` both ways, `List.contains`,
+/// `IdentityHashMap`), each call a new list. All as Java 25 answers, with
 /// nothing counted.
 #[test]
-fn the_singletons_answer_as_java_25() {
-    for method in ["loader", "envType", "payloads", "resources", "entrypoints"] {
+fn the_singletons_and_the_entrypoint_answer_as_java_25() {
+    for method in [
+        "loader",
+        "envType",
+        "envClass",
+        "payloads",
+        "resources",
+        "entrypoints",
+    ] {
         let (text, unknown) = run(method, method);
         assert_eq!(text, expected(method), "{method}: {unknown:?}");
         assert_eq!(unknown, Vec::<(String, usize)>::new(), "{method}");
     }
+    // What `onInitialize` printed of itself.
+    let (_, unknown, printed) = run_with_output("entrypoint-self", "envType");
+    assert_eq!(
+        printed.trim_end(),
+        format!("entrypointSelf={}", expected("entrypointSelf")),
+        "{unknown:?}"
+    );
+    assert_eq!(unknown, Vec::<(String, usize)>::new());
 }
 
-/// `getEntrypointContainers` builds new containers on every call, and an
-/// entry's instance is cached per requested type, which the host's key does
-/// not hold: identity between two calls' containers or instances is Java
-/// 25's or counted, never a silent answer from equal keys.
+/// Another requested type is a new instance (`Object`) or Fabric's
+/// `EntrypointException` (`Runnable`, which `demo.Probe` is not), and two
+/// calls' containers are new objects: Java 25's answers, or counted, never a
+/// silent answer from the run's own object or from equal keys.
 #[test]
-fn entrypoint_identity_is_java_25s_or_counted() {
-    let (text, unknown) = run("entrypoint-identity", "entrypointIdentity");
+fn other_types_and_container_identity_are_java_25s_or_counted() {
+    let (text, unknown) = run("other-types", "otherTypes");
     assert!(
-        text == expected("entrypointIdentity") || !unknown.is_empty(),
+        text == expected("otherTypes") || !unknown.is_empty(),
         "{text}"
     );
+    // The two type checks are what was counted, not answered.
+    for call in [
+        "net/fabricmc/loader/api/FabricLoader#getEntrypoints",
+        "EntrypointContainer#getEntrypoint",
+    ] {
+        assert!(
+            unknown.iter().any(|(counted, _)| counted.contains(call)),
+            "{call}: {unknown:?}"
+        );
+    }
 }
 
 /// A string spelled like an old marker (`fabric-loader`, `CLIENT`,

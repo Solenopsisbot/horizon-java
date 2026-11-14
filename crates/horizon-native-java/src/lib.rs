@@ -41271,23 +41271,51 @@ mandatory = true
         let entries = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getEntrypoints".into(),
-            descriptor: "(Ljava/lang/String;)Ljava/util/List;".into(),
+            descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
         };
+        let initializer = Value::Ref(Some("net/fabricmc/api/ModInitializer".into()));
+        let size = MethodRef {
+            owner: "java/util/List".into(),
+            name: "size".into(),
+            descriptor: "()I".into(),
+        };
+        // Before the runtime constructed `demo.Main`, Fabric would construct
+        // it here: counted.
+        host.invoke_instance(
+            &entries,
+            &loader,
+            &[Value::Ref(Some("main".into())), initializer.clone()],
+        )
+        .unwrap();
+        assert!(host.unknown_host_calls().iter().any(|(call, _)| {
+            call.starts_with("net/fabricmc/loader/api/FabricLoader#getEntrypoints")
+        }));
+        // Once it did, the loader's own `ModInitializer` instance is that
+        // object; another type is a fresh instance (or a mismatch): counted.
+        host.note_entrypoint_constructed("demo/Main");
         let main = host
-            .invoke_instance(&entries, &loader, &[Value::Ref(Some("main".into()))])
+            .invoke_instance(
+                &entries,
+                &loader,
+                &[Value::Ref(Some("main".into())), initializer.clone()],
+            )
             .unwrap();
+        assert_eq!(
+            host.invoke_instance(&size, &main, &[]).unwrap(),
+            Value::Int(1)
+        );
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
                     owner: "java/util/List".into(),
-                    name: "size".into(),
-                    descriptor: "()I".into(),
+                    name: "get".into(),
+                    descriptor: "(I)Ljava/lang/Object;".into(),
                 },
                 &main,
-                &[],
+                &[Value::Int(0)],
             )
             .unwrap(),
-            Value::Int(1)
+            Value::Ref(Some("demo/Main".into()))
         );
         let typed_entries = host
             .invoke_instance(
@@ -41297,10 +41325,7 @@ mandatory = true
                     descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
                 },
                 &loader,
-                &[
-                    Value::Ref(Some("main".into())),
-                    Value::Ref(Some("class/net.fabricmc.api.ModInitializer".into())),
-                ],
+                &[Value::Ref(Some("main".into())), initializer.clone()],
             )
             .unwrap();
         assert_eq!(
@@ -41354,20 +41379,23 @@ mandatory = true
             .unwrap(),
             host_fabric_loader::container("demo", Some("1.2.3"))
         );
+        let containers = MethodRef {
+            owner: "net/fabricmc/loader/api/FabricLoader".into(),
+            name: "getEntrypointContainers".into(),
+            descriptor: "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;".into(),
+        };
         let client = host
-            .invoke_instance(&entries, &loader, &[Value::Ref(Some("client".into()))])
+            .invoke_instance(
+                &containers,
+                &loader,
+                &[
+                    Value::Ref(Some("client".into())),
+                    Value::Ref(Some("net/fabricmc/api/ClientModInitializer".into())),
+                ],
+            )
             .unwrap();
         assert_eq!(
-            host.invoke_instance(
-                &MethodRef {
-                    owner: "java/util/List".into(),
-                    name: "size".into(),
-                    descriptor: "()I".into(),
-                },
-                &client,
-                &[],
-            )
-            .unwrap(),
+            host.invoke_instance(&size, &client, &[]).unwrap(),
             Value::Int(1)
         );
         assert!(host.fabric_entrypoint_containers().iter().any(|entry| {
