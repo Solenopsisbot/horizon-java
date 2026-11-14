@@ -284,10 +284,7 @@ impl<H: Host> Runtime<'_, H> {
                 // equals the one that component had when it was added, which
                 // no answer here can show. Counted among components.
                 if handle.kind() == crate::host_ref::HostKind::Component {
-                    let components = table
-                        .keys()
-                        .iter()
-                        .any(crate::host_component::is_component);
+                    let components = table.keys().iter().any(crate::host_component::is_component);
                     return Ok(if components {
                         Lookup::Unknown
                     } else {

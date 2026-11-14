@@ -381,7 +381,10 @@ mod tests {
     fn table_of(keys: &[&str]) -> HashTable {
         let mut table = HashTable::new(None, 0.75);
         for key in keys {
-            table.insert(&Value::Ref(Some((*key).into())), Some(java_string_hash(key)));
+            table.insert(
+                &Value::Ref(Some((*key).into())),
+                Some(java_string_hash(key)),
+            );
         }
         table
     }
