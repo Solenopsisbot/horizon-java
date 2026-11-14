@@ -70,6 +70,7 @@ mod heap;
 mod hook_shapes;
 mod host_array;
 mod host_attachment;
+mod host_brigadier;
 mod host_config;
 mod host_entry;
 mod host_events;
@@ -4643,10 +4644,10 @@ impl Host for StdHost {
         crate::runtime::java_tostring::modelled(self, value)
     }
 
-    /// The command façade's markers (a source, a node, a builder) answer
-    /// `instanceof` for their Brigadier and vanilla types.
+    /// Host markers that answer `instanceof` for their loader and vanilla
+    /// types (the command surface's objects are handles: `host_brigadier.rs`).
     fn host_instance_of(&self, marker: &str, wanted: &str) -> bool {
-        self.brigadier_instance_of(marker, wanted) || self.mod_container_instance_of(marker, wanted)
+        self.mod_container_instance_of(marker, wanted)
     }
 
     /// Read back what the bounded `Throwable.<init>` surface recorded, so an
