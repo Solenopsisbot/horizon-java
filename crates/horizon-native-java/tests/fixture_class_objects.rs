@@ -268,5 +268,8 @@ fn arrays_primitives_and_interfaces_answer_as_java_25() {
 /// keyed by `Foo.class`/`Shape.class` finds them. Java 25: `fs,truetrue`.
 #[test]
 fn a_plain_subclass_generic_supertypes_are_the_literals() {
-    assert_eq!(review("genericSuper"), ("fs,truetrue".to_owned(), Vec::new()));
+    assert_eq!(
+        review("genericSuper"),
+        ("fs,truetrue".to_owned(), Vec::new())
+    );
 }

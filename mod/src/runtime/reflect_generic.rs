@@ -339,7 +339,10 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Ok(Some(match parsed {
                 Some((superclass, _)) => generic_type_value(&superclass),
-                None => Value::Ref(Some(super_name)),
+                // No Signature attribute (a plain `class Bar extends Foo`):
+                // the generic superclass is the raw class, the literal's own
+                // `Class` handle, never its name as text (#215 re-check).
+                None => crate::runtime::host_class::class_value(&super_name),
             }));
         }
         let types = match parsed {
