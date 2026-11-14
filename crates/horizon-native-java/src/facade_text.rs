@@ -238,7 +238,8 @@ impl<H: Host> Runtime<'_, H> {
         };
         let value = match (name, descriptor) {
             ("getString", "()Ljava/lang/String;") => Value::Ref(Some(plain(&own))),
-            ("copy", "()Lnet/minecraft/network/chat/MutableComponent;") => receiver.clone(),
+            // A new object with the same contents (`MutableComponent.copy`).
+            ("copy", "()Lnet/minecraft/network/chat/MutableComponent;") => from_json(&own),
             // The contents alone: no style, no siblings.
             ("plainCopy", "()Lnet/minecraft/network/chat/MutableComponent;") => {
                 let mut object = object_of(own);
@@ -310,6 +311,14 @@ impl<H: Host> Runtime<'_, H> {
             }
             _ => return Ok(None),
         };
+        if matches!(name, "withStyle" | "withColor" | "append") {
+            // Departure D1 (`host_component.rs`): Java changes the receiver
+            // and returns it; the model answers a new component and leaves the
+            // receiver's handle as it was. A later read of the receiver, or
+            // `==` between it and the answer, would differ from Java, so the
+            // call is counted while its answer stands.
+            self.host.unknown_operand_call(r)?;
+        }
         Ok(Some(value))
     }
 }

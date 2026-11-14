@@ -1141,7 +1141,13 @@ impl StdHost {
         // A component's style calls (`client_text.rs`); an unlisted member keeps
         // the host's own component model.
         if crate::host_component::is_component(receiver) {
-            return text::component_call(receiver, r, args).map(Ok);
+            let answer = text::component_call(receiver, r, args)?;
+            if matches!(r.name.as_str(), "withStyle" | "setStyle") {
+                // Departure D1 (`host_component.rs`): a new component, not the
+                // receiver changed in place; counted while its answer stands.
+                return Some(self.unknown_host_call(r).map(|_| answer));
+            }
+            return Some(Ok(answer));
         }
         let text = expect_ref(receiver)?.clone();
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));

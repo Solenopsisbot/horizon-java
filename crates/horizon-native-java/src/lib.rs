@@ -8577,6 +8577,9 @@ impl Host for StdHost {
                 } else {
                     component_text(suffix)
                 };
+                // Flattened to its text, and a new component rather than the
+                // receiver changed (D1, `host_component.rs`): counted.
+                self.unknown_host_call(r)?;
                 Ok(component_value("literal", &format!("{current}{suffix}")))
             }
             ("net/minecraft/network/chat/MutableComponent", "copy", descriptor)

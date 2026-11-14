@@ -1441,7 +1441,10 @@ impl StdHost {
         ) && crate::host_component::is_component(receiver)
             && matches!(name, "withStyle" | "withColor" | "setStyle")
         {
-            return Some(Ok(receiver.clone()));
+            // The command surface keeps text, not style: the style is dropped
+            // and the receiver answered (its `getString` is Java's). Its
+            // `equals`/`toString` would not be, so the call is counted.
+            return Some(self.unknown_host_call(r).map(|_| receiver.clone()));
         }
         if let Value::Host(_) = receiver {
             // What a model does not answer is an unmodelled call: counted

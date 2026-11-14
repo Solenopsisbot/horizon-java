@@ -28,10 +28,13 @@
 //!
 //! **Departure D1 (kept from the marker model, not new):** `append` and `withStyle` change the
 //! receiver in place and return it (`MutableComponent.append` @1–12: `siblings.add(c); return
-//! this`). The model answers a new component instead and leaves the receiver as it was, so a jar
-//! that reads the receiver after changing it, or compares it with the result, gets main's answer,
-//! not Java's. A per-allocation model with the component's state in a collected host table would
-//! reach Java's; it is left for a follow-up.
+//! this`). The model answers a new component instead and leaves the receiver's handle as it was,
+//! so a jar that reads the receiver after changing it, or compares it with the result (`==` is a
+//! proved `false` between two keys), would get main's answer, not Java's. Every such call
+//! (`append`, `withStyle`, `withColor`, `setStyle`) is therefore **counted** while its answer
+//! stands: a run that changes a component is never reported exact. Without one, two keys are two
+//! contents and so two objects. A per-allocation model with the component's state in the
+//! collected resident heap (`heap.rs`) would reach Java's answers; it is left for a follow-up.
 
 use serde_json::{Map, Value as Json};
 
@@ -209,3 +212,7 @@ pub(crate) const COMPONENT_CLASS_SIDE: ClassSide = ClassSide {
     is_interface: |_| Some(false),
     classes: || vec![MUTABLE.to_owned()],
 };
+
+#[cfg(test)]
+#[path = "host_component_tests.rs"]
+mod tests;
