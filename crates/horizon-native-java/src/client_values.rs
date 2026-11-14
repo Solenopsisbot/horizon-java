@@ -371,3 +371,30 @@ pub(crate) fn canonical(key: &str) -> bool {
             .and_then(Colour::parse)
             .is_some_and(|colour| matches!(colour, Colour::Legacy(_)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Vec3` as the façade keys it (`client_surface::vec3`), against vanilla
+    /// 26.3 on Java 25: `new Vec3(1, -2.5, 1e7)` prints `(1.0, -2.5, 1.0E7)`
+    /// and hashes to `-2050026800`; `Double.compare` keeps `0.0` and `-0.0`
+    /// apart.
+    #[test]
+    fn a_vec3_answers_as_java() {
+        let key = format!("{VEC3}{},{},{}", 1.0, -2.5, 1e7);
+        assert_eq!(to_string(&key).as_deref(), Some("(1.0, -2.5, 1.0E7)"));
+        assert_eq!(hash_code(&key), Some(-2_050_026_800));
+        let none = Value::Ref(None);
+        assert_eq!(equals(&key, Some(&key), &none), Some(Some(true)));
+        let zero = format!("{VEC3}{},{},{}", 0.0, 0.0, 0.0);
+        let negative = format!("{VEC3}{},{},{}", -0.0, 0.0, 0.0);
+        assert_eq!(equals(&zero, Some(&negative), &none), Some(Some(false)));
+        // A position is a new object each time; a `String` is never one.
+        assert!(!canonical(&key));
+        assert_eq!(
+            equals(&key, None, &Value::Ref(Some(key.clone()))),
+            Some(Some(false))
+        );
+    }
+}
