@@ -32,8 +32,17 @@
 use super::*;
 use object_methods::Equality;
 
-const SET_N: &str = "java/util/ImmutableCollections$SetN";
-const MAP_N: &str = "java/util/ImmutableCollections$MapN";
+// The classes `Set.of`/`Map.of` make (`java_immutable.rs`): one or two
+// elements (one entry) are a `Set12` (`Map1`), which compares in order, any
+// other count a probed `SetN` (`MapN`).
+const SETS: &[&str] = &[
+    "java/util/ImmutableCollections$SetN",
+    "java/util/ImmutableCollections$Set12",
+];
+const MAPS: &[&str] = &[
+    "java/util/ImmutableCollections$MapN",
+    "java/util/ImmutableCollections$Map1",
+];
 const IDENTITY_MAP: &str = "java/util/IdentityHashMap";
 
 /// A `SetN`/`MapN` probe table: each bucket's element (a map's key), by its
@@ -353,9 +362,10 @@ impl<H: Host> Runtime<'_, H> {
     /// The class of a `Set.of`/`Map.of` this module laid out.
     fn probed_kind(&mut self, value: &Value) -> Option<(bool, ProbeTable)> {
         let marker = expect_ref(value)?;
-        let map = if marker.starts_with(&format!("{SET_N}#")) {
+        let class = marker.split_once('#').map(|(class, _)| class)?;
+        let map = if SETS.contains(&class) {
             false
-        } else if marker.starts_with(&format!("{MAP_N}#")) {
+        } else if MAPS.contains(&class) {
             true
         } else {
             return None;
@@ -626,7 +636,9 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 Ok(boolean(false))
             }
-            (_, "size" | "isEmpty", _, []) => Ok(None),
+            // `getClass()` names the class, never the order (a `SetN` is an
+            // object now, #156 P14c, so its `getClass` arrives here).
+            (_, "size" | "isEmpty" | "getClass", _, []) => Ok(None),
             // Anything else may show the order: random for two or more.
             _ if size >= 2 => self.host.unknown_operand_call(r).map(|_| None),
             _ => Ok(None),
