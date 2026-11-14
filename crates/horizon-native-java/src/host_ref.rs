@@ -316,6 +316,9 @@ pub enum HostKind {
     AttachmentType,
     /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
     AttachmentBuilder,
+    /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
+    /// builder number (`stream_pipeline.rs`).
+    StreamBuilder,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1188,6 +1191,15 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::FromKey(crate::host_attachment::builder_class),
         canonical: always_canonical,
         methods: &crate::host_attachment::BUILDER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::StreamBuilder,
+        tag: "sbld",
+        class: ClassRule::Fixed("java/util/stream/Streams$StreamBuilderImpl"),
+        // The key is a per-runtime number: a handle and its clones are one
+        // builder, two equal keys from two runs prove nothing.
+        canonical: never_canonical,
+        methods: &crate::stream_pipeline::STREAM_BUILDER,
     },
 ];
 

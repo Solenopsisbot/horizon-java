@@ -95,6 +95,7 @@ impl<H: Host> Runtime<'_, H> {
                     })
                     .collect();
                 let stream = self.new_stream("java/lang/StackWalker", "walk", frames);
+                // The frame stream's spliterator is not `SIZED`.
                 Ok(Some(
                     self.invoke_callback(&function, &[stream])?
                         .unwrap_or(Value::Ref(None)),
