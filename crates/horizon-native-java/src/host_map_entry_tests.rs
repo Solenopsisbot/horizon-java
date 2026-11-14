@@ -161,6 +161,40 @@ fn map_entries_answer_as_java_25_or_count() {
         ("types", Exact(r#"entry:a|truetruefalse|true"#)),
         // A key removed through `keySet()` (the view's `remove` is not modelled): counted.
         ("viewRemove", Counted),
+        // `ConcurrentHashMap`: a new `MapEntry` per `next()` keeping its own value; `setValue` sets it and `put`s; no `null`.
+        (
+            "concurrentEntries",
+            Exact(
+                r#"java.util.concurrent.ConcurrentHashMap$MapEntry,falsefalse,1,1,7,a=7,java.lang.NullPointerException: null,7"#,
+            ),
+        ),
+        // `EnumMap`: a new entry per `next()` reading and writing the map; `null` allowed.
+        (
+            "enumMapEntries",
+            Exact(r#"java.util.EnumMap$EntryIterator$Entry,falsetrue,5,5,7,LEFT=7,7,null"#),
+        ),
+        // `Hashtable`: its nodes; no `null`.
+        (
+            "hashtableEntries",
+            Exact(
+                r#"java.util.Hashtable$Entry,truetrue,5,5,7,a=7,java.lang.NullPointerException: null,7"#,
+            ),
+        ),
+        // `IdentityHashMap`: a new entry per `next()` reading and writing the map (its own
+        // `get`/`put` of `String` keys, whose identity is unknown, are counted).
+        ("identityEntries", Counted),
+        // `ConcurrentSkipListMap`: immutable snapshots, new per `next()`.
+        (
+            "skipListEntries",
+            Exact(
+                r#"java.util.AbstractMap$SimpleImmutableEntry,a=1,java.lang.UnsupportedOperationException: null,false"#,
+            ),
+        ),
+        // `WeakHashMap`: its nodes.
+        (
+            "weakEntries",
+            Exact(r#"java.util.WeakHashMap$Entry,truetrue,5,5,7,a=7,7,null"#),
+        ),
     ];
     let mut failures = Vec::new();
     for (method, outcome) in &cases {

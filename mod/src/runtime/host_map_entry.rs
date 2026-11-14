@@ -34,10 +34,14 @@
 //! counted, and a later reading keeps the key with a fresh origin, so `==` with an earlier one
 //! is counted too.
 //!
-//! **Other maps** (`ConcurrentHashMap`, `Hashtable`, `IdentityHashMap`, a host literal...):
-//! their entries are [`HostKind::OpaqueMapEntry`], whose class is not known (`getClass()`
-//! counted). Their key and value are as read while the map is unchanged; `setValue` is
-//! counted.
+//! **Other maps** follow their own classes (Java 25): `Hashtable`'s and `WeakHashMap`'s
+//! nodes are followed like `HashMap`'s (`Hashtable` refuses `setValue(null)`); `EnumMap` and
+//! `IdentityHashMap` make a new entry per `next()` that reads and writes the map by its key;
+//! `ConcurrentHashMap` makes a new `MapEntry` per `next()` that keeps its own value and
+//! `put`s on `setValue`; `ConcurrentSkipListMap` hands out immutable snapshots. The entries of
+//! any other map (a host literal, `Collections.unmodifiableMap`, a library's) are
+//! [`HostKind::OpaqueMapEntry`], whose class is not known (`getClass()` counted): their key and
+//! value are as read while the map is unchanged, and `setValue` is counted.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -108,11 +112,39 @@ pub(crate) fn unknown_entry() -> Value {
 }
 
 /// The node class of a map class whose nodes this model follows.
-fn node_class(map_class: &str) -> Option<&'static str> {
+/// How a map's `entrySet()` hands out its entries (Java 25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// The map's own node: every reading is one object, live, written through. `nulls`:
+    /// `setValue(null)` is allowed (`Hashtable` throws).
+    Node { nulls: bool },
+    /// A new entry per `next()` that reads and writes the map by its key (`EnumMap`,
+    /// `IdentityHashMap`).
+    Fresh,
+    /// `ConcurrentHashMap.MapEntry`: a new entry per `next()` holding its own value;
+    /// `setValue(v)` sets it and `put`s it (`null` refused).
+    Concurrent,
+    /// An immutable snapshot per `next()` (`ConcurrentSkipListMap`).
+    Snapshot,
+}
+
+/// The entry class and mode of a map class whose entries this model knows.
+fn entry_mode(map_class: &str) -> Option<(&'static str, Mode)> {
     Some(match map_class {
-        "java/util/HashMap" => "java/util/HashMap$Node",
-        "java/util/LinkedHashMap" => "java/util/LinkedHashMap$Entry",
-        "java/util/TreeMap" => "java/util/TreeMap$Entry",
+        "java/util/HashMap" => ("java/util/HashMap$Node", Mode::Node { nulls: true }),
+        "java/util/LinkedHashMap" => ("java/util/LinkedHashMap$Entry", Mode::Node { nulls: true }),
+        "java/util/TreeMap" => ("java/util/TreeMap$Entry", Mode::Node { nulls: true }),
+        "java/util/Hashtable" => ("java/util/Hashtable$Entry", Mode::Node { nulls: false }),
+        "java/util/WeakHashMap" => ("java/util/WeakHashMap$Entry", Mode::Node { nulls: true }),
+        "java/util/EnumMap" => ("java/util/EnumMap$EntryIterator$Entry", Mode::Fresh),
+        "java/util/IdentityHashMap" => {
+            ("java/util/IdentityHashMap$EntryIterator$Entry", Mode::Fresh)
+        }
+        "java/util/concurrent/ConcurrentHashMap" => (
+            "java/util/concurrent/ConcurrentHashMap$MapEntry",
+            Mode::Concurrent,
+        ),
+        "java/util/concurrent/ConcurrentSkipListMap" => (SIMPLE_IMMUTABLE_ENTRY, Mode::Snapshot),
         _ => return None,
     })
 }
@@ -126,13 +158,18 @@ fn class_of_marker(marker: &str) -> &str {
 enum Life {
     /// A holder or snapshot: its key and value never change.
     Fixed,
-    /// A node `map` holds: its value is the map's. `node` is its `TreeMap` tree node. `stamp`
-    /// is the map's `modCount` when the host last followed it.
+    /// A node `map` holds (or an entry reading `map` by its key, `fresh`): its value is the
+    /// map's. `node` is its `TreeMap` tree node. `stamp` is the map's `modCount` when the host
+    /// last followed it. `nulls`: `setValue(null)` is allowed.
     Live {
         map: String,
         stamp: ModStamp,
         node: Option<usize>,
+        fresh: bool,
+        nulls: bool,
     },
+    /// A `ConcurrentHashMap.MapEntry` of `map`: it keeps its own value.
+    Concurrent { map: String },
     /// A node removed from its map: the key and value it kept.
     Detached,
     /// A node this model lost track of.
@@ -181,7 +218,9 @@ impl Entries {
     /// The map a live node follows (kept alive with it).
     pub(crate) fn map_of(&self, key: &str) -> Option<&str> {
         match &self.states.get(key)?.life {
-            Life::Live { map, .. } | Life::Opaque { map, .. } => Some(map),
+            Life::Live { map, .. } | Life::Opaque { map, .. } | Life::Concurrent { map } => {
+                Some(map)
+            }
             _ => None,
         }
     }
@@ -259,20 +298,42 @@ impl StdHost {
         }
         let map = map.and_then(crate::runtime::expect_ref).cloned().unwrap_or_default();
         let stamp = self.mod_stamp_of(&map);
-        let Some(class) = node_class(class_of_marker(&map)) else {
+        let state = |life: Life, handle: &Value| EntryState {
+            key: key.clone(),
+            value: value.clone(),
+            life,
+            handle: handle.clone(),
+        };
+        let Some((class, mode)) = entry_mode(class_of_marker(&map)) else {
             // A map whose entry class is not modelled.
             let entry_key = self.mint_key(OPAQUE, true);
             let handle = Value::Host(HostRef::new(HostKind::OpaqueMapEntry, entry_key.clone()));
-            self.map_entries.states.insert(
-                entry_key,
-                EntryState {
-                    key: key.clone(),
-                    value: value.clone(),
-                    life: Life::Opaque { map, stamp },
-                    handle: handle.clone(),
-                },
-            );
+            let opaque = state(Life::Opaque { map, stamp }, &handle);
+            self.map_entries.states.insert(entry_key, opaque);
             return handle;
+        };
+        let nulls = match mode {
+            Mode::Snapshot => return fixed(self, class),
+            Mode::Concurrent | Mode::Fresh => {
+                // A new object per reading: one key each.
+                let entry_key = self.mint_key(class, false);
+                let handle = Value::Host(HostRef::new(HostKind::MapEntry, entry_key.clone()));
+                let life = match mode {
+                    Mode::Concurrent => Life::Concurrent { map },
+                    _ => Life::Live {
+                        map,
+                        stamp,
+                        node: None,
+                        fresh: true,
+                        nulls: true,
+                    },
+                };
+                self.map_entries
+                    .states
+                    .insert(entry_key, state(life, &handle));
+                return handle;
+            }
+            Mode::Node { nulls } => nulls,
         };
         let tree = class == "java/util/TreeMap$Entry";
         let node = if tree {
@@ -289,12 +350,12 @@ impl StdHost {
             .map_entries
             .nodes
             .get(&(map.clone(), node_name.clone()))
-            && let Some(state) = self.map_entries.states.get(entry_key)
+            && let Some(known) = self.map_entries.states.get(entry_key)
         {
             // The same node: the same handle while followed; otherwise the same key with a
             // fresh origin, so `==` with an earlier reading is counted.
-            if followed && state.life != Life::Lost {
-                return state.handle.clone();
+            if followed && known.life != Life::Lost {
+                return known.handle.clone();
             }
             return Value::Host(HostRef::new(HostKind::MapEntry, entry_key.clone()));
         }
@@ -305,19 +366,15 @@ impl StdHost {
                 map: map.clone(),
                 stamp,
                 node,
+                fresh: false,
+                nulls,
             }
         } else {
             Life::Lost
         };
-        self.map_entries.states.insert(
-            entry_key.clone(),
-            EntryState {
-                key: key.clone(),
-                value: value.clone(),
-                life,
-                handle: handle.clone(),
-            },
-        );
+        self.map_entries
+            .states
+            .insert(entry_key.clone(), state(life, &handle));
         self.map_entries.nodes.insert((map, node_name), entry_key);
         handle
     }
@@ -334,7 +391,9 @@ impl StdHost {
         let state = self.map_entries.states.get(handle.key())?;
         match &state.life {
             Life::Fixed | Life::Detached => Some((state.key.clone(), state.value.clone())),
-            Life::Live { map, stamp, node } => {
+            Life::Live {
+                map, stamp, node, ..
+            } => {
                 if self.mod_stamp_of(map) != *stamp {
                     return None;
                 }
@@ -345,6 +404,8 @@ impl StdHost {
                 let value = self.entry_map_value(map, &key)?;
                 Some((key, value))
             }
+            // Its own value (`ConcurrentHashMap.MapEntry.val`).
+            Life::Concurrent { .. } => Some((state.key.clone(), state.value.clone())),
             Life::Lost => None,
             // A map the host keeps no row for (an immutable literal) cannot have changed;
             // a kept one must still hold what was read, with no structural change since.
@@ -384,6 +445,32 @@ impl StdHost {
                 let states = &mut self.map_entries.states;
                 let state = states.get_mut(handle.key()).expect("found above");
                 Ok(std::mem::replace(&mut state.value, value))
+            }
+            // `Hashtable.Entry.setValue` and `ConcurrentHashMap.MapEntry.setValue` refuse null.
+            Life::Live { nulls: false, .. } | Life::Concurrent { .. }
+                if value == Value::Ref(None) =>
+            {
+                Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: None,
+                    frame: None,
+                })
+            }
+            // `val = value; map.put(key, value)`: a `put` of a key the map still holds writes
+            // its value; one it no longer holds would insert it again (counted).
+            Life::Concurrent { map } => {
+                let map = map.clone();
+                let Some(slot) = self.mutable_collections.get_mut(&map).and_then(|row| {
+                    row.chunks_mut(2)
+                        .find(|pair| pair.first() == Some(&state.key))
+                        .and_then(|pair| pair.get_mut(1))
+                }) else {
+                    return self.unknown_host_call(r);
+                };
+                *slot = value.clone();
+                let states = &mut self.map_entries.states;
+                let own = states.get_mut(handle.key()).expect("found above");
+                Ok(std::mem::replace(&mut own.value, value))
             }
             Life::Live { map, .. } => {
                 let Some((key, _)) = self.map_entry_now(entry) else {
@@ -451,9 +538,22 @@ impl StdHost {
             .map(|(key, _)| key.clone())
             .collect();
         for entry_key in live {
-            let Life::Live { stamp, node, .. } = self.map_entries.states[&entry_key].life.clone()
+            let Life::Live {
+                stamp,
+                node,
+                fresh,
+                nulls,
+                ..
+            } = self.map_entries.states[&entry_key].life.clone()
             else {
                 continue;
+            };
+            let live = |stamp: ModStamp| Life::Live {
+                map: map.to_owned(),
+                stamp,
+                node,
+                fresh,
+                nulls,
             };
             // What the node held before the call; a node the host could not read then (its map
             // changed by another path) is lost.
@@ -461,11 +561,7 @@ impl StdHost {
             let life = match held {
                 _ if !followed => Life::Lost,
                 None => Life::Lost,
-                Some(_) if stamp == now => Life::Live {
-                    map: map.to_owned(),
-                    stamp,
-                    node,
-                },
+                Some(_) if stamp == now => live(stamp),
                 Some((_, key, _)) => match node {
                     // A tree node: still in the tree (holding whatever key `deleteEntry` left
                     // in it), or freed.
@@ -475,21 +571,12 @@ impl StdHost {
                             .get(map)
                             .and_then(|tree| tree.key_at(index))
                             .is_some();
-                        if kept {
-                            Life::Live {
-                                map: map.to_owned(),
-                                stamp: now,
-                                node,
-                            }
-                        } else {
-                            Life::Detached
-                        }
+                        if kept { live(now) } else { Life::Detached }
                     }
-                    None if self.entry_map_value(map, key).is_some() => Life::Live {
-                        map: map.to_owned(),
-                        stamp: now,
-                        node,
-                    },
+                    None if self.entry_map_value(map, key).is_some() => live(now),
+                    // An `EnumMap`/`IdentityHashMap` entry reads its map's slot: once its key
+                    // is gone that answer is not this model's.
+                    None if fresh => Life::Lost,
                     None => Life::Detached,
                 },
             };

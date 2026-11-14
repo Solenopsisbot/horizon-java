@@ -216,4 +216,65 @@ public final class HostMapEntries {
     m.put(new Colliding(0), 100);
     return e.getKey().v() + "," + e.getValue();
   }
+
+  enum Side {
+    LEFT,
+    RIGHT
+  }
+
+  static <K> String entryRules(Map<K, Integer> m, K first, K other) {
+    Map.Entry<K, Integer> e = m.entrySet().iterator().next();
+    Map.Entry<K, Integer> again = m.entrySet().iterator().next();
+    String cls = e.getClass().getName();
+    m.put(first, 5);
+    String live = "" + e.getValue();
+    Integer old = e.setValue(7);
+    return cls + "," + (e == again) + e.equals(again) + "," + live + "," + old + "," + m.get(first) + "," + e + ","
+        + attempt(() -> e.setValue(null)) + "," + m.get(first);
+  }
+
+  /** `EnumMap`: a new entry per `next()`, reading and writing the map. */
+  public static String enumMapEntries() {
+    Map<Side, Integer> m = new EnumMap<>(Side.class);
+    m.put(Side.LEFT, 1);
+    m.put(Side.RIGHT, 2);
+    return entryRules(m, Side.LEFT, Side.RIGHT);
+  }
+
+  /** `ConcurrentHashMap`: a new `MapEntry` per `next()`, its value a snapshot, `setValue` a `put`. */
+  public static String concurrentEntries() {
+    Map<String, Integer> m = new java.util.concurrent.ConcurrentHashMap<>();
+    m.put("a", 1);
+    return entryRules(m, "a", "b");
+  }
+
+  /** `Hashtable`: its nodes, no `null`. */
+  public static String hashtableEntries() {
+    Map<String, Integer> m = new Hashtable<>();
+    m.put("a", 1);
+    return entryRules(m, "a", "b");
+  }
+
+  /** `WeakHashMap`: its nodes. */
+  public static String weakEntries() {
+    Map<String, Integer> m = new WeakHashMap<>();
+    m.put("a", 1);
+    return entryRules(m, "a", "b");
+  }
+
+  /** `IdentityHashMap`: a new entry per `next()`, reading and writing the map. */
+  public static String identityEntries() {
+    Map<String, Integer> m = new IdentityHashMap<>();
+    m.put("a", 1);
+    return entryRules(m, "a", "b");
+  }
+
+  /** `ConcurrentSkipListMap`: immutable snapshots. */
+  public static String skipListEntries() {
+    Map<String, Integer> m = new java.util.concurrent.ConcurrentSkipListMap<>();
+    m.put("a", 1);
+    Map.Entry<String, Integer> e = m.entrySet().iterator().next();
+    m.put("a", 5);
+    return e.getClass().getName() + "," + e + "," + attempt(() -> e.setValue(7)) + "," + (e == m.entrySet().iterator().next());
+  }
 }
