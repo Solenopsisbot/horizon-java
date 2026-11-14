@@ -23,11 +23,13 @@
 //!   `equals`/`hashCode`/`toString`.
 //! * **mod info**: `ModContainer.getModInfo()` is the container's final
 //!   `modInfo` field: one `ModInfo` per mod, canonical, keyed by the id.
-//! * **mod file info**: `LoadingModList.getModFileById(id)` answers the
-//!   `ModFileInfo` of the *file* holding mod `id`; two mods of one file share
-//!   it, and the host does not know which ids share a file. So the key is the
-//!   id the caller asked for and the kind is not canonical: identity between
-//!   two lookups is counted unless the same handle flows.
+//! * **mod file info**: `LoadingModList.getModFileById(id)` is
+//!   `fileById.get(id)`, the one `ModFileInfo` of the *file* holding mod
+//!   `id`: two mods of one file share it. The key is the file, named by its
+//!   first `[[mods]]` entry: canonical. The host knows the files of the
+//!   running jar, the linked NeoForge jars, `minecraft` and `neoforge`; a
+//!   lookup of a mod it only assumes present (a dependency) is counted, never
+//!   given a handle of its own.
 //! * **config type**: `ModConfig.Type` is a final enum of `LOCAL`, `CLIENT`,
 //!   `SYNCED`, `STARTUP` (in that order). One canonical key per constant;
 //!   `toString` its name, `compareTo` the ordinals' difference. The host also
@@ -144,11 +146,13 @@ fn container_instance_of(
     let exact = match container_class(handle) {
         Some(MINECRAFT) => MINECRAFT_MOD_CONTAINER,
         Some(JAVAFML) => FML_MOD_CONTAINER,
-        _ => {
-            return not_a_config_type(wanted)
-                .or_else(|| instance_of_class(handle, wanted, hierarchy));
-        }
+        _ => return loader_instance_of(handle, wanted, hierarchy),
     };
+    // A legacy Forge run hands out the same handle from `net/minecraftforge`'s
+    // `ModList`: its loader's names are not FML 12's to rule out.
+    if wanted.starts_with("net/minecraftforge/") {
+        return instance_of_class(handle, wanted, hierarchy);
+    }
     Some(matches!(wanted, MOD_CONTAINER | "java/lang/Object") || wanted == exact)
 }
 
@@ -191,7 +195,7 @@ pub(crate) fn mod_info_types(_: &str) -> &'static [&'static str] {
     ]
 }
 
-/// The `ModFileInfo` `getModFileById(id)` answered.
+/// The `ModFileInfo` of the mod file whose first mod is `id`.
 pub(crate) fn mod_file_info(id: &str) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::NeoForgeModFileInfo,
@@ -199,7 +203,7 @@ pub(crate) fn mod_file_info(id: &str) -> Value {
     ))
 }
 
-/// The mod id a file info handle was looked up by.
+/// The first mod of a file info handle's file.
 pub(crate) fn mod_file_info_id(value: &Value) -> Option<String> {
     held_text(value, HostKind::NeoForgeModFileInfo)
 }
@@ -218,6 +222,12 @@ pub(crate) fn config_type(name: &str) -> Value {
         HostKind::NeoForgeConfigType,
         &[text(name)],
     ))
+}
+
+/// `values()` of a loader enum whose constants are handles: `ModConfig.Type`'s
+/// four, in declaration order.
+pub(crate) fn enum_values(owner: &str) -> Option<Vec<Value>> {
+    (owner == CONFIG_TYPE).then(|| CONFIG_TYPES.iter().map(|name| config_type(name)).collect())
 }
 
 /// A config type handle's constant name.

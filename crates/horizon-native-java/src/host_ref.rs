@@ -321,7 +321,7 @@ pub enum HostKind {
     NeoForgeModContainer,
     /// A NeoForge `IModInfo`: key its mod id.
     NeoForgeModInfo,
-    /// A `ModFileInfo` `getModFileById` answered: key the id it was asked for.
+    /// A `ModFileInfo`: key its file's first mod id.
     NeoForgeModFileInfo,
     /// A `ModConfig.Type` constant: key its name.
     NeoForgeConfigType,
@@ -1226,8 +1226,8 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::host_neoforge_loader::mod_file_info_types,
         },
-        // One per file, which two mod ids may share: not one per key.
-        canonical: never_canonical,
+        // `fileById.get(id)`: one per file, keyed by the file.
+        canonical: always_canonical,
         methods: &crate::host_neoforge_loader::OBJECT_METHODS,
     },
     KindInfo {
