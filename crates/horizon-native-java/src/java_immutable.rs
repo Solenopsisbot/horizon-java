@@ -274,7 +274,11 @@ impl StdHost {
     /// holding `values`: an object of its own (#156 P14c), keyed
     /// `<class>#immutable<n>`.
     fn unmodifiable_as(&mut self, class: &str, values: Vec<Value>) -> Value {
-        let marker = format!("{class}#immutable{}", self.unmodifiable_collections.len());
+        let marker = crate::jar_object::collection_key_for(
+            class,
+            crate::jar_object::CollectionFamily::Immutable,
+            self.unmodifiable_collections.len(),
+        );
         self.mutable_collections.insert(marker.clone(), values);
         self.unmodifiable_collections.insert(marker.clone(), None);
         crate::jar_object::collection(marker)
@@ -283,7 +287,7 @@ impl StdHost {
     /// What the factory `owner.name` answers for `values`: the class Java
     /// makes ([`made_class`]), and for an empty one a factory shares
     /// ([`shared_empty`]) that one object, made once.
-    fn unmodifiable_from(
+    pub(crate) fn unmodifiable_from(
         &mut self,
         owner: &str,
         name: &str,
@@ -309,6 +313,25 @@ impl StdHost {
             return made;
         }
         self.unmodifiable_as(class, values)
+    }
+
+    /// A JDK object Java keeps in the static `field` (the process
+    /// environment's map): an unmodifiable `class` holding `values`, made
+    /// once and the same object on every later call.
+    pub(crate) fn shared_unmodifiable(
+        &mut self,
+        field: &'static str,
+        class: &str,
+        values: Vec<Value>,
+    ) -> Value {
+        if let Some(shared) = self.shared_empties.get(field) {
+            return crate::jar_object::collection(shared.clone());
+        }
+        let made = self.unmodifiable_as(class, values);
+        if let Some(key) = expect_ref(&made) {
+            self.shared_empties.insert(field, key.clone());
+        }
+        made
     }
 
     /// [`Self::unmodifiable_from`] for a collector's result
@@ -466,10 +489,10 @@ impl StdHost {
                 let source_value = args.first()?;
                 let source = expect_ref(source_value)?.clone();
                 let source_class = crate::jar_object::object_class(source_value);
-                let marker = format!(
-                    "{}#immutable{}",
+                let marker = crate::jar_object::collection_key_for(
                     view_class(kind, source_class),
-                    self.unmodifiable_collections.len()
+                    crate::jar_object::CollectionFamily::Immutable,
+                    self.unmodifiable_collections.len(),
                 );
                 self.unmodifiable_collections
                     .insert(marker.clone(), Some(source));

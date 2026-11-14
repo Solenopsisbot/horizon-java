@@ -3000,6 +3000,10 @@ pub struct StdHost {
     /// EMPTY_LIST` for `Collections.emptyList()`): its key, made on first use
     /// (`java_immutable.rs`).
     shared_empties: BTreeMap<&'static str, String>,
+    /// The collections Java hands out as the same object on every call (a
+    /// map's views, `System.getProperties()`), by what they are of: their
+    /// keys (`StdHost::cached_collection`).
+    cached_collections: BTreeMap<(String, String), String>,
     /// The JDK's own `List.of`/`List.copyOf` lists among the unmodifiable
     /// ones (`java_immutable.rs`); `list_equality.rs` runs their
     /// null-hostile `List12`/`ListN` rules.
@@ -3181,6 +3185,7 @@ impl StdHost {
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
             shared_empties: BTreeMap::new(),
+            cached_collections: BTreeMap::new(),
             jdk_list_of: std::collections::BTreeSet::new(),
             charset_decoders: BTreeMap::new(),
             synchronized_views: BTreeMap::new(),
@@ -3360,17 +3365,108 @@ impl StdHost {
     }
 
     fn empty_collection(&mut self, kind: &str) -> Value {
-        let class = match kind {
-            "map" => "java/util/LinkedHashMap",
-            "set" => "java/util/LinkedHashSet",
-            _ => "java/util/ArrayList",
-        };
-        let marker = format!("{class}#neutral{}", self.next_neutral_collection);
+        self.new_collection(stand_in_class(kind), Vec::new())
+    }
+
+    /// A new mutable collection of class `class` holding `values`: an object
+    /// of its own (#156 P14c/P14d1), so `==` tells two apart, a write to one
+    /// never shows in another, and a `String` spelling its key is no
+    /// collection. The one constructor of the host's mutable collections.
+    fn new_collection(&mut self, class: &str, values: Vec<Value>) -> Value {
+        let marker = jar_object::collection_key_for(
+            class,
+            jar_object::CollectionFamily::Neutral,
+            self.next_neutral_collection,
+        );
         self.next_neutral_collection += 1;
-        self.mutable_collections.insert(marker.clone(), Vec::new());
-        // An object of its own (#156 P14c): `==` tells two apart, and a
-        // `String` spelling its key is no collection.
+        self.mutable_collections.insert(marker.clone(), values);
         jar_object::collection(marker)
+    }
+
+    /// A map's `keySet()`/`values()`/`entrySet()`: Java caches one view per
+    /// map (`map.keySet() == map.keySet()`), which the host answers with a
+    /// copy of the map's current contents (`hash_collections.rs` keeps it in
+    /// step). Its class stands in for the view's (`HashMap$KeySet`).
+    fn map_view(&mut self, map: &Value, view: &str, kind: &str, values: Vec<Value>) -> Value {
+        let source = expect_string(map).to_owned();
+        let made = self.cached_collection(map, view, stand_in_class(kind), true, values);
+        // A view copy whichever call site asked (a Gson `JsonObject` too):
+        // its mutators are counted, it follows the map, and it has no hash
+        // table of its own (`hash_collections.rs`).
+        if let Some(marker) = expect_ref(&made) {
+            let marker = marker.clone();
+            self.note_view_copy(&marker, &source);
+            self.note_view_kind(&marker, view);
+        }
+        made
+    }
+
+    /// The one collection Java answers for `member` of `of` on every call (a
+    /// map's `keySet()`, `System.getProperties()`, a mod container's root
+    /// paths): the same object each time. Made by [`Self::new_collection`]
+    /// on first use (or after the heap collected the last one, when nothing
+    /// can compare it any more).
+    ///
+    /// `follow`: the object is a view whose contents are its source's, read
+    /// again as `values` on every call (a map's views; writes through one
+    /// are counted). Otherwise it owns its contents: made once from
+    /// `values`, then read and written only through itself (#233 review).
+    ///
+    /// Cached by `of`'s identity ([`cache_identity`]): a value with none (a
+    /// `null`) gets a new object each time, never one shared by every such
+    /// receiver.
+    fn cached_collection(
+        &mut self,
+        of: &Value,
+        member: &str,
+        class: &str,
+        follow: bool,
+        values: Vec<Value>,
+    ) -> Value {
+        let Some(identity) = cache_identity(of) else {
+            return self.new_collection(class, values);
+        };
+        let cache = (identity, member.to_owned());
+        if let Some(marker) = self.cached_collections.get(&cache)
+            && self.mutable_collections.contains_key(marker)
+        {
+            let marker = marker.clone();
+            if follow {
+                self.mutable_collections.insert(marker.clone(), values);
+            }
+            return jar_object::collection(marker);
+        }
+        let made = self.new_collection(class, values);
+        if let Some(marker) = expect_ref(&made) {
+            self.cached_collections.insert(cache, marker.clone());
+        }
+        made
+    }
+
+    /// The system property `key`: once `System.getProperties()` made its
+    /// object, that object is the run's properties (a `put` on it is what
+    /// `System.getProperty` reads, as on a JVM); before, the host's own.
+    fn system_property(&self, key: &str) -> Option<String> {
+        let cache = (SYSTEM_IDENTITY.to_owned(), "getProperties".to_owned());
+        match self
+            .cached_collections
+            .get(&cache)
+            .and_then(|marker| self.mutable_collections.get(marker))
+        {
+            // `Properties.getProperty`: the value only when it is a `String`
+            // (`oval instanceof String ? (String) oval : null`); any object put
+            // under the key, a host collection's handle included, is `null`
+            // (#233's re-check: its key text came back as the value).
+            Some(values) => values.as_chunks::<2>().0.iter().find_map(|pair| {
+                matches!(&pair[0], Value::Ref(Some(name)) if name == key)
+                    .then(|| match &pair[1] {
+                        Value::Ref(Some(text)) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .flatten()
+            }),
+            None => self.properties.get(key).cloned(),
+        }
     }
 
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -5710,7 +5806,9 @@ impl Host for StdHost {
             // Keep Arrays.asList bounded when the interpreter passes an
             // opaque array marker. The marker is retained as the list's
             // single value; expanding runtime-owned array storage here would
-            // cross the host boundary and defeat invocation isolation.
+            // cross the host boundary and defeat invocation isolation. Still
+            // a text literal: Java's `Arrays$ArrayList` is fixed-size, which
+            // no collection model enforces yet (#156 P14d2).
             ("java/util/Arrays", "asList", "([Ljava/lang/Object;)Ljava/util/List;") => {
                 Ok(collection_value("list", args))
             }
@@ -5756,7 +5854,7 @@ impl Host for StdHost {
                 if descriptor.ends_with("Ljava/util/List;")
                     || descriptor.ends_with("Lcom/google/common/collect/ImmutableList;") =>
             {
-                Ok(collection_value("list", args))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "list", args.to_vec()))
             }
             (
                 "com/google/common/collect/ImmutableList"
@@ -5798,20 +5896,23 @@ impl Host for StdHost {
                     suffix: expect_string(Self::argument(r, args, 2)?).to_owned(),
                 },
             )),
+            // The factories `java_immutable.rs` did not take (a varargs
+            // shape): the same contents, as the class Java makes and the
+            // shared empty where Java shares one.
             ("java/util/List", "of", descriptor) if descriptor.ends_with("Ljava/util/List;") => {
-                Ok(collection_value("list", args))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "list", args.to_vec()))
             }
             ("java/util/Set", "of", descriptor) if descriptor.ends_with("Ljava/util/Set;") => {
-                Ok(collection_value("set", args))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "set", args.to_vec()))
             }
             ("java/util/Map", "of", descriptor) if descriptor.ends_with("Ljava/util/Map;") => {
-                Ok(collection_value("map", args))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "map", args.to_vec()))
             }
             ("java/util/Collections", "emptyList", "()Ljava/util/List;") => {
-                Ok(collection_empty("list"))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "list", Vec::new()))
             }
             ("java/util/Collections", "emptySet", "()Ljava/util/Set;") => {
-                Ok(collection_empty("set"))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "set", Vec::new()))
             }
             // `ConcurrentHashMap.newKeySet()`: a new, empty, mutable set.
             (
@@ -5820,16 +5921,16 @@ impl Host for StdHost {
                 "()Ljava/util/concurrent/ConcurrentHashMap$KeySetView;",
             ) => Ok(self.empty_collection("set")),
             ("java/util/Collections", "emptyMap", "()Ljava/util/Map;") => {
-                Ok(collection_empty("map"))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "map", Vec::new()))
             }
             ("java/util/Collections", "singletonList", "(Ljava/lang/Object;)Ljava/util/List;") => {
-                Ok(collection_value("list", args))
+                Ok(self.unmodifiable_from(&r.owner, &r.name, "list", args.to_vec()))
             }
             (
                 "java/util/Collections",
                 "singletonMap",
                 "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;",
-            ) => Ok(collection_value("map", args)),
+            ) => Ok(self.unmodifiable_from(&r.owner, &r.name, "map", args.to_vec())),
             ("java/util/Collections", name, _) if name.starts_with("synchronized") => self
                 .synchronized_view(r, args)
                 .unwrap_or_else(|| self.unknown_host_call(r)),
@@ -6255,7 +6356,7 @@ impl Host for StdHost {
                     Value::Ref(Some(key)) => key,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(Value::Ref(self.properties.get(key).cloned()))
+                Ok(Value::Ref(self.system_property(key)))
             }
             // `Boolean.getBoolean(name)`: whether the system property `name`
             // is `true`, ignoring case; an unset property or null name is
@@ -6263,8 +6364,7 @@ impl Host for StdHost {
             ("java/lang/Boolean", "getBoolean", "(Ljava/lang/String;)Z") => {
                 let set = match Self::argument(r, args, 0)? {
                     Value::Ref(Some(key)) => self
-                        .properties
-                        .get(key)
+                        .system_property(key)
                         .is_some_and(|value| value.eq_ignore_ascii_case("true")),
                     _ => false,
                 };
@@ -6283,8 +6383,11 @@ impl Host for StdHost {
                     Value::Ref(value) => value.clone(),
                     _ => None,
                 };
-                Ok(Value::Ref(self.properties.get(key).cloned().or(default)))
+                Ok(Value::Ref(self.system_property(key).or(default)))
             }
+            // One `Properties` object for the run, holding the properties
+            // now (`System.getProperties() == System.getProperties()`). Its
+            // class stands in for `Properties`, as the text literal's did.
             ("java/lang/System", "getProperties", "()Ljava/util/Properties;") => {
                 let values = self
                     .properties
@@ -6296,7 +6399,13 @@ impl Host for StdHost {
                         ]
                     })
                     .collect::<Vec<_>>();
-                Ok(collection_value("map", &values))
+                Ok(self.cached_collection(
+                    &Value::Ref(Some(SYSTEM_IDENTITY.into())),
+                    "getProperties",
+                    stand_in_class("map"),
+                    false,
+                    values,
+                ))
             }
             ("java/lang/System", "getenv", "(Ljava/lang/String;)Ljava/lang/String;") => {
                 let key = match Self::argument(r, args, 0)? {
@@ -6305,6 +6414,9 @@ impl Host for StdHost {
                 };
                 Ok(Value::Ref(self.environment.get(key).cloned()))
             }
+            // `ProcessEnvironment.theUnmodifiableEnvironment`: one
+            // `Collections$UnmodifiableMap` for the run, whose mutators
+            // throw `UnsupportedOperationException`.
             ("java/lang/System", "getenv", "()Ljava/util/Map;") => {
                 let values = self
                     .environment
@@ -6316,7 +6428,11 @@ impl Host for StdHost {
                         ]
                     })
                     .collect::<Vec<_>>();
-                Ok(collection_value("map", &values))
+                Ok(self.shared_unmodifiable(
+                    "ProcessEnvironment.theUnmodifiableEnvironment",
+                    "java/util/Collections$UnmodifiableMap",
+                    values,
+                ))
             }
             ("java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I") => {
                 let value = Self::argument(r, args, 0)?;
@@ -8402,7 +8518,7 @@ impl Host for StdHost {
                         Ok(map_entry_value(&key, &value))
                     })
                     .collect::<Result<Vec<_>, NativeError>>()?;
-                Ok(collection_value("set", &entries))
+                Ok(self.map_view(receiver, "entrySet", "set", entries))
             }
             // `ConcurrentHashMap.keySet()` declares its `KeySetView`; the
             // snapshot is the same key set.
@@ -8418,7 +8534,7 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| pair[0].clone())
                     .collect::<Vec<_>>();
-                Ok(collection_value("set", &keys))
+                Ok(self.map_view(receiver, "keySet", "set", keys))
             }
             (owner, "values", "()Ljava/util/Collection;") if is_map_owner(owner) => {
                 let values = host_collection_values(self, receiver)?;
@@ -8428,7 +8544,7 @@ impl Host for StdHost {
                     .iter()
                     .map(|pair| pair[1].clone())
                     .collect::<Vec<_>>();
-                Ok(collection_value("list", &values))
+                Ok(self.map_view(receiver, "values", "list", values))
             }
             (owner, "toString", "()Ljava/lang/String;") if is_collection_owner(owner) => {
                 // A jar subclass's marker names its own class; the JDK owner
@@ -9576,7 +9692,14 @@ impl Host for StdHost {
                     .cloned()
                     .collect::<Vec<_>>();
                 if entries.is_empty() {
-                    return Ok(collection_value("list", &[]));
+                    // `EntrypointStorage.getEntrypoints` of a key no mod
+                    // declares: `Collections.emptyList()`, one shared object.
+                    return Ok(self.unmodifiable_from(
+                        "java/util/Collections",
+                        "emptyList",
+                        "list",
+                        Vec::new(),
+                    ));
                 }
                 let mut values = Vec::new();
                 for entry in entries {
@@ -9715,10 +9838,15 @@ impl Host for StdHost {
                 // Fabric Loader declares `List<Path> getRootPaths()`.
                 "()Ljava/util/List;" | "()Ljava/util/Collection;",
             ) if host_fabric_loader::container_id(receiver).is_some() => {
+                // The container keeps its root paths: one list per container.
                 let id = host_fabric_loader::container_id(receiver).unwrap_or_default();
-                Ok(collection_value(
-                    "list",
-                    &[path_value(&format!("/horizon/mods/{id}"))],
+                let roots = vec![path_value(&format!("/horizon/mods/{id}"))];
+                Ok(self.cached_collection(
+                    receiver,
+                    "getRootPaths",
+                    stand_in_class("list"),
+                    false,
+                    roots,
                 ))
             }
             // The metadata of a mod with no `fabric.mod.json` and no built-in
@@ -9752,16 +9880,19 @@ impl Host for StdHost {
                 "getDescription",
                 "()Ljava/lang/String;",
             ) => Ok(Value::Ref(Some(String::new()))),
+            // The metadata keeps each of these: one empty collection per
+            // metadata object and member, the same on every call.
             (
                 "net/fabricmc/loader/api/metadata/ModMetadata",
-                "getProvides",
+                "getProvides" | "getAuthors" | "getContributors" | "getLicense",
                 "()Ljava/util/Collection;",
-            ) => Ok(collection_empty("list")),
-            (
-                "net/fabricmc/loader/api/metadata/ModMetadata",
-                "getAuthors" | "getContributors" | "getLicense",
-                "()Ljava/util/Collection;",
-            ) => Ok(collection_empty("list")),
+            ) => Ok(self.cached_collection(
+                receiver,
+                &r.name,
+                stand_in_class("list"),
+                false,
+                Vec::new(),
+            )),
             (
                 "net/fabricmc/loader/api/metadata/ModMetadata",
                 "getIconPath",
@@ -9771,7 +9902,13 @@ impl Host for StdHost {
                 "net/fabricmc/loader/api/metadata/ModMetadata",
                 "getDependencies",
                 "()Ljava/util/Map;",
-            ) => Ok(collection_empty("map")),
+            ) => Ok(self.cached_collection(
+                receiver,
+                "getDependencies",
+                stand_in_class("map"),
+                false,
+                Vec::new(),
+            )),
             (
                 "net/fabricmc/loader/api/Version",
                 "getFriendlyString" | "getRaw" | "toString",
@@ -9860,8 +9997,17 @@ impl Host for StdHost {
                 "getEntries",
                 "()Ljava/util/Collection;",
             ) => {
-                let register = expect_ref(receiver).map_or("", String::as_str);
-                Ok(collection_value("list", &self.register_holders(register)))
+                // The register's one entries view (`entriesView`), holding
+                // its holders now.
+                let register = expect_ref(receiver).map_or("", String::as_str).to_owned();
+                let holders = self.register_holders(&register);
+                Ok(self.cached_collection(
+                    receiver,
+                    "getEntries",
+                    stand_in_class("list"),
+                    true,
+                    holders,
+                ))
             }
             // A holder's `get`/`value`/`isBound`/... are `holder_call`'s
             // (`host_registry.rs`).
@@ -11351,8 +11497,31 @@ impl StdHost {
     }
 }
 
-fn collection_empty(kind: &str) -> Value {
-    Value::Ref(Some(kind.to_owned()))
+/// The identity [`StdHost::cached_collection`] keys `System`'s own objects
+/// under.
+const SYSTEM_IDENTITY: &str = "java/lang/System";
+
+/// What a cached collection is cached under: a handle's encoded kind and key
+/// (a mod container, a map), or a host marker's own text; `None` for a value
+/// with no identity of its own, which is never cached (#233 review: an empty
+/// text made every mod container share one list).
+fn cache_identity(value: &Value) -> Option<String> {
+    match value {
+        Value::Host(handle) => Some(handle.encode()),
+        Value::Ref(Some(text)) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// The class a host collection of `kind` stands in as where Java's own class
+/// is not modelled (a map's `keySet()` is a `HashMap$KeySet` on a JVM), as
+/// the text literals reported it.
+fn stand_in_class(kind: &str) -> &'static str {
+    match kind {
+        "map" => "java/util/LinkedHashMap",
+        "set" => "java/util/LinkedHashSet",
+        _ => "java/util/ArrayList",
+    }
 }
 
 fn value_text(value: &Value) -> String {
@@ -41051,7 +41220,12 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(entries, collection_value("set", &[]));
+        // An empty set of its own (a host-made collection, #156 P14d1).
+        assert!(jar_object::is_object(&entries), "{entries:?}");
+        assert_eq!(
+            host_collection_values(&host, &entries).unwrap(),
+            Vec::<Value>::new()
+        );
     }
 
     #[test]

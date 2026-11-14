@@ -1,0 +1,106 @@
+package demo;
+
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+
+/**
+ * Collections the host used to answer as text literals are objects (#156 P14d1): a map's views are the same object on
+ * every call and follow the map, two maps' views are two objects, and `System.getProperties()`/`getenv()` are one
+ * object each, `getenv()`'s unmodifiable.
+ */
+public final class Probe {
+    static String b(boolean v) {
+        return v ? "T" : "F";
+    }
+
+    static String views(Map<String, Integer> m) {
+        m.put("a", 1);
+        Set<String> k = m.keySet();
+        Collection<Integer> v = m.values();
+        Set<Map.Entry<String, Integer>> e = m.entrySet();
+        m.put("b", 2);
+        Map<String, Integer> other = new HashMap<>(m);
+        return b(k == m.keySet()) + b(v == m.values()) + b(e == m.entrySet()) + b((Object) k == other.keySet())
+            + b(k.equals(other.keySet())) + "|" + k.size() + m.keySet().size() + v.size() + e.size() + "|"
+            + new TreeSet<>(k);
+    }
+
+    /** A `HashMap`'s, a `LinkedHashMap`'s and a `TreeMap`'s views. */
+    public static String mapViews() {
+        return views(new HashMap<>()) + ";" + views(new LinkedHashMap<>()) + ";" + views(new TreeMap<>());
+    }
+
+    /** Two empty maps' views are two objects, and each stays as empty as its map (main shared one `set`). */
+    public static String emptyViews() {
+        Map<String, Integer> a = new HashMap<>();
+        Map<String, Integer> b = new HashMap<>();
+        Set<String> keys = a.keySet();
+        Set<Map.Entry<String, Integer>> entries = a.entrySet();
+        b.put("x", 1);
+        int seen = 0;
+        for (Map.Entry<String, Integer> e : entries) {
+            seen += e.getValue();
+        }
+        return b((Object) keys == b.keySet()) + b((Object) entries == b.entrySet()) + b(keys.isEmpty())
+            + seen + b.keySet().size() + b.entrySet().size();
+    }
+
+    /** `System.getProperties()` and `System.getenv()`: one object each, the environment's unmodifiable. */
+    public static String system() {
+        Map<String, String> env = System.getenv();
+        String put;
+        try {
+            env.put("horizon-probe", "x");
+            put = "put";
+        } catch (UnsupportedOperationException e) {
+            put = "UOE";
+        }
+        return b(System.getProperties() == System.getProperties()) + b(env == System.getenv())
+            + b(env.equals(System.getenv())) + "|" + env.getClass().getName() + "|" + put;
+    }
+
+    /**
+     * `System.getProperties()` is the run's one properties object: a `put` through it is what the next
+     * `getProperties()` and `System.getProperty` read (main re-snapshotted it on every call and dropped the write).
+     */
+    public static String properties() {
+        Properties p = System.getProperties();
+        p.put("d1.k", "v");
+        Object held = p.get("d1.k");
+        String through = System.getProperties().get("d1.k") + "," + p.get("d1.k") + "," + held + ","
+            + b(System.getProperties().containsKey("d1.k")) + b(p.size() == System.getProperties().size());
+        System.getProperties().put("d1.k2", "w");
+        p.put("d1.flag", "TRUE");
+        return through + "|" + System.getProperties().get("d1.k2") + "," + p.get("d1.k2") + "|"
+            + System.getProperty("d1.k") + "," + System.getProperty("d1.k2", "dflt") + ","
+            + System.getProperty("d1.none", "dflt") + "," + b(Boolean.getBoolean("d1.flag"));
+    }
+
+    /**
+     * `System.getProperty` answers a value only when it is a `String` (`Properties.getProperty`:
+     * `oval instanceof String ? (String) oval : null`): an object put under the key is `null`, and the
+     * default form falls back to its default (#233's re-check B1).
+     */
+    public static String objectProperty() {
+        Properties p = System.getProperties();
+        p.put("d1.obj", new java.util.ArrayList<>());
+        p.put("d1.num", 7);
+        return System.getProperty("d1.obj") + "," + System.getProperty("d1.obj", "dflt") + ","
+            + System.getProperty("d1.num") + "," + b(Boolean.getBoolean("d1.obj")) + ","
+            + b(p.get("d1.obj") instanceof java.util.ArrayList);
+    }
+
+    public static void main(String[] args) {
+        System.out.println("mapViews=" + mapViews());
+        System.out.println("emptyViews=" + emptyViews());
+        System.out.println("system=" + system());
+        System.out.println("properties=" + properties());
+        System.out.println("objectProperty=" + objectProperty());
+    }
+}
