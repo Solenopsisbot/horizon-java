@@ -1001,6 +1001,10 @@ fn is_fabric_event_invoker(value: &Value) -> bool {
 }
 
 impl<H: Host> Host for GameHookHost<'_, H> {
+    fn constructed_uuid(&self, value: &Value) -> Option<(i64, i64)> {
+        self.inner.constructed_uuid(value)
+    }
+
     fn component_states(&self) -> Option<&crate::runtime::host_component::States> {
         self.inner.component_states()
     }

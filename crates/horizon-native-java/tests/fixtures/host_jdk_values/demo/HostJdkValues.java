@@ -79,4 +79,93 @@ public final class HostJdkValues {
   public static String uriHash() {
     return "" + URI.create("http://example.com/").hashCode() + URI.create("a:b").compareTo(URI.create("a:c"));
   }
+
+  /** `new UUID(msb, lsb)`: a JDK object whose methods read its two fields. */
+  public static String constructed() {
+    UUID n = new UUID(1L, 2L);
+    UUID m = new UUID(1L, 2L);
+    UUID p = UUID.fromString("00000000-0000-0001-0000-000000000002");
+    UUID hi = new UUID(0x8000000000000000L, 1L);
+    return n + "|" + n.hashCode() + "," + hi.hashCode() + "|" + n.equals(p) + p.equals(n) + n.equals(m) + n.equals("x")
+        + n.equals(null) + "|" + n.compareTo(p) + "," + p.compareTo(hi) + "," + hi.compareTo(n) + "," + n.compareTo(m) + "|"
+        + n.version() + n.variant() + "|" + n.getMostSignificantBits() + "," + n.getLeastSignificantBits() + "|"
+        + (n == n) + (n == m) + "|" + n.getClass().getName() + (n instanceof Comparable) + "|" + String.valueOf(hi)
+        + "|" + Objects.equals(p, m);
+  }
+
+  /** The review's case: an explicit `toString` of a constructed UUID. */
+  public static String nuToString() {
+    return new UUID(1L, 2L).toString();
+  }
+
+  /** A constructed UUID in hash and tree collections with a parsed one. */
+  public static String constructedSets() {
+    UUID n = new UUID(1L, 2L);
+    UUID p = UUID.fromString("00000000-0000-0001-0000-000000000002");
+    return new HashSet<>(List.of(n, p)).size() + "|" + new TreeSet<>(List.of(n, p, new UUID(0L, 5L))) + "|"
+        + List.of(p).contains(n) + List.of(n).indexOf(p);
+  }
+
+  /** A parsed UUID's fields; `fromString`'s legacy form. */
+  public static String uuidFields() {
+    UUID p = UUID.fromString(U);
+    UUID r = UUID.randomUUID();
+    return p.version() + "," + p.variant() + "," + p.getMostSignificantBits() + "," + p.getLeastSignificantBits()
+        + "|" + r.version() + r.variant() + "|" + UUID.fromString("1-2-3-4-5") + "|"
+        + UUID.fromString("ffffffff-ffff-1fff-cfff-ffffffffffff").variant() + UUID.fromString("00000000-0000-0000-0000-000000000000").variant()
+        + UUID.fromString("00000000-0000-0000-e000-000000000000").variant() + UUID.fromString("00000000-0000-0000-c000-000000000000").variant();
+  }
+
+  static String attempt(java.util.function.Supplier<Object> s) {
+    try {
+      return String.valueOf(s.get());
+    } catch (RuntimeException e) {
+      return e.getClass().getSimpleName() + ":" + e.getMessage();
+    }
+  }
+
+  /** Duration's range: `long` seconds; overflow throws. Conversions as Java rounds them. */
+  public static String durationEdges() {
+    return attempt(() -> Duration.ofDays(Long.MAX_VALUE)) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MAX_VALUE).multipliedBy(2)) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MAX_VALUE).plus(Duration.ofSeconds(1))) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MIN_VALUE).minus(Duration.ofNanos(1))) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MIN_VALUE).negated()) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MIN_VALUE).abs()) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MAX_VALUE).toNanos()) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MAX_VALUE).toMillis()) + "|"
+        + attempt(() -> Duration.ofSeconds(1).dividedBy(0)) + "|"
+        + Duration.ofMillis(-500).toSeconds() + "," + Duration.ofMillis(-500).toMillis() + ","
+        + Duration.ofSeconds(-59, -500_000_000).toMinutes() + "," + Duration.ofSeconds(-60, -500_000_000).toMinutes() + ","
+        + Duration.ofNanos(-1).toNanos() + "," + Duration.ofSeconds(-3600, -1).toHours() + "," + Duration.ofSeconds(-86400, -1).toDays() + ","
+        + Duration.ofNanos(-1_500_000).toMillis() + "," + Duration.ofSeconds(Long.MIN_VALUE).getSeconds() + "|"
+        + Duration.ofSeconds(7).dividedBy(-2) + "," + Duration.ofNanos(-7).dividedBy(2) + "|"
+        + attempt(() -> Duration.ofSeconds(Long.MIN_VALUE).dividedBy(-1));
+  }
+
+  /** A URI's components (RFC 2396 as java.net.URI parses them). */
+  public static String uriParts() {
+    URI a = URI.create("http://user@Example.com:8080/a/b?q=1#f");
+    URI m = URI.create("mailto:a@b.com");
+    URI rel = URI.create("a/b");
+    URI bare = URI.create("http://h");
+    return a.getScheme() + "," + a.getHost() + "," + a.getAuthority() + "," + a.getPath() + "," + a.getQuery() + ","
+        + a.getFragment() + "," + a.getUserInfo() + "," + a.getPort() + "|"
+        + m.getScheme() + "," + m.getHost() + "," + m.getPath() + "," + m.getAuthority() + "," + m.isOpaque() + m.isAbsolute() + "|"
+        + rel.getScheme() + "," + rel.getHost() + "," + rel.getPath() + "," + rel.isAbsolute() + "|"
+        + bare.getPath().isEmpty() + "," + bare.getHost() + "," + bare.getPort();
+  }
+
+  /** Text java.net.URI refuses, decoded and ASCII forms (counted). */
+  public static String uriBad() {
+    return attempt(() -> URI.create("not a uri"));
+  }
+
+  public static String uriEscaped() {
+    return URI.create("http://h/a%20b").getPath() + URI.create("http://h/\u00e9").toASCIIString();
+  }
+
+  public static String uriOddHost() {
+    return "" + URI.create("http://a_b/x").getHost();
+  }
 }

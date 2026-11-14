@@ -492,6 +492,13 @@ pub(crate) trait Nested {
         let _ = value;
         None
     }
+    /// The `(msb, lsb)` of a jar's `new UUID(msb, lsb)` object
+    /// (`host_jdk_value.rs`); `None` where this context cannot read the
+    /// host's table or the object is no constructed UUID (the caller counts).
+    fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
+        let _ = value;
+        None
+    }
     /// The canonical type a jar's `new com.google.gson.reflect.TypeToken<T>() {}` holds
     /// (`gson_type_token.rs`); `None` where this context cannot read jar objects' fields.
     fn gson_token_type(&mut self, value: &Value) -> Option<Value> {

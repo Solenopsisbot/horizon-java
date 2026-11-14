@@ -125,6 +125,48 @@ fn jdk_values_answer_as_java_25_or_count() {
         ("identity", Counted),
         ("uriCase", Counted),
         ("uriHash", Counted),
+        // A jar's `new UUID(msb, lsb)`: its fields answer every member, and it equals a parsed
+        // UUID of the same value both ways.
+        (
+            "constructed",
+            Exact(
+                "00000000-0000-0001-0000-000000000002|3,-2147483647|truetruetruefalsefalse|0,1,-1,0|00|1,2|truefalse|java.util.UUIDtrue|80000000-0000-0000-0000-000000000001|true",
+            ),
+        ),
+        ("nuToString", Exact("00000000-0000-0001-0000-000000000002")),
+        (
+            "constructedSets",
+            Exact(
+                "1|[00000000-0000-0000-0000-000000000005, 00000000-0000-0001-0000-000000000002]|true0",
+            ),
+        ),
+        // Version and variant (Java 25's formula), the halves, `fromString`'s legacy form.
+        (
+            "uuidFields",
+            Exact(
+                "4,2,6128981282234515924,-6406858213580079104|42|00000001-0002-0003-0004-000000000005|6076",
+            ),
+        ),
+        // `long` seconds: Java's overflow exceptions and messages, its rounding.
+        (
+            "durationEdges",
+            Exact(
+                "ArithmeticException:long overflow|ArithmeticException:Exceeds capacity of Duration: 18446744073709551614000000000|ArithmeticException:long overflow|ArithmeticException:long overflow|ArithmeticException:Exceeds capacity of Duration: 9223372036854775808000000000|ArithmeticException:Exceeds capacity of Duration: 9223372036854775808000000000|ArithmeticException:long overflow|ArithmeticException:long overflow|ArithmeticException:Cannot divide by zero|-1,-500,-1,-1,-1,-1,-1,-1,-9223372036854775808|PT-3.5S,PT-0.000000003S|ArithmeticException:Exceeds capacity of Duration: 9223372036854775808000000000",
+            ),
+        ),
+        // RFC 2396 components: server and opaque URIs, a relative path, an empty path.
+        (
+            "uriParts",
+            Exact(
+                "http,Example.com,user@Example.com:8080,/a/b,q=1,f,user,8080|mailto,null,null,null,truetrue|null,null,a/b,false|true,h,-1",
+            ),
+        ),
+        // Text `URI` refuses (the message names the component), a decoded path and an
+        // escaped ASCII form: counted.
+        ("uriBad", Counted),
+        ("uriEscaped", Counted),
+        // A registry-based authority (`a_b`) has no host.
+        ("uriOddHost", Exact("null")),
     ];
     let mut failures = Vec::new();
     for (method, outcome) in &cases {

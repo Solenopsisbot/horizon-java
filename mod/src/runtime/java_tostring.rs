@@ -76,6 +76,13 @@ pub(crate) fn owner(value: &Value) -> Option<String> {
 
 /// The text `String.valueOf(value)` gives for a model object.
 pub(crate) fn modelled<H: Host>(host: &mut H, value: &Value) -> Option<String> {
+    // A jar's `new UUID(msb, lsb)` prints its halves (`host_jdk_value.rs`); one whose
+    // constructor the host did not see prints nothing modelled (counted by the caller).
+    if crate::runtime::host_jdk_value::is_uuid_object(value) {
+        return host
+            .constructed_uuid(value)
+            .map(|(msb, lsb)| crate::runtime::host_jdk_value::uuid_text_of(msb, lsb));
+    }
     // A host object (an `Optional`) prints through its class's model; an
     // allocated object through its class's, below.
     if let Value::Host(handle) = value
