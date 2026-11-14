@@ -13,7 +13,8 @@
 //!   `getClass`, `equals` both ways against the class, `hashCode`, text,
 //!   collection lookups keyed by the class (`HashSet`, `HashMap`,
 //!   `IdentityHashMap`, `ArrayList`, `List.of`, `Set.of`, `Map.of`), `==`, a
-//!   type switch, `Method.invoke` with the text as the receiver, and
+//!   type switch, reflection (a jar method's `Object` parameter through
+//!   `Method.invoke`, an `Object` field through `Field.set`/`get`), and
 //!   `CharSequence`. On a JVM all 12 pass all 12 checks.
 //! * `forName`: `Class.forName` resolves a binary name, the one way text
 //!   names a class.

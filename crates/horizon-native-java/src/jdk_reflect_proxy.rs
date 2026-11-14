@@ -385,7 +385,7 @@ impl<H: Host> Runtime<'_, H> {
                     message: Some(message),
                     frame: None,
                 };
-                if class_is_primitive(&Value::Ref(Some(class.clone()))) {
+                if crate::host_class::is_primitive(&class) {
                     return Err(illegal(format!("{class} is a primitive class")));
                 }
                 if class.starts_with('[') {

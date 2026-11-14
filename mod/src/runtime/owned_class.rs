@@ -56,7 +56,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         }
         let Some(class) = receiver
-            .and_then(expect_ref)
+            .and_then(crate::runtime::host_class::class_name)
             .map(|name| name.replace('.', "/"))
         else {
             return Ok(None);

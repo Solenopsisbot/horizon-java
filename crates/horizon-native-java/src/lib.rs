@@ -21782,7 +21782,7 @@ impl<H: Host> Runtime<'_, H> {
             && r.descriptor == "()Ljava/lang/Class;"
         {
             let class = reflection_class_name(receiver, r)?.replace('.', "/");
-            if class == "java/lang/Object" || class_is_primitive(&Value::Ref(Some(class.clone()))) {
+            if class == "java/lang/Object" || host_class::is_primitive(&class) {
                 return Ok(Some(Value::Ref(None)));
             }
             // A host kind's class: its row knows its supertypes, not which
@@ -21960,7 +21960,9 @@ impl<H: Host> Runtime<'_, H> {
                     host_reflect::MethodLookup::Absent => {
                         let parameters = parameter_types
                             .iter()
-                            .filter_map(|parameter| expect_ref(parameter).cloned())
+                            .filter_map(|parameter| {
+                                host_class::class_name(parameter).map(str::to_owned)
+                            })
                             .collect::<Vec<_>>();
                         return Err(host_reflect::no_such_method(class, name, &parameters));
                     }
@@ -22424,7 +22426,7 @@ impl<H: Host> Runtime<'_, H> {
             })?;
             return Some(method.annotations.clone());
         }
-        let class = expect_ref(receiver)?.replace('.', "/");
+        let class = host_class::class_name(receiver)?.replace('.', "/");
         self.class(&class).map(|file| file.annotations.clone())
     }
 
@@ -25488,17 +25490,28 @@ impl<H: Host> Runtime<'_, H> {
                     // Only a handle is an array (`host_array.rs`).
                     // A `String` spelling an object's key is only a `String`
                     // (`library_instance_of` answered for it).
+                    // A plain `String`, however it is spelled, is an instance
+                    // of `String`'s supertypes only (`"java/lang/Class"` is no
+                    // `Class`, #156 P13c).
+                    let plain_string = match &value {
+                        Value::Ref(Some(text)) if value_class::is_plain_string(text) => {
+                            Some(value_class::string_instance_of(text, &wanted))
+                        }
+                        _ => None,
+                    };
                     let matches = unboxed
-                        || !wanted.starts_with('[')
-                            && !jar_object::spells_key(&value)
-                            && expect_ref(&value).is_some_and(|marker| {
-                                self.forged_stream_instance_of(marker, &wanted)
-                                    || self.live_stream_instance_of(marker, &wanted) == Some(true)
-                                    || self.object_is_instance_of(marker, &wanted)
-                                    || self.host.host_instance_of(marker, &wanted)
-                                    || jdk_model::platform_instance_of(marker, &wanted)
-                                    || (wanted == "java/lang/Class" && host_class::is_class(&value))
-                            });
+                        || plain_string.unwrap_or_else(|| {
+                            !wanted.starts_with('[')
+                                && !jar_object::spells_key(&value)
+                                && expect_ref(&value).is_some_and(|marker| {
+                                    self.forged_stream_instance_of(marker, &wanted)
+                                        || self.live_stream_instance_of(marker, &wanted)
+                                            == Some(true)
+                                        || self.object_is_instance_of(marker, &wanted)
+                                        || self.host.host_instance_of(marker, &wanted)
+                                        || jdk_model::platform_instance_of(marker, &wanted)
+                                })
+                        });
                     // A `false` no model can stand behind is counted
                     // (`checkcast.rs`), and the host's answer is the result.
                     let matches = if !matches && self.instance_of_is_guess(&value, &wanted) {
@@ -30005,10 +30018,13 @@ pub fn dispatch_payload_frame_with(
 /// Parse an `@indy:` handler marker into its implementation method and bound
 /// captures. Runtime arguments (the payload and context) are not included.
 fn parse_dynamic_handler(marker: &str) -> Option<(MethodRef, Vec<Value>)> {
+    // `@indy:<class>#<method>:<index>:<target>:<captures>`. The first three
+    // hold no `:` (a descriptor has none); the captures may (a handle's
+    // `h<tag>:<key>`, the entrypoint object `this::handle` captures).
     let rest = marker.strip_prefix("@indy:")?;
-    let (head, captures) = rest.rsplit_once(':')?;
-    let (head, target) = head.rsplit_once(':')?;
-    let (_class_method, _index) = head.rsplit_once(':')?;
+    let mut parts = rest.splitn(4, ':');
+    let (_class_method, _index, target, captures) =
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
     let (owner, name_desc) = target.split_once('#')?;
     let (name, descriptor) = name_desc.split_once('(')?;
     let target = MethodRef {

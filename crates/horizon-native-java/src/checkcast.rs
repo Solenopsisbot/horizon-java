@@ -158,15 +158,16 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Err(class_cast_exception("java/lang/String", target));
         }
-        // A reference's text cast to a reflective `Type` shape: no text is a
-        // `Type` (types and classes are handles, `host_reflect_type.rs`,
-        // `host_class.rs`). A plain string, however it is spelled, throws
-        // Java's CCE (#156 P13c); a host marker is counted (the exception's
-        // class is not known).
+        // A reference's text cast to `Class` or a reflective `Type` shape: no
+        // text is either (classes and types are handles, `host_class.rs`,
+        // `host_reflect_type.rs`). A plain string, however it is spelled
+        // (`"int"`, `"java/lang/String"`), throws Java's CCE (#156 P13c); a
+        // host marker is counted (the exception's class is not known).
         if let Value::Ref(Some(text)) = value
             && matches!(
                 target,
-                "java/lang/reflect/ParameterizedType"
+                "java/lang/Class"
+                    | "java/lang/reflect/ParameterizedType"
                     | "java/lang/reflect/TypeVariable"
                     | "java/lang/reflect/WildcardType"
                     | "java/lang/reflect/GenericArrayType"

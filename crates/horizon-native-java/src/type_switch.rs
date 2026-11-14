@@ -141,9 +141,11 @@ impl<H: Host> Runtime<'_, H> {
         if crate::jar_object::spells_key(value) {
             return false;
         }
-        // A `Class` is a handle, never text (#156 P13c).
-        if class == "java/lang/Class" && crate::host_class::is_class(value) {
-            return true;
+        // A `String` is an instance of `String`'s supertypes only, however it
+        // is spelled: `"java/util/List"` is no `List`, `"java/lang/Class"` no
+        // `Class` (#156 P13c), as the `instanceof` opcode answers.
+        if value_class::is_plain_string(marker) {
+            return value_class::string_instance_of(marker, class);
         }
         self.object_is_instance_of(marker, class)
     }

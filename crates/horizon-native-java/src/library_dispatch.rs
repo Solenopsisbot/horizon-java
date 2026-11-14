@@ -513,6 +513,13 @@ impl<H: Host> Runtime<'_, H> {
     /// `value instanceof wanted`, by the same rules the `instanceof` opcode
     /// applies.
     pub(super) fn value_instance_of(&self, value: &Value, wanted: &str) -> bool {
+        // A `String` is an instance of `String`'s supertypes only, however it
+        // is spelled (`"java/lang/Class"` is no `Class`, #156 P13c).
+        if let Value::Ref(Some(text)) = value
+            && crate::value_class::is_plain_string(text)
+        {
+            return crate::value_class::string_instance_of(text, wanted);
+        }
         self.library_instance_of(value, wanted)
             || !crate::jar_object::spells_key(value)
                 && expect_ref(value).is_some_and(|marker| {

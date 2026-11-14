@@ -134,7 +134,7 @@ version = "1.0"
     let mut host = jar.seed_host(StdHost::new());
     host.seed_capability(
         "net/minecraft/world/level/Level",
-        "net/minecraftforge/common/capabilities/Capability#1",
+        "net/minecraftforge/common/capabilities/Capability#2",
         None::<String>,
         Some("NORTH"),
         Value::Ref(Some("energy".into())),

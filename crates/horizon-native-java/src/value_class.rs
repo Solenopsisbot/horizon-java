@@ -84,6 +84,11 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     if marker.starts_with('@') {
         return false;
     }
+    // An array class's descriptor (`[I`, `[Ljava/lang/String;`) names a
+    // `Class`, which is a handle (#156 P13c): as text it is a `String`.
+    if marker.starts_with('[') && !marker.contains('#') {
+        return true;
+    }
     // An object is a handle (`jar_object.rs`), a host-made collection too
     // (P14c): a text spelling either's key is a `String`.
     if crate::jar_object::spells_key_text(marker) {

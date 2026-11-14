@@ -95,8 +95,8 @@ public class Probe {
       "identity", "switch", "reflection", "charSequence",
     };
     int[] strings = new int[checks.length];
-    Method length = String.class.getMethod("length");
-    Method getName = Class.class.getMethod("getName");
+    Method label = Probe.class.getDeclaredMethod("label", Object.class);
+    java.lang.reflect.Field held = Probe.class.getDeclaredField("held");
     for (int k = 0; k < SPELLINGS.length; k++) {
       String spelled = SPELLINGS[k];
       Class<?> klass = CLASSES[k];
@@ -134,7 +134,7 @@ public class Probe {
             && Map.of(klass, "c").get(s) == null,
         s != (Object) klass,
         label(s) == 2 && typeLabel(s) == 2,
-        (int) length.invoke(s) == spelled.length() && throwsIae(() -> getName.invoke(s)),
+        (int) label.invoke(null, s) == 2 && setAndGet(held, s).equals(spelled) && !(held.get(null) instanceof Class),
         ((CharSequence) s).length() == spelled.length(),
       };
       for (int i = 0; i < ok.length; i++) {
@@ -150,15 +150,12 @@ public class Probe {
     return out.toString();
   }
 
-  static boolean throwsIae(Check check) {
-    try {
-      check.run();
-      return false;
-    } catch (IllegalArgumentException expected) {
-      return true;
-    } catch (Exception other) {
-      return false;
-    }
+  /** A static an Object is kept in, set and read back reflectively. */
+  static Object held;
+
+  static Object setAndGet(java.lang.reflect.Field field, Object value) throws Exception {
+    field.set(null, value);
+    return field.get(null);
   }
 
   /** {@code Class.forName} resolves a binary name: the one way text names a class. */
