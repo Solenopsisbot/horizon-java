@@ -113,7 +113,7 @@ impl<H: Host> Runtime<'_, H> {
             ("java/lang/reflect/Proxy", "isProxyClass", "(Ljava/lang/Class;)Z") => {
                 Ok(Some(Value::Int(i32::from(
                     args.first()
-                        .and_then(expect_ref)
+                        .and_then(crate::host_class::class_name)
                         .is_some_and(|class| class == PROXY_CLASS),
                 ))))
             }
@@ -375,7 +375,7 @@ impl<H: Host> Runtime<'_, H> {
                         "Cannot invoke \"java.lang.Class.isPrimitive()\" because \"targetClass\" is null",
                     )));
                 }
-                let Some(class) = expect_ref(target).map(|class| class.replace('.', "/")) else {
+                let Some(class) = crate::host_class::class_name(target).map(|class| class.replace('.', "/")) else {
                     return self.host.unknown_operand_call(r).map(Some);
                 };
                 let illegal = |message: String| NativeError::UncaughtException {
@@ -460,7 +460,7 @@ impl<H: Host> Runtime<'_, H> {
                 "findStatic" | "findVirtual",
                 "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;",
             ) => {
-                let class = args.first().and_then(expect_ref).cloned();
+                let class = args.first().and_then(crate::host_class::class_name).map(str::to_owned);
                 let name = args.get(1).and_then(expect_ref).cloned();
                 let (Some(class), Some(name)) = (class, name) else {
                     return Err(npe(None));
@@ -508,7 +508,7 @@ impl<H: Host> Runtime<'_, H> {
             ) => {
                 let Some(class) = args
                     .first()
-                    .and_then(expect_ref)
+                    .and_then(crate::host_class::class_name)
                     .map(|c| c.replace('.', "/"))
                 else {
                     return Err(npe(None));
@@ -575,14 +575,14 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 // Java 25 interns the type by its hash first: a null return
                 // type, then a null parameter, then a `void` one.
-                let Some(result) = expect_ref(result) else {
+                let Some(result) = crate::host_class::class_name(result) else {
                     return Err(npe(Some(
                         "Cannot invoke \"Object.hashCode()\" because \"this.rtype\" is null",
                     )));
                 };
                 if parameters
                     .iter()
-                    .any(|parameter| expect_ref(parameter).is_none())
+                    .any(|parameter| crate::host_class::class_name(parameter).is_none())
                 {
                     return Err(npe(Some(
                         "Cannot invoke \"Object.hashCode()\" because \"ptype\" is null",
@@ -590,7 +590,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 let mut descriptor = String::from("(");
                 for parameter in parameters {
-                    let Some(name) = expect_ref(parameter) else {
+                    let Some(name) = crate::host_class::class_name(parameter) else {
                         return Err(npe(None));
                     };
                     if name == "void" {

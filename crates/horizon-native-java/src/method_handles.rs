@@ -685,7 +685,7 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         let (Some(class), Some(name)) = (
-            args.first().and_then(expect_ref),
+            args.first().and_then(crate::host_class::class_name),
             args.get(1).and_then(expect_ref),
         ) else {
             return Ok(None);
@@ -726,7 +726,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn find_jdk_constructor(&mut self, args: &[Value]) -> Result<Option<Value>, NativeError> {
-        let Some(class) = args.first().and_then(expect_ref) else {
+        let Some(class) = args.first().and_then(crate::host_class::class_name) else {
             return Ok(None);
         };
         let class = class.replace('.', "/");
@@ -881,7 +881,7 @@ impl<H: Host> Runtime<'_, H> {
                 else {
                     return Ok(None);
                 };
-                let Some(exception) = args.get(1).and_then(expect_ref) else {
+                let Some(exception) = args.get(1).and_then(crate::host_class::class_name) else {
                     return Err(npe());
                 };
                 Handle::Catch {
@@ -955,7 +955,7 @@ impl<H: Host> Runtime<'_, H> {
                 Value::Ref(Some(descriptor.clone()))
             }
             ("changeReturnType", "(Ljava/lang/Class;)Ljava/lang/invoke/MethodType;") => {
-                let class = args.first().and_then(expect_ref)?;
+                let class = args.first().and_then(crate::host_class::class_name)?;
                 method_type_value(&method_descriptor(&parameters, &field_descriptor(class)))
             }
             _ => return None,

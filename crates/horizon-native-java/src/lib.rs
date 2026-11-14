@@ -96,6 +96,7 @@ mod immutable_collections;
 mod iteration_guard;
 mod jar_compare;
 mod jar_object;
+mod host_class;
 mod jar_operands;
 mod jar_text;
 mod jar_throwables;
@@ -5076,7 +5077,9 @@ impl Host for StdHost {
             ("java/util/ServiceLoader", "load" | "loadInstalled", descriptor)
                 if descriptor.starts_with("(Ljava/lang/Class;") =>
             {
-                let service = expect_string(Self::argument(r, args, 0)?).replace('.', "/");
+                let service = host_class::class_name(Self::argument(r, args, 0)?)
+                    .unwrap_or_default()
+                    .replace('.', "/");
                 if !self.merged_service_providers(&service).is_empty()
                     || !host_models_class(&service)
                 {
@@ -5604,7 +5607,9 @@ impl Host for StdHost {
                     ("void", "java/lang/Void"),
                 ];
                 let class = Self::argument(r, args, 0)?;
-                let name = expect_string(class).replace('.', "/");
+                let name = host_class::class_name(class)
+                    .unwrap_or_default()
+                    .replace('.', "/");
                 let to_wrapper = r.name == "primitiveToWrapper";
                 let mapped = PAIRS.iter().find_map(|(primitive, wrapper)| {
                     if to_wrapper {
@@ -9201,7 +9206,10 @@ impl Host for StdHost {
                 // per entry (whose lazy `getEntrypoint` checks the type);
                 // `getEntrypoints` creates each instance eagerly for the type.
                 let kind = expect_string(Self::argument(r, args, 0)?).to_owned();
-                let requested = args.get(1).and_then(expect_ref).cloned();
+                let requested = args
+                    .get(1)
+                    .and_then(host_class::class_name)
+                    .map(str::to_owned);
                 let entries = self
                     .fabric_entrypoint_containers
                     .iter()
@@ -9738,7 +9746,7 @@ fn path_join(base: &str, child: &str) -> String {
 }
 
 fn class_descriptor(value: &Value) -> Option<String> {
-    let name = expect_string(value);
+    let name = host_class::class_name(value).unwrap_or_default();
     if name.is_empty() {
         return None;
     }
@@ -9773,8 +9781,7 @@ fn reflection_class_name<'v>(
     call: &MethodRef,
 ) -> Result<&'v str, NativeError> {
     value
-        .and_then(expect_ref)
-        .map(String::as_str)
+        .and_then(host_class::class_name)
         .ok_or_else(|| NativeError::UncaughtException {
             class: "java/lang/NullPointerException".into(),
             message: Some(format!(
@@ -9833,7 +9840,7 @@ fn class_of_text(marker: &str) -> Option<String> {
 }
 
 fn class_binary_name(value: &Value) -> String {
-    let name = expect_string(value);
+    let name = host_class::class_name(value).unwrap_or_default();
     if name.starts_with('[') {
         // JVM array descriptors use slash-separated object names. Preserve
         // the descriptor shape while matching Class#getName's dotted form.
@@ -20802,7 +20809,7 @@ impl<H: Host> Runtime<'_, H> {
             return None;
         }
         let name = receiver
-            .and_then(expect_ref)
+            .and_then(host_class::class_name)
             .map(|marker| marker.replace('.', "/"))?;
         // A host kind's class: its row knows its supertypes, not which are
         // declared directly. Left to the host, which counts it.
@@ -20932,7 +20939,8 @@ impl<H: Host> Runtime<'_, H> {
             ("newInstance", "(Ljava/lang/Class;I)Ljava/lang/Object;") => {
                 let length = expect_int(r, StdHost::argument(r, args, 1)?)?;
                 let length = array_length(length)?;
-                let Value::Ref(Some(component)) = StdHost::argument(r, args, 0)? else {
+                let Some(component) = host_class::class_name(StdHost::argument(r, args, 0)?)
+                else {
                     return Ok(None);
                 };
                 let class = value_class::array_class_marker(&component.replace('.', "/"));
@@ -21579,7 +21587,9 @@ impl<H: Host> Runtime<'_, H> {
             && let Some(annotations) =
                 receiver.and_then(|receiver| self.element_annotations(receiver))
         {
-            let wanted = expect_string(StdHost::argument(r, args, 0)?).replace('.', "/");
+            let wanted = host_class::class_name(StdHost::argument(r, args, 0)?)
+                .unwrap_or_default()
+                .replace('.', "/");
             let found = annotations
                 .into_iter()
                 .find(|annotation| annotation_is(annotation, &wanted));
@@ -21592,8 +21602,10 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getAnnotation"
             && r.descriptor == "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;"
         {
-            let class = expect_string(receiver.unwrap_or(&Value::Ref(None)));
-            let wanted = expect_string(StdHost::argument(r, args, 0)?);
+            let class = receiver
+                .and_then(host_class::class_name)
+                .unwrap_or_default();
+            let wanted = host_class::class_name(StdHost::argument(r, args, 0)?).unwrap_or_default();
             let found = self.class(class).and_then(|file| {
                 file.annotations
                     .iter()
@@ -21606,7 +21618,7 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getAnnotation"
             && r.descriptor == "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;"
         {
-            let wanted = expect_string(StdHost::argument(r, args, 0)?);
+            let wanted = host_class::class_name(StdHost::argument(r, args, 0)?).unwrap_or_default();
             let found = receiver
                 .and_then(host_reflect::method_of)
                 .and_then(|method| {
@@ -23320,9 +23332,14 @@ impl<H: Host> Runtime<'_, H> {
                         let text = args.first().map(expect_string).ok_or_else(|| {
                             NativeError::Metadata("Gson.fromJson needs a JSON string".into())
                         })?;
-                        let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
-                            NativeError::Metadata("Gson.fromJson needs a Class".into())
-                        })?;
+                        let class = args
+                            .get(1)
+                            .and_then(host_class::class_name)
+                            .map(str::to_owned)
+                            .ok_or_else(|| {
+                                NativeError::Metadata("Gson.fromJson needs a Class".into())
+                            })?;
+                        let class = &class;
                         Ok(Some(self.gson_from_json(text, class, &style)?))
                     }
                     ("fromJson", "(Ljava/io/Reader;Ljava/lang/Class;)Ljava/lang/Object;") => {
@@ -23335,9 +23352,14 @@ impl<H: Host> Runtime<'_, H> {
                              file or stream reader"
                             ))
                         })?;
-                        let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
-                            NativeError::Metadata("Gson.fromJson needs a Class".into())
-                        })?;
+                        let class = args
+                            .get(1)
+                            .and_then(host_class::class_name)
+                            .map(str::to_owned)
+                            .ok_or_else(|| {
+                                NativeError::Metadata("Gson.fromJson needs a Class".into())
+                            })?;
+                        let class = &class;
                         Ok(Some(self.gson_from_json(&text, class, &style)?))
                     }
                     // `Gson.fromJson(Reader, TypeToken)` takes the token's erased
