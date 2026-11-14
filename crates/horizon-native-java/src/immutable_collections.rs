@@ -636,7 +636,9 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 Ok(boolean(false))
             }
-            (_, "size" | "isEmpty", _, []) => Ok(None),
+            // `getClass()` names the class, never the order (a `SetN` is an
+            // object now, #156 P14c, so its `getClass` arrives here).
+            (_, "size" | "isEmpty" | "getClass", _, []) => Ok(None),
             // Anything else may show the order: random for two or more.
             _ if size >= 2 => self.host.unknown_operand_call(r).map(|_| None),
             _ => Ok(None),
