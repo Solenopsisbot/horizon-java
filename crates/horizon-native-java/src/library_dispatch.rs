@@ -66,6 +66,10 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_array_class(r, receiver)? {
             return Ok(Some(value));
         }
+        // Gson's `TypeToken` and its canonical types (`gson_type_token.rs`).
+        if let Some(value) = self.invoke_gson_types(r, receiver, args)? {
+            return Ok(Some(value));
+        }
         if let Some(value) = self.invoke_guava(r, receiver, args)? {
             return Ok(Some(value));
         }
@@ -451,7 +455,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
-        if !marker.contains('#') && !marker.starts_with("typetoken/") {
+        if !marker.contains('#') {
             return Ok(None);
         }
         let to_string = MethodRef {

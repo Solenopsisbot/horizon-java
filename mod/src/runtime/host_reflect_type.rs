@@ -138,26 +138,6 @@ pub(crate) fn type_node(value: &Value) -> Option<GenericType> {
     }
 }
 
-/// The text Guava's `TypeToken` model keeps a type under (`guava_model.rs`,
-/// a later phase's family): a class's name, or a type handle's own encoding,
-/// which only [`type_from_text`] reads back.
-pub(crate) fn type_text(value: &Value) -> Option<String> {
-    match value {
-        Value::Ref(Some(name)) => Some(name.clone()),
-        Value::Host(handle) if handle.kind() == HostKind::Class => Some(handle.key().to_owned()),
-        Value::Host(handle) if handle.kind() == HostKind::ReflectType => Some(handle.encode()),
-        _ => None,
-    }
-}
-
-/// The `Type` value [`type_text`] wrote.
-pub(crate) fn type_from_text(text: &str) -> Value {
-    match HostRef::decode(text) {
-        Some(handle) if handle.kind() == HostKind::ReflectType => Value::Host(handle),
-        _ => Value::Ref(Some(text.to_owned())),
-    }
-}
-
 /// The node a type handle names (no class marker).
 pub(crate) fn handle_node(value: &Value) -> Option<GenericType> {
     match value {
@@ -370,11 +350,15 @@ fn type_equals(
         return Ok(None);
     };
     Ok(match other {
-        Value::Host(_) => match handle_node(other) {
-            Some(other) => nodes_equal(&node, &other),
-            // No other handle kind is a `java.lang.reflect.Type` shape.
-            None => Some(false),
-        },
+        Value::Host(_) => {
+            match handle_node(other).or_else(|| crate::runtime::host_gson_type::gson_node(other)) {
+                // A JDK node or Gson's canonical copy (`ParameterizedTypeImpl.equals`
+                // asks only for the shape's interface and its parts).
+                Some(other) => nodes_equal(&node, &other),
+                // No other handle kind is a `java.lang.reflect.Type` shape.
+                None => Some(false),
+            }
+        }
         // A jar's own `ParameterizedType` (Gson's, Guava's) answers through
         // its own methods: counted.
         other if jar_object(other) => None,
