@@ -953,7 +953,9 @@ impl<H: Host> Runtime<'_, H> {
                 descriptor: descriptor.clone(),
             };
             let value = if access & 0x0008 != 0 {
-                self.stored_static(&field)?
+                self.static_fields
+                    .get(&Self::static_field_key(&field))
+                    .cloned()
             } else {
                 self.fields
                     .get(&format!("{marker}|{declaring}#{name}{descriptor}"))

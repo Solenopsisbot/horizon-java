@@ -2751,13 +2751,8 @@ const MAX_SEEDED_SERVICE_PROVIDERS: usize = 256;
 /// Resident Java class state is bounded per native mod instance. Static
 /// fields and initialized-class markers are retained across callbacks, but a
 /// jar cannot grow an unbounded heap through repeated event dispatch.
-/// The host's bound on a jar's persistent statics and initialized classes:
-/// far above any real jar (the largest census jar keeps a few thousand). A
-/// `ConstantValue` static is never stored (`class_init.rs`), so constants do
-/// not count; a store over the bound is refused and counted, never an error
-/// in place of the call's result (`Runtime::persist_class_state`).
-const MAX_PERSISTENT_CLASS_FIELDS: usize = 1 << 20;
-const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1 << 20;
+const MAX_PERSISTENT_CLASS_FIELDS: usize = 1024;
+const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1024;
 
 /// Deterministic, game-independent mappings for the small standard-library
 /// surface commonly reached during mod bootstrap.
@@ -6381,11 +6376,11 @@ impl Host for StdHost {
             }
         }
         if r.owner == "java/lang/Thread" {
-            // A jar may construct its own thread for a shutdown hook; that
-            // object keeps its `java/lang/Thread#<n>` identity, and the main
-            // thread is the handle `currentThread` answers (`host_jdk.rs`).
-            // `main` names it in the parked-thread table, whose other keys
-            // are `java/lang/Thread#<n>` markers.
+            // A jar may construct its own thread (a shutdown hook, a worker),
+            // or an object of its own `Thread` subclass (#194), keyed by its
+            // allocation (`java/lang/Thread#<n>`, `demo/Worker#<n>`); the
+            // main thread is the handle `currentThread` answers
+            // (`host_jdk.rs`), `main` in the parked-thread table.
             let marker = match receiver {
                 receiver if host_jdk::is_main_thread(receiver) => "main".to_owned(),
                 // A thread a jar constructed (`jar_object.rs`).
@@ -6399,11 +6394,11 @@ impl Host for StdHost {
                 }
             };
             let marker = &marker;
-            let is_thread = marker == "main" || marker.starts_with("java/lang/Thread#");
-            if !is_thread {
-                return Err(NativeError::Metadata(
-                    "unsupported java/lang/Thread marker".into(),
-                ));
+            if marker != "main"
+                && r.name != "<init>"
+                && let Some(answer) = self.constructed_thread_call(r, marker, args)
+            {
+                return answer;
             }
             return match (r.name.as_str(), r.descriptor.as_str()) {
                 ("<init>", descriptor) => {
@@ -6411,9 +6406,13 @@ impl Host for StdHost {
                     self.note_thread_made(&marker, descriptor, args);
                     Ok(Value::Void)
                 }
-                ("getName", "()Ljava/lang/String;") => Ok(Value::Ref(Some("main".into()))),
-                ("isDaemon", "()Z") => Ok(Value::Int(0)),
-                ("setDaemon", "(Z)V") => Ok(Value::Void),
+                // The current thread's; a constructed thread's are its own
+                // (`parked_threads.rs`), counted where not known.
+                ("getName", "()Ljava/lang/String;") if marker == "main" => {
+                    Ok(Value::Ref(Some("main".into())))
+                }
+                ("isDaemon", "()Z") if marker == "main" => Ok(Value::Int(0)),
+                ("setDaemon", "(Z)V") if marker == "main" => Ok(Value::Void),
                 // The bounded runtime has one thread and `<init>` keeps no
                 // `Runnable`, so a started thread's body never runs. That is
                 // not a success to report: the call is counted (and refused
@@ -6423,6 +6422,7 @@ impl Host for StdHost {
                 // `parked_threads.rs` names what never ran in the report.
                 ("start", "()V") => {
                     let marker = marker.clone();
+                    self.mark_thread_started(&marker);
                     self.note_thread_parked(&marker);
                     self.unknown_host_call(r)
                 }
@@ -16794,12 +16794,6 @@ impl NativeJar {
         modify_hooks: Option<&mut ModifyHooks>,
     ) -> Result<Value, NativeError> {
         let class_name = class.replace('.', "/");
-        // A JVM's statics are per class for the whole run (#184): a call, a
-        // Mixin target or one of its callbacks runs against the host's
-        // persistent class state and resident heap, as an entrypoint and a
-        // listener do (`invoke_persistent`), so what one callback writes the
-        // next sees, and `<clinit>` runs once.
-        let (static_fields, initialized_classes) = host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
@@ -16807,8 +16801,8 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
-            static_fields,
-            initialized_classes,
+            static_fields: BTreeMap::new(),
+            initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -16835,15 +16829,7 @@ impl NativeJar {
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
-        let resident = runtime.adopt_resident_heap();
-        let result = runtime.invoke(&class_name, method, descriptor, receiver, args);
-        // A failed run keeps what it wrote before failing, as a JVM would.
-        let persistence = runtime.persist_class_state();
-        if resident {
-            runtime.persist_resident_heap()?;
-        }
-        persistence?;
-        result
+        runtime.invoke(&class_name, method, descriptor, receiver, args)
     }
 
     fn execute_target_without_mixin<H: Host>(
@@ -19444,26 +19430,11 @@ impl<H: Host> Runtime<'_, H> {
     /// Commit jar-owned class state to the resident host after an invocation.
     /// The host applies its own bounded retention policy; a failed commit is
     /// surfaced instead of silently dropping static fields or initialization.
-    ///
-    /// A store the host refuses (over its bound) leaves this run's statics
-    /// unkept: that is counted, and never turns a call that succeeded into an
-    /// error.
     fn persist_class_state(&mut self) -> Result<(), NativeError> {
-        if self
-            .host
-            .store_persistent_class_state(
-                self.static_fields.clone(),
-                self.initialized_classes.clone(),
-            )
-            .is_err()
-        {
-            self.host.unknown_operand_call(&MethodRef {
-                owner: "java/lang/Class".into(),
-                name: "<persistent-statics>".into(),
-                descriptor: "()V".into(),
-            })?;
-        }
-        Ok(())
+        self.host.store_persistent_class_state(
+            self.static_fields.clone(),
+            self.initialized_classes.clone(),
+        )
     }
 
     /// Open one `CallbackInfo` object for a host hook callback.
@@ -20168,7 +20139,9 @@ impl<H: Host> Runtime<'_, H> {
         match plan.kind {
             MixinAccessorKind::Getter => {
                 let value = if plan.static_target {
-                    self.stored_static(&target)?
+                    self.static_fields
+                        .get(&Self::static_field_key(&target))
+                        .cloned()
                 } else {
                     receiver
                         .and_then(|receiver| instance_field_key(receiver, &target))
@@ -21706,20 +21679,13 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("get", "(Ljava/lang/Object;)Ljava/lang/Object;") => {
                     // An unset field answers its type's default, exactly as a
-                    // JVM field does before the constructor assigns it; an
-                    // unset static its `ConstantValue` (never stored).
-                    let stored = self
+                    // JVM field does before the constructor assigns it.
+                    let value = self
                         .fields
                         .get(&key)
                         .or_else(|| self.static_fields.get(&key))
-                        .cloned();
-                    let value = match stored {
-                        Some(value) => value,
-                        None if access & 8 != 0 => self
-                            .static_constant(class, name, &descriptor)?
-                            .unwrap_or_else(|| Value::default_for(&descriptor)),
-                        None => Value::default_for(&descriptor),
-                    };
+                        .cloned()
+                        .unwrap_or_else(|| Value::default_for(&descriptor));
                     declared_value(&descriptor, value)
                 }
                 ("set", "(Ljava/lang/Object;Ljava/lang/Object;)V") => {
@@ -25062,8 +25028,6 @@ impl<H: Host> Runtime<'_, H> {
                                 // static of a class the jar does not declare
                                 // is the host's to answer (a strict host would
                                 // refuse the read otherwise).
-                                // A `ConstantValue` static is its constant
-                                // (never stored, `class_init.rs`).
                                 None if self.class(&field.owner).is_some_and(|file| {
                                     file.fields.iter().any(|declared| {
                                         declared.name == field.name
@@ -25071,12 +25035,7 @@ impl<H: Host> Runtime<'_, H> {
                                     })
                                 }) =>
                                 {
-                                    self.static_constant(
-                                        &field.owner,
-                                        &field.name,
-                                        &field.descriptor,
-                                    )?
-                                    .unwrap_or_else(|| Value::default_for(&field.descriptor))
+                                    Value::default_for(&field.descriptor)
                                 }
                                 None => self.host.get_static(&field)?,
                             }
@@ -25506,6 +25465,12 @@ impl<H: Host> Runtime<'_, H> {
                         concurrent_sync::invoke(self, &r, receiver.as_ref(), &args)
                     ) {
                         // `CountDownLatch`, `new ThreadPoolExecutor` (`concurrent_sync.rs`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        executors::invoke_thread(self, &r, receiver.as_ref(), &args)
+                    ) {
+                        // A constructed thread's target (`executors.rs`, #194).
                         value
                     } else if let Some(value) =
                         executors::invoke_thread_factory(self, &r, receiver.as_ref(), &args)

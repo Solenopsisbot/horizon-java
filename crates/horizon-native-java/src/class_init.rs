@@ -196,54 +196,22 @@ impl<H: Host> Runtime<'_, H> {
         outcome
     }
 
-    /// JVMS §5.5 step 6 (module docs): each static field's `ConstantValue`.
-    /// The constant is not written into `static_fields`: a read of a field no
-    /// one stored answers it from the class's bytes ([`Self::static_constant`],
-    /// `getstatic` and reflection), so constants never enter the persistent
-    /// class state a host keeps and bounds (#195 review: a class with a
-    /// thousand constants used to fill it). A final constant is never written
-    /// after preparation (javac inlines it and emits no `putstatic`).
+    /// JVMS §5.5 step 6 (module docs): each static field's `ConstantValue`,
+    /// read from the class's bytes. A value already there (a host that seeded
+    /// the field) is kept.
     fn assign_constant_values(&mut self, class: &str) -> Result<(), NativeError> {
         let Some(file) = self.class(class) else {
             return Ok(());
         };
-        if !file.raw.is_empty() {
-            // Validate the attributes now, as preparation would.
-            static_constant_values(&file.raw)?;
+        if file.raw.is_empty() {
+            return Ok(());
+        }
+        for (name, descriptor, value) in static_constant_values(&file.raw)? {
+            self.static_fields
+                .entry(format!("{class}#{name}{descriptor}"))
+                .or_insert(value);
         }
         Ok(())
-    }
-
-    /// A static field's stored value, else its `ConstantValue` (constants are
-    /// never stored); `None` when neither.
-    pub(crate) fn stored_static(
-        &self,
-        field: &crate::MethodRef,
-    ) -> Result<Option<Value>, NativeError> {
-        match self.static_fields.get(&Self::static_field_key(field)) {
-            Some(value) => Ok(Some(value.clone())),
-            None => self.static_constant(&field.owner, &field.name, &field.descriptor),
-        }
-    }
-
-    /// The `ConstantValue` of static field `name descriptor` of `class`, if it
-    /// has one: what preparation gives it before `<clinit>`.
-    pub(crate) fn static_constant(
-        &self,
-        class: &str,
-        name: &str,
-        descriptor: &str,
-    ) -> Result<Option<Value>, NativeError> {
-        let Some(file) = self.class(class) else {
-            return Ok(None);
-        };
-        if file.raw.is_empty() {
-            return Ok(None);
-        }
-        Ok(static_constant_values(&file.raw)?
-            .into_iter()
-            .find(|(field, desc, _)| field == name && desc == descriptor)
-            .map(|(_, _, value)| value))
     }
 
     /// The recorded cause of an erroneous class, or `None`.

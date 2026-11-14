@@ -339,10 +339,10 @@ fn a_callback_info_answers_as_the_one_mixin_builds() {
 /// Mixin keeps one `CallbackInfo` per `@Inject` (`CallbackInjector`'s
 /// `callbackInfoVar`, sponge-mixin 0.17.5), so the two injectors on
 /// `twice()V` are handed two objects (Java 25: `first == second` is `false`).
-/// The objects are compared as the callbacks hand them to a host call: two
-/// handles with different keys, which `==`, `IdentityHashMap` and `equals`
-/// answer as two objects. (A jar static carries from one callback to the
-/// next since #184: `fixture_statics_across_callbacks.rs`.)
+/// A jar static does not yet carry from one callback to the next in one
+/// execution, so the objects are compared as the callbacks hand them to a
+/// host call: two handles with different keys, which `==`,
+/// `IdentityHashMap` and `equals` answer as two objects.
 #[test]
 fn each_inject_gets_its_own_callback_info() {
     let fixture = fixture("p7-twice");
