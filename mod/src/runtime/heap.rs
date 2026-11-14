@@ -134,6 +134,42 @@ impl StdHost {
         self.posted_events.truncate(mark.posted_events);
     }
 
+    /// Keep `value`, and whatever it reaches, alive across heap collections
+    /// until [`Self::release`]: a value the embedder holds from one
+    /// invocation to a later one, which the jar's own roots may no longer
+    /// name (#226 review).
+    ///
+    /// An invocation's receiver, arguments and result are kept through that
+    /// invocation's own store without this (collections run only when a
+    /// top-level call ends, so they are safe while the embedder has them in
+    /// hand); one the embedder keeps across later calls must be retained.
+    /// Holds are counted: two `retain`s need two `release`s.
+    pub fn retain(&mut self, value: &Value) {
+        if let Some(text) = pin_text(value) {
+            *self.retained.entry(text.to_owned()).or_default() += 1;
+        }
+    }
+
+    /// Drop one [`Self::retain`] hold on `value`: once none is left,
+    /// collections may free it (and what only it reached) when the jar no
+    /// longer reaches it either.
+    pub fn release(&mut self, value: &Value) {
+        if let Some(text) = pin_text(value)
+            && let Some(holds) = self.retained.get_mut(text)
+        {
+            *holds -= 1;
+            if *holds == 0 {
+                self.retained.remove(text);
+            }
+        }
+    }
+
+    /// How many distinct values [`Self::retain`] keeps: an embedder that
+    /// never releases what it retains shows here as a count that only grows.
+    pub fn retained_count(&self) -> usize {
+        self.retained.len()
+    }
+
     pub(crate) fn take_resident_heap(&mut self) -> JavaHeap {
         let live = self.heap.live;
         let heap = std::mem::take(&mut self.heap);
@@ -149,8 +185,15 @@ impl StdHost {
         heap.live = self.heap.live;
         let roots = std::mem::take(&mut heap.roots);
         let entries = heap_entries(&heap, self);
-        if entries > heap.live.saturating_mul(2).saturating_add(COLLECT_SLACK)
-            || over_count_bound(&heap)
+        // Collect once the heap doubled past what the last collection kept
+        // (so a collection's cost is paid once per as many new entries as
+        // live ones), or past twice the bound, whichever comes first. The
+        // bound is on the live set: garbage between collections may exceed
+        // it, which keeps a live set near the bound from collecting on
+        // every store (#226 review).
+        if !self.collections_paused
+            && (entries > heap.live.saturating_mul(2).saturating_add(COLLECT_SLACK)
+                || over_count_guard(&heap))
         {
             collect(&mut heap, self, &roots);
             heap.live = heap_entries(&heap, self);
@@ -161,15 +204,15 @@ impl StdHost {
                     "the jar's Java objects hold about {bytes} bytes after collection, over the resident bound of {MAX_RESIDENT_BYTES}"
                 )));
             }
+            if over_count_bound(&self.heap) {
+                return Err(NativeError::Metadata(format!(
+                    "the jar's Java objects keep {} fields and {} arrays after collection, over the resident bound of {MAX_RESIDENT_FIELDS} fields or {MAX_RESIDENT_ARRAYS} arrays",
+                    self.heap.fields.len(),
+                    self.heap.arrays.len()
+                )));
+            }
         } else {
             self.heap = heap;
-        }
-        if over_count_bound(&self.heap) {
-            return Err(NativeError::Metadata(format!(
-                "the jar's Java objects keep {} fields and {} arrays after collection, over the resident bound of {MAX_RESIDENT_FIELDS} fields or {MAX_RESIDENT_ARRAYS} arrays",
-                self.heap.fields.len(),
-                self.heap.arrays.len()
-            )));
         }
         Ok(())
     }
@@ -188,7 +231,18 @@ impl StdHost {
         for field in self.persistent_static_fields.values() {
             value(field, out);
         }
+        // What the embedder holds between invocations (`StdHost::retain`).
+        out.extend(self.retained.keys().map(String::as_str));
+        // Only the logged calls the log is read back for (event
+        // registrations, `events::read_back_call`). Every other call is
+        // history: a constructor's receiver is the new object itself, and
+        // what any call left with the host lives in a table listed here (or
+        // keyed by its object, `keyed_texts`). Rooting the whole log kept
+        // every object a jar ever made alive (#197).
         for invocation in &self.invocations {
+            if !crate::runtime::events::read_back_call(&invocation.method) {
+                continue;
+            }
             if let Some(receiver) = &invocation.receiver {
                 value(receiver, out);
             }
@@ -222,13 +276,6 @@ impl StdHost {
             out.push(key);
             slots.iter().for_each(|slot| value(slot, out));
         }
-        for (key, cause) in &self.throwable_causes {
-            out.push(key);
-            if let Some(cause) = cause {
-                value(cause, out);
-            }
-        }
-        out.extend(self.throwable_messages.keys().map(String::as_str));
         out.extend(self.payload_bytes.keys().map(String::as_str));
         out.extend(self.packet_types.keys().map(String::as_str));
         out.extend(self.item_property_builders.keys().map(String::as_str));
@@ -240,6 +287,107 @@ impl StdHost {
         self.saved_data.root_texts(out);
         // NeoForge attachment types and live values (`neoforge_attachments.rs`).
         self.neoforge_attachments.root_texts(out);
+        // The objects the loader built and keeps (an entrypoint instance,
+        // a `DeferredRegister`'s values) and the JDK's shared empties.
+        self.constructed_entrypoints
+            .values()
+            .for_each(|held| value(held, out));
+        for (key, held) in &self.deferred_registers {
+            out.push(key);
+            if let Some((held, _)) = held {
+                value(held, out);
+            }
+        }
+        out.extend(self.shared_empties.values().map(String::as_str));
+    }
+
+    /// The host's own state that may name a jar object without a table this
+    /// module reads field by field: each one's whole `Debug` text, scanned
+    /// for markers as a root (keeping too much, never too little).
+    fn opaque_root_texts(&self, out: &mut Vec<String>) {
+        out.push(format!("{:?}", self.neoforge_bus));
+        out.push(format!("{:?}", self.imc));
+        out.push(format!("{:?}", self.threads));
+        out.push(format!("{:?}", self.levels));
+        out.push(format!("{:?}", self.capability_requests));
+        out.push(format!("{:?}", self.client));
+        out.push(format!("{:?}", self.game_event));
+        out.push(format!("{:?}", self.fabric_entrypoint_containers));
+        out.push(format!("{:?}", self.content_builders));
+        out.push(format!("{:?}", self.holder_rows));
+    }
+
+    /// What the host keeps for the object `marker` in a table keyed by it: a
+    /// view's source, a sublist's parent, an iterator's collection and
+    /// guard, a comparator, a reference's referent, a throwable's cause, a
+    /// collection's layout. Edges from `marker` when it is collectable,
+    /// roots when not.
+    fn keyed_texts(&self, marker: &str, out: &mut Vec<String>) {
+        fn push(entry: Option<&impl std::fmt::Debug>, out: &mut Vec<String>) {
+            if let Some(entry) = entry {
+                out.push(format!("{entry:?}"));
+            }
+        }
+        push(self.unmodifiable_collections.get(marker), out);
+        push(self.reversed_views.get(marker), out);
+        push(self.synchronized_views.get(marker), out);
+        push(self.view_copies.get(marker), out);
+        push(self.sub_lists.get(marker), out);
+        push(self.iterator_sources.get(marker), out);
+        push(self.list_iterators.get(marker), out);
+        push(self.iterator_guards.get(marker), out);
+        push(self.collection_comparators.get(marker), out);
+        push(self.references.get(marker), out);
+        push(self.throwable_causes.get(marker), out);
+        push(self.hash_tables.get(marker), out);
+        push(self.red_black_trees.get(marker), out);
+        push(self.probe_tables.get(marker), out);
+    }
+
+    /// Every key of the tables [`Self::keyed_texts`] reads, and of the other
+    /// tables kept per object.
+    fn keyed_table_keys(&self) -> impl Iterator<Item = &str> {
+        self.unmodifiable_collections
+            .keys()
+            .chain(self.reversed_views.keys())
+            .chain(self.synchronized_views.keys())
+            .chain(self.view_copies.keys())
+            .chain(self.sub_lists.keys())
+            .chain(self.iterator_sources.keys())
+            .chain(self.list_iterators.keys())
+            .chain(self.iterator_guards.keys())
+            .chain(self.collection_comparators.keys())
+            .chain(self.references.keys())
+            .chain(self.throwable_causes.keys())
+            .chain(self.throwable_messages.keys())
+            .chain(self.hash_tables.keys())
+            .chain(self.red_black_trees.keys())
+            .chain(self.probe_tables.keys())
+            .map(String::as_str)
+    }
+
+    /// Drop every per-object row of a collected object (`keep` false).
+    fn prune_keyed_tables(&mut self, keep: impl Fn(&str) -> bool) {
+        self.unmodifiable_collections.retain(|key, _| keep(key));
+        self.reversed_views.retain(|key, _| keep(key));
+        self.synchronized_views.retain(|key, _| keep(key));
+        self.view_copies.retain(|key, _| keep(key));
+        self.view_kinds.retain(|key, _| keep(key));
+        self.sub_lists.retain(|key, _| keep(key));
+        self.iterator_sources.retain(|key, _| keep(key));
+        self.list_iterators.retain(|key, _| keep(key));
+        self.iterator_guards.retain(|key, _| keep(key));
+        self.collection_comparators.retain(|key, _| keep(key));
+        self.references.retain(|key, _| keep(key));
+        self.throwable_causes.retain(|key, _| keep(key));
+        self.throwable_messages.retain(|key, _| keep(key));
+        self.hash_tables.retain(|key, _| keep(key));
+        self.red_black_trees.retain(|key, _| keep(key));
+        self.probe_tables.retain(|key, _| keep(key));
+        self.mod_stamps.retain(|key, _| keep(key));
+        self.deque_layouts.retain(|key, _| keep(key));
+        self.empty_collections.retain(|key| keep(key));
+        self.jdk_list_of.retain(|key| keep(key));
     }
 }
 
@@ -252,6 +400,13 @@ fn collectable(marker: &str) -> bool {
     if marker.starts_with(GAME_OBJECT_PREFIX) {
         return false;
     }
+    // `new` names an object `<class>#<n>` (`Runtime::new_object`): the
+    // common case, checked first.
+    if marker.rsplit_once('#').is_some_and(|(class, number)| {
+        !class.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+    }) {
+        return true;
+    }
     // An iterator's or enumeration's key (`host_iterator.rs`); the shared empty ones
     // (`iterator/empty`) are never collected.
     if let Some(rest) = marker
@@ -260,10 +415,20 @@ fn collectable(marker: &str) -> bool {
     {
         return rest.ends_with(|c: char| c.is_ascii_digit());
     }
-    // `new` names an object `<class>#<n>` (`Runtime::new_object`).
-    marker.rsplit_once('#').is_some_and(|(class, number)| {
-        !class.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
-    })
+    // A collection the host made (`<class>#neutral<n>`, `#immutable<n>`,
+    // `#reversed<n>`, `jar_object::collection_key`): an object like any other.
+    crate::runtime::jar_object::collection_key(marker).is_some()
+}
+
+/// The text a hold keeps: a handle's key, or a reference's text that may name
+/// an object (a marker, a callback's captures). A plain `String` holds no
+/// object, and pinning each would grow the set by every string an
+/// invocation answered.
+fn pin_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::Ref(Some(text)) if crate::runtime::value_class::is_plain_string(text) => None,
+        other => value_text(other),
+    }
 }
 
 /// The receiver of an instance-field key (`receiver|owner#name desc`).
@@ -285,14 +450,64 @@ fn over_count_bound(heap: &JavaHeap) -> bool {
     heap.fields.len() > MAX_RESIDENT_FIELDS || heap.arrays.len() > MAX_RESIDENT_ARRAYS
 }
 
+/// Twice the bound: a heap this large collects whatever its live baseline.
+fn over_count_guard(heap: &JavaHeap) -> bool {
+    heap.fields.len() > 2 * MAX_RESIDENT_FIELDS || heap.arrays.len() > 2 * MAX_RESIDENT_ARRAYS
+}
+
+/// The allocation numbers of the jar objects collections freed, as ranges
+/// (`start → end`, exclusive). Keys are never reused, so a freed number stays
+/// freed; the gaps between ranges are live objects, so the ranges are as many
+/// as the live set at most. A field of a freed object read or written later
+/// is a missed root, which the runtime refuses by name instead of answering
+/// the field's default (`Runtime::live_field_key`, #226 review).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct FreedObjects {
+    ranges: BTreeMap<usize, usize>,
+}
+
+impl FreedObjects {
+    pub(crate) fn contains(&self, n: usize) -> bool {
+        self.ranges
+            .range(..=n)
+            .next_back()
+            .is_some_and(|(_, &end)| n < end)
+    }
+
+    fn insert(&mut self, n: usize) {
+        if self.contains(n) {
+            return;
+        }
+        let (mut start, mut end) = (n, n + 1);
+        if let Some((&before, &before_end)) = self.ranges.range(..n).next_back()
+            && before_end == n
+        {
+            start = before;
+            self.ranges.remove(&before);
+        }
+        if let Some(after_end) = self.ranges.remove(&(n + 1)) {
+            end = after_end;
+        }
+        self.ranges.insert(start, end);
+    }
+
+    /// Whether the object `key` (`class#n`) was collected.
+    pub(crate) fn holds_key(&self, key: &str) -> bool {
+        crate::runtime::jar_object::parse_key(key)
+            .and_then(|(_, number)| number.parse().ok())
+            .is_some_and(|n| self.contains(n))
+    }
+}
+
 fn value_bytes(value: &Value) -> usize {
     value_text(value).map_or(8, str::len)
 }
 
 /// The text a value names other objects through: a reference's, or a host
 /// handle's key (an `Optional`'s key is its held value's marker, so a jar
-/// object held only by an optional stays reachable).
-fn value_text(value: &Value) -> Option<&str> {
+/// object held only by an optional stays reachable). Every root walker uses
+/// this, never a projection that drops a kind (#226 review).
+pub(crate) fn value_text(value: &Value) -> Option<&str> {
     match value {
         Value::Ref(Some(text)) => Some(text),
         Value::Host(host) => Some(host.key()),
@@ -345,10 +560,14 @@ struct Collectable {
 
 impl Collectable {
     fn new(heap: &JavaHeap, host: &StdHost) -> Self {
+        // Field keys are sorted, so an object's fields are adjacent: each
+        // receiver is checked once.
+        let mut previous = "";
         let markers: HashSet<String> = heap
             .fields
             .keys()
             .map(|key| field_receiver(key))
+            .filter(move |receiver| std::mem::replace(&mut previous, receiver) != *receiver)
             .chain(heap.arrays.keys().map(String::as_str))
             .chain(heap.string_builders.keys().map(String::as_str))
             .chain(heap.enum_constants.keys().map(String::as_str))
@@ -356,6 +575,7 @@ impl Collectable {
             .chain(host.iterators.keys().map(String::as_str))
             .chain(host.enumerations.keys().map(String::as_str))
             .chain(host.component_states.keys().map(String::as_str))
+            .chain(host.keyed_table_keys())
             .filter(|marker| collectable(marker))
             .map(str::to_owned)
             .collect();
@@ -404,6 +624,16 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     {
         let mut roots: Vec<&str> = extra.iter().map(String::as_str).collect();
         host.root_texts(&mut roots);
+        // Opaque state, and what the per-object tables keep for an object
+        // that is never collected, are roots too.
+        let mut owned = Vec::new();
+        host.opaque_root_texts(&mut owned);
+        for key in host.keyed_table_keys() {
+            if !collectable.markers.contains(key) {
+                host.keyed_texts(key, &mut owned);
+            }
+        }
+        roots.extend(owned.iter().map(String::as_str));
         let kept_values = heap
             .fields
             .iter()
@@ -430,6 +660,9 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             collectable.scan(text, &mut pending);
         }
     }
+    // The objects any per-object table keeps a row for: only these need
+    // `keyed_texts`'s lookups as the trace reaches them.
+    let keyed_keys: HashSet<String> = host.keyed_table_keys().map(str::to_owned).collect();
     let mut reached = BTreeSet::new();
     let mut found = Vec::new();
     while let Some(marker) = pending.pop() {
@@ -472,9 +705,27 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
                 collectable.scan(text, &mut found);
             }
         }
+        // What the host keeps for this object in a table keyed by it.
+        if keyed_keys.contains(&marker) {
+            let mut keyed = Vec::new();
+            host.keyed_texts(&marker, &mut keyed);
+            for text in &keyed {
+                collectable.scan(text, &mut found);
+            }
+        }
         pending.extend(found.drain(..).filter(|next| !reached.contains(next)));
     }
     let keep = |marker: &str| !collectable.markers.contains(marker) || reached.contains(marker);
+    // A freed jar object's number, so a later read of its fields is refused
+    // by name rather than answered with defaults.
+    for marker in &collectable.markers {
+        if !reached.contains(marker)
+            && let Some((_, number)) = crate::runtime::jar_object::parse_key(marker)
+            && let Ok(number) = number.parse()
+        {
+            host.freed_objects.insert(number);
+        }
+    }
     heap.fields.retain(|key, _| keep(field_receiver(key)));
     heap.arrays.retain(|key, _| keep(key));
     heap.string_builders.retain(|key, _| keep(key));
@@ -483,6 +734,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     host.iterators.retain(|key, _| keep(key));
     host.enumerations.retain(|key, _| keep(key));
     host.component_states.retain(|key, _| keep(key));
+    host.prune_keyed_tables(keep);
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -516,6 +768,22 @@ impl<H: Host> Runtime<'_, H> {
     /// answered `true`.
     pub(crate) fn persist_resident_heap(&mut self) -> Result<(), NativeError> {
         self.persist_resident_heap_with(Vec::new())
+    }
+
+    /// [`Self::persist_resident_heap`] for an invocation the embedder made:
+    /// its receiver, arguments and result are in the embedder's hands, so
+    /// they are roots of this store's collection (#226 review). Later stores
+    /// keep them only if the jar reaches them or the embedder retained them
+    /// (`StdHost::retain`), so a call made every tick keeps nothing.
+    pub(crate) fn persist_resident_heap_crossing(
+        &mut self,
+        crossing: &[Value],
+    ) -> Result<(), NativeError> {
+        let roots = crossing
+            .iter()
+            .filter_map(|value| value_text(value).map(str::to_owned))
+            .collect();
+        self.persist_resident_heap_with(roots)
     }
 
     /// [`Self::persist_resident_heap`] with texts the caller keeps outside the
@@ -703,6 +971,101 @@ mod tests {
         assert_eq!(
             host.resident_heap().instance_fields(),
             MAX_RESIDENT_FIELDS + 1
+        );
+    }
+
+    fn logged(
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        args: Vec<Value>,
+    ) -> crate::runtime::HostInvocation {
+        crate::runtime::HostInvocation {
+            method: crate::runtime::MethodRef {
+                owner: owner.into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            },
+            receiver: Some(text("java/util/ArrayList#9")),
+            args,
+        }
+    }
+
+    /// The call log roots only the calls it is read back for (#197): an
+    /// object a jar passed to `List.add` (or whose constructor the host ran)
+    /// is collected, a listener object registered on an event bus is kept,
+    /// with what its fields reach.
+    #[test]
+    fn only_a_registration_in_the_call_log_keeps_its_objects() {
+        let (mut host, mut heap) = graph("demo/Elsewhere");
+        host.invocations.push(logged(
+            "java/util/ArrayList",
+            "add",
+            "(Ljava/lang/Object;)Z",
+            vec![text("demo/Node#1")],
+        ));
+        host.invocations
+            .push(logged("java/lang/Object", "<init>", "()V", vec![]));
+        host.invocations.push(logged(
+            "net/neoforged/bus/api/IEventBus",
+            "register",
+            "(Ljava/lang/Object;)V",
+            vec![text("demo/Node#3")],
+        ));
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), ["demo/Node#3", "demo/Node#4"]);
+    }
+
+    /// An unmodifiable view keeps its source (and the source its elements)
+    /// while the view is reachable; once nothing reaches the view, the view,
+    /// its source and the view's row in the per-object tables all go.
+    #[test]
+    fn a_view_keeps_its_source_only_while_it_is_reachable() {
+        let view = "java/util/Collections$UnmodifiableRandomAccessList#immutable0";
+        let (mut host, mut heap) = graph(view);
+        host.unmodifiable_collections
+            .insert(view.into(), Some("java/util/ArrayList#5".into()));
+        host.mutable_collections
+            .insert("java/util/ArrayList#5".into(), vec![text("demo/Node#3")]);
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), ["demo/Node#3", "demo/Node#4"]);
+        assert!(
+            host.mutable_collections
+                .contains_key("java/util/ArrayList#5")
+        );
+
+        host.persistent_static_fields.clear();
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), Vec::<&str>::new());
+        assert!(
+            !host
+                .mutable_collections
+                .contains_key("java/util/ArrayList#5")
+        );
+        assert!(host.unmodifiable_collections.is_empty());
+    }
+
+    /// A throwable is kept while something reaches it, with its cause, and
+    /// collected (message and all) once nothing does: it used to be a root
+    /// for the host's life.
+    #[test]
+    fn a_throwable_and_its_cause_live_as_long_as_it_is_reached() {
+        let (mut host, mut heap) = graph("java/lang/RuntimeException#20");
+        host.throwable_messages
+            .insert("java/lang/RuntimeException#20".into(), Some("outer".into()));
+        host.throwable_causes.insert(
+            "java/lang/RuntimeException#20".into(),
+            Some(text("demo/Node#3")),
+        );
+        host.throwable_messages.insert(
+            "java/lang/RuntimeException#21".into(),
+            Some("dropped".into()),
+        );
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), ["demo/Node#3", "demo/Node#4"]);
+        assert_eq!(
+            host.throwable_messages.keys().collect::<Vec<_>>(),
+            ["java/lang/RuntimeException#20"]
         );
     }
 

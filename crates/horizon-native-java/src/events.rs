@@ -1955,7 +1955,30 @@ fn count_unsupported(out: &mut GameListeners, source: String) {
 }
 
 /// Turn one recorded host invocation into listeners, if it registered any.
+/// Whether a logged host call is one the log is *read back* for: an event
+/// registration that [`listeners_from`], `StdHost::listener_registrations`
+/// or a bus's `unregister` reads again after the call returned.
+///
+/// - Fabric `Event.register`/`addPhaseOrdering`;
+/// - Forge 7 `<Event>.BUS.addListener`;
+/// - an event bus's `addListener`/`register`.
+///
+/// Only these logged calls are roots of the heap collection (`heap.rs`):
+/// every other call's values are history, and what the host keeps from them
+/// lives in its own tables. A new reader of the log must be named here, or
+/// the objects it reads back may be collected; `listeners_from` asserts it.
+pub(crate) fn read_back_call(method: &MethodRef) -> bool {
+    let (owner, name) = (method.owner.as_str(), method.name.as_str());
+    (owner == FABRIC_EVENT && matches!(name, "register" | "addPhaseOrdering"))
+        || (FORGE_BUSES.contains(&owner) && name == "addListener")
+        || (crate::is_event_bus_owner(owner) && matches!(name, "addListener" | "register"))
+}
+
 fn listeners_from(invocation: &HostInvocation, jar: &NativeJar, out: &mut GameListeners) {
+    // Every call read here keeps its values alive through the heap's roots.
+    if !read_back_call(&invocation.method) {
+        return;
+    }
     let owner = invocation.method.owner.as_str();
     let name = invocation.method.name.as_str();
     let receiver = invocation.receiver.as_ref();

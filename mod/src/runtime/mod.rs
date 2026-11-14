@@ -2691,6 +2691,16 @@ pub trait Host {
         Ok(())
     }
 
+    /// Whether the resident heap collected the object `key` (`class#n`), so
+    /// a read of its fields is a missed root, never its fields' defaults.
+    fn object_collected(&self, _key: &str) -> bool {
+        false
+    }
+
+    /// Hold off (`true`) or allow again the resident heap's collections:
+    /// while a run may still be rolled back, nothing is freed.
+    fn pause_collections(&mut self, _paused: bool) {}
+
     /// Run a jar method somewhere else before its body runs.
     ///
     /// A game-hook callback calls members of a Mixin class on a game object
@@ -3070,6 +3080,14 @@ pub struct StdHost {
     /// fields, arrays, builders and enum identity of what its statics and
     /// registered callbacks still reach.
     heap: heap::JavaHeap,
+    /// Values the embedder holds between invocations (`StdHost::retain`),
+    /// with their hold counts: roots of the heap's collections.
+    retained: BTreeMap<String, usize>,
+    /// The jar objects collections freed (`heap::FreedObjects`).
+    freed_objects: heap::FreedObjects,
+    /// No collection runs (`Host::pause_collections`): a run that may be
+    /// rolled back is in progress.
+    collections_paused: bool,
     /// Bounded diagnostics for calls outside the modeled host surface.
     unknown_host_calls: BTreeMap<String, usize>,
     /// The threads the jar made and started (`parked_threads.rs`).
@@ -3205,6 +3223,9 @@ impl StdHost {
             persistent_static_fields: BTreeMap::new(),
             persistent_initialized_classes: std::collections::BTreeSet::new(),
             heap: heap::JavaHeap::default(),
+            retained: BTreeMap::new(),
+            freed_objects: heap::FreedObjects::default(),
+            collections_paused: false,
             unknown_host_calls: BTreeMap::new(),
             threads: parked_threads::ThreadTable::default(),
             strict_unknown_host_calls: false,
@@ -10060,6 +10081,14 @@ impl Host for StdHost {
     fn store_persistent_heap(&mut self, heap: JavaHeap) -> Result<(), NativeError> {
         self.store_resident_heap(heap)
     }
+
+    fn object_collected(&self, key: &str) -> bool {
+        self.freed_objects.holds_key(key)
+    }
+
+    fn pause_collections(&mut self, paused: bool) {
+        self.collections_paused = paused;
+    }
 }
 
 fn expect_int(r: &MethodRef, value: &Value) -> Result<i32, NativeError> {
@@ -12296,6 +12325,26 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
             marker.clone()
         }),
         other => value_text(other),
+    }
+}
+
+impl<H: Host> Runtime<'_, H> {
+    /// Refuse a field access on an object the resident heap collected: its
+    /// fields are gone, so the access is a missed root, never its fields'
+    /// defaults (#226 review). Checked where no field row exists, which is
+    /// every access to a collected object.
+    pub(crate) fn refuse_collected(
+        &self,
+        receiver: &Value,
+        field: &MethodRef,
+    ) -> Result<(), NativeError> {
+        match jar_object::object_key(receiver) {
+            Some(key) if self.host.object_collected(key) => Err(NativeError::Metadata(format!(
+                "the jar's object {key} was collected while still reachable (a missed heap root); field {}#{}",
+                field.owner, field.name
+            ))),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -17008,6 +17057,10 @@ impl NativeJar {
         // The callback sees the objects its entrypoint built, and the next
         // callback sees what this one changed (`heap.rs`).
         let resident = runtime.adopt_resident_heap();
+        // What the embedder handed over, and below what it gets back: it may
+        // hold either until this call's store ends (`StdHost::retain` for
+        // longer).
+        let mut crossing: Vec<Value> = receiver.iter().chain(args).cloned().collect();
         let result = runtime.invoke(
             &target.owner,
             &target.name,
@@ -17018,7 +17071,8 @@ impl NativeJar {
         // A failed run keeps what it wrote before failing, as a JVM would.
         let persistence = runtime.persist_class_state();
         if resident {
-            runtime.persist_resident_heap()?;
+            crossing.extend(result.as_ref().ok().cloned());
+            runtime.persist_resident_heap_crossing(&crossing)?;
         }
         persistence?;
         result
@@ -17163,11 +17217,16 @@ impl NativeJar {
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let resident = runtime.adopt_resident_heap();
+        // What the embedder handed over, and below what it gets back: it may
+        // hold either until this call's store ends (`StdHost::retain` for
+        // longer).
+        let mut crossing: Vec<Value> = receiver.iter().chain(args).cloned().collect();
         let result = runtime.invoke(&class_name, method, descriptor, receiver, args);
         // A failed run keeps what it wrote before failing, as a JVM would.
         let persistence = runtime.persist_class_state();
         if resident {
-            runtime.persist_resident_heap()?;
+            crossing.extend(result.as_ref().ok().cloned());
+            runtime.persist_resident_heap_crossing(&crossing)?;
         }
         persistence?;
         result
@@ -25791,11 +25850,16 @@ impl<H: Host> Runtime<'_, H> {
                                 .and_then(|key| self.fields.get(&key).cloned())
                             {
                                 Some(value) => value,
-                                // JVMS §2.3: a jar field nothing wrote yet.
+                                // JVMS §2.3: a jar field nothing wrote yet,
+                                // unless the heap collected the object.
                                 None if self.reads_unwritten_jar_field(&r, &receiver) => {
+                                    self.refuse_collected(&receiver, &r)?;
                                     Value::default_for(&r.descriptor)
                                 }
-                                None => self.host.get_field(&receiver, &r)?,
+                                None => {
+                                    self.refuse_collected(&receiver, &r)?;
+                                    self.host.get_field(&receiver, &r)?
+                                }
                             }
                         }
                         AnchorOutcome::Suppress => Value::default_for(&r.descriptor),
@@ -25831,6 +25895,9 @@ impl<H: Host> Runtime<'_, H> {
                     if outcome == AnchorOutcome::Normal
                         && let Some(key) = instance_field_key(&receiver, &r)
                     {
+                        if !self.fields.contains_key(&key) {
+                            self.refuse_collected(&receiver, &r)?;
+                        }
                         self.fields.insert(key, value);
                     }
                 }
