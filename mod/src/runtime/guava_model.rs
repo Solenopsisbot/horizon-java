@@ -418,9 +418,13 @@ impl<H: Host> Runtime<'_, H> {
         Value::Ref(Some(format!("{TOKEN_PREFIX}{inner}")))
     }
 
-    /// The raw class a type marker erases to.
+    /// The raw class a type erases to (`inner`: [`host_reflect_type::type_text`]).
+    ///
+    /// [`host_reflect_type::type_text`]: crate::runtime::host_reflect_type::type_text
     fn raw_class(inner: &str) -> String {
-        match decode_generic_type(inner) {
+        match crate::runtime::host_reflect_type::handle_node(&crate::runtime::host_reflect_type::type_from_text(
+            inner,
+        )) {
             Some(GenericType::Parameterized { raw, .. }) => raw,
             Some(GenericType::Wildcard { upper, .. }) => upper.first().map_or_else(
                 || "java/lang/Object".to_owned(),
@@ -430,14 +434,14 @@ impl<H: Host> Runtime<'_, H> {
                     _ => "java/lang/Object".to_owned(),
                 },
             ),
-            Some(GenericType::Variable { bounds, .. }) => bounds.first().map_or_else(
-                || "java/lang/Object".to_owned(),
-                |bound| match bound {
-                    GenericType::Class(name) => name.clone(),
-                    GenericType::Parameterized { raw, .. } => raw.clone(),
-                    _ => "java/lang/Object".to_owned(),
-                },
-            ),
+            // A variable's erasure is its first bound's, which its declaration
+            // holds; the model keeps `Object` (as it did for a use-site
+            // variable, whose bounds were never written).
+            Some(GenericType::Variable { .. }) => "java/lang/Object".to_owned(),
+            Some(GenericType::Array(component)) => match *component {
+                GenericType::Parameterized { raw, .. } => format!("[L{raw};"),
+                _ => "[Ljava/lang/Object;".to_owned(),
+            },
             Some(GenericType::Class(name)) => name,
             None => inner.to_owned(),
         }
@@ -455,10 +459,10 @@ impl<H: Host> Runtime<'_, H> {
                 "(Ljava/lang/Class;)Lcom/google/common/reflect/TypeToken;"
                 | "(Ljava/lang/reflect/Type;)Lcom/google/common/reflect/TypeToken;",
             ) => {
-                let Some(inner) = args.first().and_then(expect_ref) else {
+                let Some(inner) = args.first().and_then(crate::runtime::host_reflect_type::type_text) else {
                     return Err(thrown("java/lang/NullPointerException", None));
                 };
-                return Ok(Some(Self::token_value(inner)));
+                return Ok(Some(Self::token_value(&inner)));
             }
             // `new TypeToken<T>() {}`: the anonymous subclass's generic
             // superclass names `T`. A subclass that does not parameterize
@@ -473,11 +477,14 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(class) = crate::runtime::jar_object::key_class(&marker) else {
                     return Ok(None);
                 };
+                let scope = crate::runtime::reflect_generic::class_scope(class, self.class(class));
                 let captured = self
                     .class(class)
                     .and_then(ClassFile::class_signature)
                     .as_deref()
-                    .and_then(crate::runtime::reflect_generic::parse_class_signature)
+                    .and_then(|signature| {
+                        crate::runtime::reflect_generic::parse_class_signature(signature, scope)
+                    })
                     .and_then(|(superclass, _)| match superclass {
                         GenericType::Parameterized { raw, args, .. } if raw == TYPE_TOKEN => {
                             args.into_iter().next()
@@ -490,9 +497,10 @@ impl<H: Host> Runtime<'_, H> {
                         Some(format!("{} isn't parameterized", class.replace('/', "."))),
                     ));
                 };
+                let captured = generic_type_value(&captured);
                 self.fields.insert(
                     format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"),
-                    generic_type_value(&captured),
+                    Value::Ref(crate::runtime::host_reflect_type::type_text(&captured)),
                 );
                 return Ok(Some(Value::Void));
             }
@@ -502,7 +510,9 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         };
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
-            ("getType", "()Ljava/lang/reflect/Type;") => Value::Ref(Some(inner)),
+            ("getType", "()Ljava/lang/reflect/Type;") => {
+                crate::runtime::host_reflect_type::type_from_text(&inner)
+            }
             ("getRawType", "()Ljava/lang/Class;") => Value::Ref(Some(Self::raw_class(&inner))),
             ("wrap", "()Lcom/google/common/reflect/TypeToken;") => {
                 Self::token_value(boxed_class(&inner).unwrap_or(&inner))
@@ -528,12 +538,15 @@ impl<H: Host> Runtime<'_, H> {
                 Value::Int(i32::from(other.as_deref() == Some(inner.as_str())))
             }
             ("hashCode", "()I") => Value::Int(java_string_hash(&inner)),
-            ("toString", "()Ljava/lang/String;") => {
-                Value::Ref(Some(decode_generic_type(&inner).map_or_else(
+            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(
+                crate::runtime::host_reflect_type::handle_node(&crate::runtime::host_reflect_type::type_from_text(
+                    &inner,
+                ))
+                .map_or_else(
                     || class_type_display(&inner),
                     |node| generic_type_display(&node),
-                )))
-            }
+                ),
+            )),
             (
                 "isSubtypeOf" | "isSupertypeOf",
                 "(Lcom/google/common/reflect/TypeToken;)Z" | "(Ljava/lang/reflect/Type;)Z",
