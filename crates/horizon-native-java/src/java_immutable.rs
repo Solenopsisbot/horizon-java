@@ -107,7 +107,7 @@ impl StdHost {
         );
         self.mutable_collections.insert(marker.clone(), values);
         self.unmodifiable_collections.insert(marker.clone(), None);
-        Value::Ref(Some(marker))
+        crate::jar_object::collection(marker)
     }
 
     /// [`Self::unmodifiable`] for the stream terminals (`Host::unmodifiable_list`).
@@ -189,7 +189,7 @@ impl StdHost {
                 );
                 self.unmodifiable_collections
                     .insert(marker.clone(), Some(source));
-                return Some(Ok(Value::Ref(Some(marker))));
+                return Some(Ok(crate::jar_object::collection(marker)));
             }
             _ => return None,
         };

@@ -396,6 +396,13 @@ pub enum HostKind {
     ReflectType,
     /// An `AnnotatedType`: key the type it annotates.
     AnnotatedType,
+    /// A collection the host made (an unmodelled call's neutral answer,
+    /// `subList`, `Collections.unmodifiableList`, `List.of`, ...): key
+    /// `<JDK class>#neutral<n>` or `<JDK class>#immutable<n>`, the text it
+    /// used to be (`jar_object.rs`), one key per allocation. An object like a
+    /// jar's `new ArrayList()` (a [`HostKind::JarObject`]), whose row it
+    /// shares.
+    Collection,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1575,6 +1582,16 @@ const KINDS: &[KindInfo] = &[
         // Built afresh by every reflective call.
         canonical: never_canonical,
         methods: &crate::host_reflect_type::ANNOTATED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Collection,
+        tag: "coll",
+        class: ClassRule::FromKey(crate::jar_object::collection_class),
+        // The host numbers every collection it makes once.
+        canonical: always_canonical,
+        // An object: the runtime and the host's collection models answer
+        // for it by its key, as for a jar's `new ArrayList()`.
+        methods: &crate::jar_object::JAR_OBJECT,
     },
 ];
 

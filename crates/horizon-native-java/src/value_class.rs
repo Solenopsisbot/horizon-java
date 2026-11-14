@@ -53,10 +53,10 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 /// a non-string (the previous answer for every text):
 /// - a box, a builder, a collection, a path or an enum constant: whatever
 ///   `Object.getClass` names (`class_of_value`), including `true`/`false`;
-/// - a host marker `<class>#<kind>` (`…#neutral0`, `…#immutable3`: P14's
-///   collections): a `#` after a non-empty, separator-free class. An
-///   object's key `<class>#<n>` is a handle, never text (#156 P12b), so a
-///   text spelled like one is a `String`;
+/// - a host marker `<class>#<kind>`: a `#` after a non-empty,
+///   separator-free class. An object's key, `<class>#<n>` or a host-made
+///   collection's `<class>#neutral<n>`/`<class>#immutable<n>`, is a handle,
+///   never text (#156 P12b, P14c), so a text spelled like one is a `String`;
 /// - a callback or comparator: a leading `@`; an array class: a whole
 ///   descriptor (`[I`, `[Ljava/lang/String;`);
 /// - a marker kind or class name: a `/` whose first segment has no `:`, `.`
@@ -80,9 +80,9 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     if marker.starts_with('@') || host_array::is_array_descriptor(marker) {
         return false;
     }
-    // An object is a handle (`jar_object.rs`): a text spelling its key is a
-    // `String`.
-    if crate::jar_object::parse_key(marker).is_some() {
+    // An object is a handle (`jar_object.rs`), a host-made collection too
+    // (P14c): a text spelling either's key is a `String`.
+    if crate::jar_object::spells_key_text(marker) {
         return true;
     }
     if let Some((class, _)) = marker.split_once('#')
@@ -226,11 +226,14 @@ mod tests {
             // Spelled like an object's key (#156 P12b).
             "demo/Main#3",
             "java/util/concurrent/ThreadPoolExecutor#0",
+            // Spelled like a host-made collection's key (#156 P14c).
+            "java/util/ArrayList#neutral0",
+            "java/util/ImmutableCollections$ListN#immutable3",
         ] {
             assert!(is_plain_string(text), "{text:?} should be a string");
         }
         for marker in [
-            "java/util/ArrayList#neutral0",
+            "java/util/ArrayList#weird0",
             "list/4",
             "registry/minecraft:item",
             "string-builder/2",

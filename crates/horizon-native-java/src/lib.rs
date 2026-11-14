@@ -3243,7 +3243,9 @@ impl StdHost {
         let marker = format!("{class}#neutral{}", self.next_neutral_collection);
         self.next_neutral_collection += 1;
         self.mutable_collections.insert(marker.clone(), Vec::new());
-        Value::Ref(Some(marker))
+        // An object of its own (#156 P14c): `==` tells two apart, and a
+        // `String` spelling its key is no collection.
+        jar_object::collection(marker)
     }
 
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -9820,8 +9822,9 @@ fn class_of_value(value: &Value) -> Option<String> {
 /// [`class_of_value`] of a reference's text, without building a `Value` (it
 /// runs inside `is_plain_string`, on every array store of a string).
 fn class_of_text(marker: &str) -> Option<String> {
-    // A text spelling an object's key is a `String` (`jar_object.rs`).
-    if jar_object::parse_key(marker).is_some() {
+    // A text spelling an object's key (a host-made collection's included,
+    // P14c) is a `String` (`jar_object.rs`).
+    if jar_object::spells_key_text(marker) {
         return Some("java/lang/String".into());
     }
     if let Some((class, _)) = marker.split_once('#') {
