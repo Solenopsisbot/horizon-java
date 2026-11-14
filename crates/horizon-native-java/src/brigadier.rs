@@ -1312,7 +1312,7 @@ impl StdHost {
                 "BlockPosArgument",
                 "getBlockPos" | "getLoadedBlockPos" | "getSpawnablePos",
                 CommandArgument::BlockPos([x, y, z]),
-            ) => marker(format!("block-pos/{x},{y},{z}")),
+            ) => crate::game_object::server_value(format!("block-pos/{x},{y},{z}")),
             ("IdentifierArgument", "getId", CommandArgument::Identifier(id)) => {
                 let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", &id));
                 identifier_value(namespace, path)

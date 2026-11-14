@@ -1,0 +1,39 @@
+pos_text[1,2,3]=BlockPos{x=1, y=2, z=3}
+pos_hash[1,2,3]=2946
+pos_long[1,2,3]=274877919234
+pos_text[0,0,0]=BlockPos{x=0, y=0, z=0}
+pos_hash[0,0,0]=0
+pos_long[0,0,0]=0
+pos_text[-1,-2,-3]=BlockPos{x=-1, y=-2, z=-3}
+pos_hash[-1,-2,-3]=-2946
+pos_long[-1,-2,-3]=-8194
+pos_text[30000000,319,-30000000]=BlockPos{x=30000000, y=319, z=-30000000}
+pos_hash[30000000,319,-30000000]=1264780961
+pos_long[30000000,319,-30000000]=8246337360317907263
+pos_text[-33554432,-2048,33554431]=BlockPos{x=-33554432, y=-2048, z=33554431}
+pos_hash[-33554432,-2048,33554431]=2147419199
+pos_long[-33554432,-2048,33554431]=-9223371899415824384
+pos_equals=true
+pos_eq=false
+pos_map_get=a
+pos_set=2
+pos_compare=-1,-1,1,0
+pos_sorted=[BlockPos{x=-1, y=-2, z=-3}, BlockPos{x=3, y=1, z=0}, BlockPos{x=0, y=1, z=5}, BlockPos{x=1, y=2, z=3}]
+res_text=/data
+res_hash=3076010
+res_root_text=/.
+res_equals_new=true
+res_eq_new=false
+res_same_constant=true
+res_players_text=/players/data,599768551
+rule_text=keep_inventory
+item_text=minecraft:stone
+block_text=Block{minecraft:stone}
+state_stone_text=Block{minecraft:stone}
+state_log_text=Block{minecraft:oak_log}[axis=y]
+registry_text=Registry[ResourceKey[minecraft:root / minecraft:item] (Stable)]
+forged_pos=false,false,2,false,true,java.lang.String
+forged_res=false,false,2,false
+forged_rule=false,false,false
+forged_item=false,false,false
+forged_cast=CCE
