@@ -350,6 +350,20 @@ pub enum HostKind {
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
+    /// Fabric Loader's `FabricLoaderImpl.INSTANCE` (`host_fabric_runtime.rs`).
+    FabricLoaderInstance,
+    /// The loader's one `MappingResolver`.
+    FabricMappingResolver,
+    /// An `EnvType` constant: key its name.
+    FabricEnvType,
+    /// An `EntrypointContainer`: key its kind, class and provider.
+    FabricEntrypointContainer,
+    /// An entrypoint instance: key its class and provider.
+    FabricEntrypointInstance,
+    /// A `PayloadTypeRegistry`: key its direction.
+    FabricPayloadTypes,
+    /// A `ResourceLoader`: key its `PackType`.
+    FabricResourceLoader,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1363,6 +1377,76 @@ const KINDS: &[KindInfo] = &[
         // builder, two equal keys from two runs prove nothing.
         canonical: never_canonical,
         methods: &crate::stream_pipeline::STREAM_BUILDER,
+    },
+    KindInfo {
+        kind: HostKind::FabricLoaderInstance,
+        tag: "fli",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::loader_types,
+        },
+        // `FabricLoaderImpl.INSTANCE`.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricMappingResolver,
+        tag: "fmr",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::mapping_resolver_types,
+        },
+        // Made once and kept.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricEnvType,
+        tag: "fenv",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::env_type_types,
+        },
+        // An enum constant.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::ENV_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricEntrypointContainer,
+        tag: "fepc",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::entrypoint_container_types,
+        },
+        // A new container per entry on every call.
+        canonical: never_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricEntrypointInstance,
+        tag: "fepi",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::entrypoint_instance_types,
+        },
+        // Cached per requested type, which the key does not hold.
+        canonical: never_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricPayloadTypes,
+        tag: "fpt",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::payload_types_types,
+        },
+        // One of four static constants.
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricResourceLoader,
+        tag: "frl",
+        class: ClassRule::Unknown {
+            declared: crate::host_fabric_runtime::resource_loader_types,
+        },
+        // One per `PackType` (`IMPL_MAP`).
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
     },
 ];
 
