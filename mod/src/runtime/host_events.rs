@@ -59,7 +59,7 @@ pub(crate) fn key_of(value: &Value, kind: HostKind) -> Option<&str> {
     }
 }
 
-fn handle(kind: HostKind, key: impl Into<std::sync::Arc<str>>) -> Value {
+fn handle(kind: HostKind, key: impl Into<String>) -> Value {
     Value::Host(HostRef::new(kind, key))
 }
 

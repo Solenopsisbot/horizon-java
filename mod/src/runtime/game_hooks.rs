@@ -1027,6 +1027,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.send_feedback(r, component, broadcast)
     }
 
+    fn note_entrypoint_constructed(&mut self, class: &str) {
+        self.inner.note_entrypoint_constructed(class);
+    }
+
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         // An instance-field read the callbacks never wrote reaches the host
         // too. A Mixin `@Shadow` field is the game object's own field, which

@@ -312,9 +312,11 @@ fn fabric_fixture_infers_typed_item_and_block_declarations() {
     );
     // The full chain is kept: `durability` has no loader key, so it is not
     // exported and cannot fail the declaration for an unknown property.
-    let Value::Ref(Some(wand_marker)) = &wand.value else {
-        panic!("item value is not a marker: {:?}", wand.value);
+    // The item the jar `new`ed: a handle keyed `class#n`.
+    let Value::Host(wand_handle) = &wand.value else {
+        panic!("item value is not an object: {:?}", wand.value);
     };
+    let wand_marker = wand_handle.key();
     assert_eq!(
         host.item_properties(wand_marker),
         Some(&BTreeMap::from([
@@ -337,9 +339,10 @@ fn fabric_fixture_infers_typed_item_and_block_declarations() {
             item: true,
         })
     );
-    let Value::Ref(Some(lamp_marker)) = &lamp.value else {
-        panic!("block value is not a marker: {:?}", lamp.value);
+    let Value::Host(lamp_handle) = &lamp.value else {
+        panic!("block value is not an object: {:?}", lamp.value);
     };
+    let lamp_marker = lamp_handle.key();
     assert_eq!(
         host.block_properties(lamp_marker),
         Some(&BTreeMap::from([

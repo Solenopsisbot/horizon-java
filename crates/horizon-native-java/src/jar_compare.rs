@@ -21,7 +21,10 @@ impl<H: Host> Runtime<'_, H> {
     pub(crate) fn natural_order(&mut self, a: &Value, b: &Value) -> Result<i32, NativeError> {
         // A host handle's natural order is its kind's row (`host_ref.rs`);
         // a kind with none, or a pair it cannot compare, is counted.
-        if let Value::Host(handle) = a {
+        // An object compares by its class's own `compareTo`, below.
+        if let Value::Host(handle) = a
+            && !crate::jar_object::is_object_handle(handle)
+        {
             // A kind known not to be `Comparable` (an array) fails the
             // `(Comparable)` cast, as `ComparableTimSort` does.
             if handle.instance_of("java/lang/Comparable", self) == Some(false)

@@ -729,7 +729,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(source) = self.host.view_copy_source(view) else {
             return Ok(None);
         };
-        let source = Value::Ref(Some(source));
+        let source = crate::runtime::jar_object::stored_value(&source);
         if self.host_collection_class(&source).as_deref() != Some(IDENTITY_MAP) {
             return Ok(None);
         }

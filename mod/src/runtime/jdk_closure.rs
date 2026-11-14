@@ -25,6 +25,10 @@ pub(crate) struct JdkClass {
     /// [`Self::supertypes`] without `java/lang/Object`: what `jdk_model::platform_supertypes`
     /// lists.
     pub(crate) below_object: Vec<&'static str>,
+    /// `getSuperclass()`: `None` for an interface and for `Object`.
+    pub(crate) superclass: Option<&'static str>,
+    /// `getInterfaces()`, in declaration order.
+    pub(crate) interfaces: Vec<&'static str>,
 }
 
 struct Table {
@@ -40,10 +44,18 @@ fn table() -> &'static Table {
         let mut classes = HashMap::new();
         let mut packages = HashSet::new();
         let mut modules = HashMap::new();
+        let names = |text: Option<&'static str>| -> Vec<&'static str> {
+            text.unwrap_or_default()
+                .split(' ')
+                .filter(|name| !name.is_empty())
+                .collect()
+        };
         for line in DATA.lines().filter(|line| !line.starts_with('#')) {
             let mut fields = line.split('\t');
             match (fields.next(), fields.next(), fields.next(), fields.next()) {
                 (Some("class"), Some(name), Some(flags), supertypes) => {
+                    let superclass = fields.next().filter(|name| *name != "-");
+                    let interfaces = names(fields.next());
                     let supertypes: Vec<&str> = supertypes
                         .unwrap_or_default()
                         .split(' ')
@@ -61,6 +73,8 @@ fn table() -> &'static Table {
                             is_interface: flags == "interface",
                             supertypes,
                             below_object,
+                            superclass,
+                            interfaces,
                         },
                     );
                 }

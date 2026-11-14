@@ -351,7 +351,7 @@ public class Refl {
   /** getMethod's most specific return type among JDK types of Java 25's generated table: exact. */
   public static String returnJdk() { return declaring(SeqStr.class, "seq") + "|" + declaring(StrSeq.class, "seq"); }
 
-  /** ... and among JDK types outside it (StringBuilder): counted. */
+  /** ... and among JDK types jars construct (StringBuilder, in the table since #156 P12b1). */
   public static String returnJdkUnknown() { return declaring(SeqSb.class, "seq"); }
 
   /** ... among arrays (by element type) and held classes: exact. */

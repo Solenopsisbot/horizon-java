@@ -15,7 +15,7 @@
 mod scratch;
 
 use horizon_native_java::{
-    Host, HostInvocation, MethodRef, NativeError, NativeJar, StdHost, Value,
+    Host, HostInvocation, HostKind, MethodRef, NativeError, NativeJar, StdHost, Value,
 };
 use std::{
     collections::BTreeMap,
@@ -261,7 +261,8 @@ public final class FabricCatalogMod implements ModInitializer {
     assert_eq!(registers[1].args[1], parsed_id("catalog:ruby_lamp"));
     for (register, expected) in registers.iter().zip(["Item#", "Block#"]) {
         assert!(
-            matches!(register.args.get(2), Some(Value::Ref(Some(marker))) if marker.contains(expected)),
+            // The object the jar `new`ed: a handle keyed `class#n`.
+            matches!(register.args.get(2), Some(Value::Host(handle)) if handle.kind() == HostKind::JarObject && handle.key().contains(expected)),
             "expected a {expected} content marker, got {:?}",
             register.args
         );

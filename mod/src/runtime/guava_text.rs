@@ -147,6 +147,10 @@ impl StdHost {
         let marker = match value {
             Value::Ref(None) => return Err(npe()),
             Value::Ref(Some(marker)) => marker,
+            // A collection a jar `new`ed, by its key (`jar_object.rs`).
+            Value::Host(_) if crate::runtime::jar_object::is_object(value) => {
+                crate::runtime::expect_ref(value).ok_or_else(npe)?
+            }
             // A host handle (a `ServiceLoader`, ...) is an `Iterable` whose
             // elements only the runtime knows: counted.
             _ => return Ok(None),

@@ -70,6 +70,16 @@ impl<H: Host> Runtime<'_, H> {
         let start = usize::try_from(restart).unwrap_or(0);
         for (index, label) in labels.iter().enumerate().skip(start) {
             let matched = match (label, value) {
+                // An object as the `instanceof` opcode decides it: its class's
+                // chain, and a "no" counted only where the opcode counts one
+                // (a class outside what the runtime holds and Java 25's table).
+                (SwitchLabel::Class(class), Value::Host(handle))
+                    if crate::jar_object::is_object_handle(handle) =>
+                {
+                    self.switch_instance_of(value, class)
+                        || self.instance_of_is_guess(value, class)
+                            && self.handle_instance_of(handle, class)?
+                }
                 // A host handle by its kind's row (`host_ref.rs`), as the
                 // `instanceof` opcode decides it.
                 (SwitchLabel::Class(class), Value::Host(handle)) => {
@@ -97,8 +107,13 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A handle is what its kind's row says (`host_ref.rs`): an array is
         // an `Object[]` by JLS array subtyping, not by a class chain.
+        // An object's "yes" is its class's chain; any other answer goes on
+        // to the paths below.
         if let Value::Host(handle) = value {
-            return handle.instance_of(class, self) == Some(true);
+            let row = handle.instance_of(class, self) == Some(true);
+            if row || !crate::jar_object::is_object_handle(handle) {
+                return row;
+            }
         }
         if let Some(own) = class_of_value(value)
             && (own == class || self.class_is_instance(&own, class))

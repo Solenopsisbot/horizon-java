@@ -662,6 +662,12 @@ fn builder_class(owner: &str) -> bool {
 }
 
 impl<H: Host> Runtime<'_, H> {
+    /// The text of the builder `value` is: a `StringBuilder`/`StringBuffer`
+    /// the jar `new`ed (by its key), or a host builder marker.
+    pub(crate) fn builder_text(&self, value: &Value) -> Option<&String> {
+        self.string_builders.get(expect_ref(value)?)
+    }
+
     /// Answer a `StringBuilder`/`StringBuffer` member (or a `CharSequence`/
     /// `Appendable` one) on a builder this invocation constructed, or `None`
     /// to leave the call to the host, which counts it.
@@ -714,7 +720,8 @@ impl<H: Host> Runtime<'_, H> {
                     self.string_builders.insert(marker.clone(), text);
                 }
                 Ok(Some(match answer {
-                    Answer::This => Value::Ref(Some(marker)),
+                    // `return this`: the receiver itself (a handle).
+                    Answer::This => receiver.cloned().unwrap_or(Value::Ref(Some(marker))),
                     Answer::Void => Value::Void,
                     Answer::Int(value) => Value::Int(value),
                     Answer::Text(text) => Value::Ref(Some(text)),
@@ -793,7 +800,9 @@ impl<H: Host> Runtime<'_, H> {
                 // `append(Object)` of a box is `String.valueOf`: its value.
                 ("Ljava/lang/Object;", Value::Boxed(boxed)) => Arg::Text(Some(boxed.text())),
                 // A host handle (an optional) prints through its kind's model.
-                ("Ljava/lang/Object;", Value::Host(handle)) => {
+                ("Ljava/lang/Object;", Value::Host(handle))
+                    if !crate::runtime::jar_object::is_object_handle(handle) =>
+                {
                     match self.host_ref_text(handle, "", "")? {
                         Some(text) => Arg::Text(Some(text)),
                         None => return Ok(None),
@@ -804,14 +813,19 @@ impl<H: Host> Runtime<'_, H> {
                 ("Ljava/lang/Object;", Value::Int(_) | Value::Long(_) | Value::Float(_)) => {
                     Arg::Text(Some(crate::runtime::value_text(value)))
                 }
-                (_, Value::Ref(Some(marker))) if param.starts_with('L') => {
+                // A reference: a string, a marker or an object (by its key).
+                (_, Value::Ref(Some(_)) | Value::Host(_))
+                    if param.starts_with('L') && expect_ref(value).is_some() =>
+                {
                     // `insert` reads its argument after shifting the
                     // receiver, so a builder inserted into itself is not
                     // the text it held.
-                    if marker == receiver && r.name == "insert" {
+                    if expect_ref(value).is_some_and(|marker| marker == receiver)
+                        && r.name == "insert"
+                    {
                         return Ok(None);
                     }
-                    match self.builder_argument_text(param, marker) {
+                    match self.builder_argument_text(param, value) {
                         Some(text) => Arg::Text(Some(text)),
                         None => return Ok(None),
                     }
@@ -827,7 +841,8 @@ impl<H: Host> Runtime<'_, H> {
     /// builder's contents, a string's own text, and for an `Object`
     /// parameter what `String.valueOf` gives a box or a host-modelled object.
     /// `None` for an object whose text only its own class knows.
-    fn builder_argument_text(&mut self, param: &str, marker: &str) -> Option<String> {
+    fn builder_argument_text(&mut self, param: &str, value: &Value) -> Option<String> {
+        let marker = expect_ref(value)?;
         if let Some(text) = self.string_builders.get(marker) {
             return Some(text.clone());
         }
@@ -839,17 +854,17 @@ impl<H: Host> Runtime<'_, H> {
                 // is a string, a box or a host object; a jar object passed to
                 // `insert(int, Object)` prints its own `toString`, which this
                 // module cannot run, so that call is counted.
-                if let Some(text) = crate::runtime::java_tostring::modelled_marker(self.host, marker) {
+                if let Some(text) = crate::runtime::java_tostring::modelled_marker(self.host, value) {
                     return Some(text);
                 }
-                crate::runtime::jar_object::packaged_key_class(marker)
+                crate::runtime::jar_object::packaged_object_class(value)
                     .is_none()
                     .then(|| marker.to_owned())
             }
             // A `CharSequence`/`StringBuilder`/`StringBuffer` parameter: an
             // object this run built from a jar class (or one the host
             // models, a `CharBuffer`) has text only its `charAt` knows.
-            _ => crate::runtime::jar_object::packaged_key_class(marker)
+            _ => crate::runtime::jar_object::packaged_object_class(value)
                 .is_none()
                 .then(|| marker.to_owned()),
         }
