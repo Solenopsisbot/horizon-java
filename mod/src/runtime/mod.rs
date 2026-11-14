@@ -31,6 +31,7 @@ mod class_precedence;
 pub mod client_surface;
 mod collection_base;
 mod collection_callback;
+mod collection_store;
 mod color_collection;
 mod commons_io;
 mod commons_pair;
@@ -2322,6 +2323,19 @@ pub trait Host {
         None
     }
 
+    /// Whether [`Self::mutable_collection_values`] would answer for `value`,
+    /// without copying the values out (#203).
+    fn holds_collection(&self, value: &Value) -> bool {
+        self.mutable_collection_values(value).is_some()
+    }
+
+    /// How many values [`Self::mutable_collection_values`] would answer,
+    /// without copying them out (#203).
+    fn collection_len(&self, value: &Value) -> Option<usize> {
+        self.mutable_collection_values(value)
+            .map(|values| values.len())
+    }
+
     /// The values a mutable collection marker holds as the host keeps them
     /// (`Value`s, not their markers), so a host handle keeps its
     /// construction (`HostRef::same_object`). `None` when the host keeps no
@@ -2350,6 +2364,26 @@ pub trait Host {
     /// Whether the host keeps a collection row for `marker`.
     fn has_mutable_collection(&self, _marker: &str) -> bool {
         false
+    }
+
+    /// The generation of the list the host keeps for `marker`
+    /// (`collection_store.rs`): it moves whenever the list may have changed.
+    /// `None` when the host keeps no list for it directly (a view, another
+    /// host).
+    fn collection_generation(&self, _marker: &str) -> Option<u64> {
+        None
+    }
+
+    /// The list the host keeps for `marker`, borrowed; `None` as for
+    /// [`Self::collection_generation`].
+    fn collection_slice(&self, _marker: &str) -> Option<&[Value]> {
+        None
+    }
+
+    /// The list the host keeps for `marker`, to change in place (its
+    /// generation moves); `None` as for [`Self::collection_generation`].
+    fn collection_vec_mut(&mut self, _marker: &str) -> Option<&mut Vec<Value>> {
+        None
     }
 
     /// The bucket table (`hash_table.rs`) of a hash collection, taken out
@@ -2885,7 +2919,9 @@ pub struct StdHost {
     holder_rows: Vec<host_registry::HolderRow>,
     /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
     holder_binding: host_registry::Binding,
-    mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Every mutable collection's list, by marker, each with a generation
+    /// (`collection_store.rs`).
+    mutable_collections: collection_store::CollectionStore,
     /// Chat components changed in place, by marker (`host_component.rs`).
     pub(crate) component_states: host_component::States,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
@@ -3064,7 +3100,7 @@ impl StdHost {
             holders: BTreeMap::new(),
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
-            mutable_collections: BTreeMap::new(),
+            mutable_collections: collection_store::CollectionStore::default(),
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
@@ -3552,6 +3588,18 @@ impl StdHost {
     /// The elements a host collection holds, as the `Value`s it stored (a
     /// handle keeps its origin, so identity survives the read), or `None` for
     /// a value the host keeps no elements for.
+    /// The marker of the list the host keeps for `marker` itself, as
+    /// [`Self::mutable_values`] reads it (through a synchronized wrapper),
+    /// or `None` for a view (whose values are another list's) and a marker
+    /// with no list.
+    fn direct_collection<'a>(&'a self, marker: &'a str) -> Option<&'a str> {
+        let marker = self.synchronized_target(marker);
+        (self.view_values(marker).is_none()
+            && self.reversed_view_values(marker).is_none()
+            && self.mutable_collections.contains_key(marker))
+        .then_some(marker)
+    }
+
     fn mutable_values(&self, receiver: &Value) -> Option<Vec<Value>> {
         // A `String` is no collection, whatever it spells (`jar_object.rs`).
         if jar_object::spells_key(receiver) {
@@ -4523,6 +4571,27 @@ impl Host for StdHost {
         self.mutable_values(value)
     }
 
+    fn collection_len(&self, value: &Value) -> Option<usize> {
+        let marker = self.synchronized_target(expect_ref(value)?);
+        if let Some(values) = self.view_values(marker) {
+            return Some(values.len());
+        }
+        if let Some(values) = self.reversed_view_values(marker) {
+            return Some(values.len());
+        }
+        self.mutable_collections.get(marker).map(Vec::len)
+    }
+
+    fn holds_collection(&self, value: &Value) -> bool {
+        let Some(marker) = expect_ref(value) else {
+            return false;
+        };
+        let marker = self.synchronized_target(marker);
+        self.mutable_collections.contains_key(marker)
+            || self.view_values(marker).is_some()
+            || self.reversed_view_values(marker).is_some()
+    }
+
     fn mutable_collection_entries(&self, value: &Value) -> Option<Vec<Value>> {
         if jar_object::spells_key(value) {
             return None;
@@ -4548,6 +4617,21 @@ impl Host for StdHost {
 
     fn has_mutable_collection(&self, marker: &str) -> bool {
         self.mutable_collections.contains_key(marker)
+    }
+
+    fn collection_generation(&self, marker: &str) -> Option<u64> {
+        let marker = self.direct_collection(marker)?;
+        Some(self.mutable_collections.generation(marker))
+    }
+
+    fn collection_slice(&self, marker: &str) -> Option<&[Value]> {
+        let marker = self.direct_collection(marker)?;
+        self.mutable_collections.get(marker).map(Vec::as_slice)
+    }
+
+    fn collection_vec_mut(&mut self, marker: &str) -> Option<&mut Vec<Value>> {
+        let marker = self.direct_collection(marker)?.to_owned();
+        self.mutable_collections.get_mut(&marker)
     }
 
     fn take_hash_table(&mut self, marker: &str) -> Option<hash_table::HashTable> {

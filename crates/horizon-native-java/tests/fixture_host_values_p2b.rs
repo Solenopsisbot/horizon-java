@@ -124,10 +124,15 @@ const CASES: &[(&str, Outcome)] = &[
             r#"java.lang.Stringtruefalsefalse1525255963|stack-walker|stack-walker|2sr|falsefalse|stack-frame/stackSpelled@demo/P2|stack-frame/stackSpelled@demo/P2|2sr"#,
         ),
     ),
-    // Spelled like a stack trace element: the String stays a String, and the
-    // element's own hash (file and line) is counted in the HashMap (Java 25:
-    // `falsefalse|stack-trace-element/stackSpelled@demo/P2|...|2sr`).
-    ("steSpelled", Counted),
+    // Spelled like a stack trace element: the String stays a String. The
+    // element's own hash (file and line) is unknown, but the HashMap keeps the
+    // element itself (#156 P14b), so `get` finds the same object.
+    (
+        "steSpelled",
+        Exact(
+            "falsefalse|stack-trace-element/stackSpelled@demo/P2|stack-trace-element/stackSpelled@demo/P2|2sr",
+        ),
+    ),
     // Java 25: `demo.P2b.stackText(P2b.java:113)`; the runtime keeps no file or line.
     ("stackText", Counted),
     // Two walks hand out two frame objects with equal keys: identity counted.
