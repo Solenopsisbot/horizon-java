@@ -31749,7 +31749,7 @@ mandatory = true
             ..NativeJar::default()
         };
         let mut host = jar.seed_host(StdHost::new());
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let loaded = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "isModLoaded".into(),
@@ -35531,7 +35531,7 @@ mandatory = true
     #[test]
     fn standard_host_maps_fabric_loader_metadata_and_paths() {
         let mut host = StdHost::new().with_mod("demo", "1.2.3");
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let environment = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getEnvironmentType".into(),
@@ -35539,7 +35539,7 @@ mandatory = true
         };
         assert_eq!(
             host.invoke_instance(&environment, &loader, &[]).unwrap(),
-            Value::Ref(Some("CLIENT".into()))
+            host_fabric_runtime::env_type("CLIENT").unwrap()
         );
         let resolver_method = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
@@ -35549,7 +35549,7 @@ mandatory = true
         let resolver = host
             .invoke_instance(&resolver_method, &loader, &[])
             .unwrap();
-        assert_eq!(resolver, Value::Ref(Some("fabric-mapping-resolver".into())));
+        assert_eq!(resolver, host_fabric_runtime::mapping_resolver());
         let map_class = MethodRef {
             owner: "net/fabricmc/loader/api/MappingResolver".into(),
             name: "mapClassName".into(),
@@ -35592,7 +35592,7 @@ mandatory = true
                 .clone()
                 .invoke_instance(&environment, &loader, &[])
                 .unwrap(),
-            Value::Ref(Some("SERVER".into()))
+            host_fabric_runtime::env_type("SERVER").unwrap()
         );
         let development = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
@@ -35889,7 +35889,7 @@ mandatory = true
             descriptor: "Lnet/fabricmc/api/EnvType;".into(),
         };
         let client = host.get_static(&client).unwrap();
-        assert_eq!(client, Value::Ref(Some("CLIENT".into())));
+        assert_eq!(client, host_fabric_runtime::env_type("CLIENT").unwrap());
         let is_client = MethodRef {
             owner: "net/fabricmc/api/EnvType".into(),
             name: "isClient".into(),
@@ -35914,8 +35914,12 @@ mandatory = true
             descriptor: "()I".into(),
         };
         assert_eq!(
-            host.invoke_instance(&ordinal, &Value::Ref(Some("SERVER".into())), &[])
-                .unwrap(),
+            host.invoke_instance(
+                &ordinal,
+                &host_fabric_runtime::env_type("SERVER").unwrap(),
+                &[]
+            )
+            .unwrap(),
             Value::Int(1)
         );
     }
@@ -41176,7 +41180,7 @@ mandatory = true
             .with_mod("demo", "1.2.3")
             .with_fabric_entrypoint("main", "demo.Main", "demo")
             .with_fabric_entrypoint("client", "demo.Client", "demo");
-        let loader = Value::Ref(Some("fabric-loader".into()));
+        let loader = host_fabric_runtime::loader();
         let entries = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getEntrypoints".into(),
@@ -41233,7 +41237,7 @@ mandatory = true
                     name: "get".into(),
                     descriptor: "(I)Ljava/lang/Object;".into(),
                 },
-                &main,
+                &typed_entries,
                 &[Value::Int(0)],
             )
             .unwrap();
