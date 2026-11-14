@@ -83,16 +83,46 @@ pub(crate) fn collection(key: String) -> Value {
     Value::Host(HostRef::new(HostKind::Collection, key))
 }
 
+/// Which of the host's collections a key names: a mutable one (an
+/// unmodelled call's answer, `subList`, a map's view, a loader's list), an
+/// unmodifiable one (`List.of`, `Collections.unmodifiableList`) or a
+/// reversed view. Its word is the key's (`collection_key_for`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CollectionFamily {
+    Neutral,
+    Immutable,
+    Reversed,
+}
+
+impl CollectionFamily {
+    const ALL: [Self; 3] = [Self::Neutral, Self::Immutable, Self::Reversed];
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Neutral => "neutral",
+            Self::Immutable => "immutable",
+            Self::Reversed => "reversed",
+        }
+    }
+}
+
+/// The key of the `n`th collection of `family` the host makes as `class`:
+/// the one place a collection key is written (#156 P14d1), read back by
+/// [`collection_key`]. Each family's counter only grows, so no key is
+/// handed out twice.
+pub(crate) fn collection_key_for(class: &str, family: CollectionFamily, n: usize) -> String {
+    format!("{class}#{}{n}", family.word())
+}
+
 /// A host-made collection's key: `(class, n)` for `<class>#neutral<n>`,
 /// `<class>#immutable<n>` or a reversed view's `<class>#reversed<n>`, a JDK
 /// (or Guava) class with no `#`, `:`, space, `.`, `,` or `\\`. The host
 /// wrote it; a `String` spelled so is no collection.
 pub(crate) fn collection_key(text: &str) -> Option<(&str, &str)> {
     let (class, rest) = text.split_once('#')?;
-    let number = rest
-        .strip_prefix("neutral")
-        .or_else(|| rest.strip_prefix("immutable"))
-        .or_else(|| rest.strip_prefix("reversed"))?;
+    let number = CollectionFamily::ALL
+        .iter()
+        .find_map(|family| rest.strip_prefix(family.word()))?;
     (!class.is_empty()
         && !class.contains([':', ' ', '.', ',', '\\'])
         && !number.is_empty()
