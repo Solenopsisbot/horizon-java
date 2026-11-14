@@ -301,9 +301,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn element_count(&self, value: &Value) -> usize {
-        self.host
-            .mutable_collection_values(value)
-            .map_or(0, |values| values.len())
+        self.host.collection_len(value).unwrap_or(0)
     }
 
     /// Before a call: whether it may move a tracked collection's `modCount`

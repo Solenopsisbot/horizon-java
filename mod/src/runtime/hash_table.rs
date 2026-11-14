@@ -120,6 +120,10 @@ pub struct HashTable {
     /// Moves on every structural change (insert, remove, resize, clear), as
     /// a `HashMap`'s `modCount` does for a function run inside `compute`.
     pub(crate) version: u64,
+    /// For an insertion-ordered table (`linked`) mirrored by its list: each
+    /// key's entry index in the list, `None` until rebuilt after a removal
+    /// shifted them (#203).
+    pub(crate) positions: Option<HashMap<String, usize>>,
 }
 
 impl HashTable {
@@ -138,6 +142,7 @@ impl HashTable {
             index: HashMap::new(),
             synced: None,
             version: 0,
+            positions: None,
         }
     }
 

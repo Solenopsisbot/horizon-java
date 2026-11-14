@@ -166,6 +166,9 @@ impl<H: Host> Runtime<'_, H> {
         // (`collection_store.rs`): nothing to reconcile (#203).
         let generation = self.host.collection_generation(&marker);
         if generation.is_some() && table.synced == generation {
+            if table.linked && table.positions.is_none() {
+                self.index_positions(&marker, kind, &mut table);
+            }
             self.host.store_hash_table(&marker, table);
             return Ok(());
         }
@@ -175,8 +178,24 @@ impl<H: Host> Runtime<'_, H> {
         } else {
             None
         };
+        table.positions = None;
+        if table.linked && table.synced.is_some() {
+            self.index_positions(&marker, kind, &mut table);
+        }
         self.host.store_hash_table(&marker, table);
         result
+    }
+
+    /// An insertion-ordered table's key positions in its list (one pass).
+    fn index_positions(&self, marker: &str, kind: TableKind, table: &mut HashTable) {
+        let step = if kind.map { 2 } else { 1 };
+        table.positions = self.host.collection_slice(marker).map(|list| {
+            list.iter()
+                .step_by(step)
+                .enumerate()
+                .map(|(index, key)| (collection_item_marker(key), index))
+                .collect()
+        });
     }
 
     /// Where a stored key sits in the host's list (its first slot) when the
@@ -191,7 +210,14 @@ impl<H: Host> Runtime<'_, H> {
         step: usize,
     ) -> Option<usize> {
         let generation = self.host.collection_generation(marker)?;
-        if table.synced != Some(generation) || !table.ordered() {
+        if table.synced != Some(generation) {
+            return None;
+        }
+        if table.linked {
+            let positions = table.positions.as_ref()?;
+            return Some(positions.get(&collection_item_marker(stored))? * step);
+        }
+        if !table.ordered() {
             return None;
         }
         Some(table.rank_of(&collection_item_marker(stored))? * step)
@@ -223,7 +249,7 @@ impl<H: Host> Runtime<'_, H> {
     pub(crate) fn place_new_entry(
         &mut self,
         marker: &str,
-        table: &HashTable,
+        table: &mut HashTable,
         key: &Value,
         entry: Vec<Value>,
         capacity: usize,
@@ -247,11 +273,22 @@ impl<H: Host> Runtime<'_, H> {
             (None, false)
         };
         let step = entry.len();
+        let item = collection_item_marker(key);
         let Some(list) = self.host.collection_vec_mut(marker) else {
             return Err(NativeError::Metadata(format!(
                 "hash collection {marker} has no host list"
             )));
         };
+        // An insertion-ordered table's new key is its list's last entry.
+        if table.linked {
+            let at = list.len() / step;
+            match (&mut table.positions, rank, mirrors) {
+                (Some(positions), None, true) => {
+                    positions.insert(item, at);
+                }
+                _ => table.positions = None,
+            }
+        }
         match rank {
             Some(rank) if rank * step <= list.len() => {
                 list.splice(rank * step..rank * step, entry);
@@ -1134,6 +1171,8 @@ impl<H: Host> Runtime<'_, H> {
                 list.drain(position..position + step);
             }
             table.remove(&collection_item_marker(&stored));
+            // The later entries moved up: rebuilt when next needed.
+            table.positions = None;
             self.keep_synced(&marker, table, true);
             return Ok(Some(Some(value)));
         }

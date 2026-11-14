@@ -2326,6 +2326,13 @@ pub trait Host {
         self.mutable_collection_values(value).is_some()
     }
 
+    /// How many values [`Self::mutable_collection_values`] would answer,
+    /// without copying them out (#203).
+    fn collection_len(&self, value: &Value) -> Option<usize> {
+        self.mutable_collection_values(value)
+            .map(|values| values.len())
+    }
+
     /// The values a mutable collection marker holds as the host keeps them
     /// (`Value`s, not their markers), so a host handle keeps its
     /// construction (`HostRef::same_object`). `None` when the host keeps no
@@ -4541,6 +4548,17 @@ impl Host for StdHost {
 
     fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         self.mutable_values(value)
+    }
+
+    fn collection_len(&self, value: &Value) -> Option<usize> {
+        let marker = self.synchronized_target(expect_ref(value)?);
+        if let Some(values) = self.view_values(marker) {
+            return Some(values.len());
+        }
+        if let Some(values) = self.reversed_view_values(marker) {
+            return Some(values.len());
+        }
+        self.mutable_collections.get(marker).map(Vec::len)
     }
 
     fn holds_collection(&self, value: &Value) -> bool {

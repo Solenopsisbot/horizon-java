@@ -451,6 +451,7 @@ impl<H: Host> Runtime<'_, H> {
                                     list.drain(position..position + 2);
                                 }
                                 table.remove(&collection_item_marker(&node));
+                                table.positions = None;
                                 self.keep_synced(&marker, table, true);
                             }
                             None => {
