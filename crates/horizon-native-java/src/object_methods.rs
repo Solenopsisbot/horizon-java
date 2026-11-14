@@ -788,6 +788,36 @@ impl<H: Host> Runtime<'_, H> {
             let equal = self.java_equals(receiver, other)?;
             return Ok(Some(Value::Int(i32::from(equal))));
         }
+        // `o.equals(x)` on a host collection typed `Object` (`Object o =
+        // List.of(1)`): the collection's own `equals` (`AbstractList`,
+        // `AbstractSet`, `AbstractMap`, an unmodifiable one's), which the call
+        // site's `Object` owner hid: it answered `Object.equals`, `==`. Asked
+        // again through the collection's interface, as a call site typed
+        // `List`/`Set`/`Map` asks it. A jar subclass with its own `equals`
+        // runs that instead (`equality_of`).
+        if r.owner == "java/lang/Object"
+            && r.name == "equals"
+            && r.descriptor == EQUALS
+            && matches!(opcode, 0xb6 | 0xb9)
+            && let Some(receiver) = receiver
+            && self.equality_of(receiver) == Equality::Host
+            && let Some(kind) = self.host_collection_kind(receiver)
+        {
+            let typed = MethodRef {
+                owner: match kind {
+                    CollectionKind::List => "java/util/List",
+                    CollectionKind::Set => "java/util/Set",
+                    CollectionKind::Map => "java/util/Map",
+                }
+                .into(),
+                name: r.name.clone(),
+                descriptor: r.descriptor.clone(),
+            };
+            if let Some(answer) = self.invoke_list_equality(&typed, 0xb9, Some(receiver), args)? {
+                return Ok(Some(answer));
+            }
+            return self.host.invoke_instance(&typed, receiver, args).map(Some);
+        }
         self.invoke_list_equality(r, opcode, receiver, args)
     }
 }
