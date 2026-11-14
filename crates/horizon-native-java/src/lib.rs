@@ -3377,8 +3377,18 @@ impl StdHost {
     /// copy of the map's current contents (`hash_collections.rs` keeps it in
     /// step). Its class stands in for the view's (`HashMap$KeySet`).
     fn map_view(&mut self, map: &Value, view: &str, kind: &str, values: Vec<Value>) -> Value {
-        let cache = format!("{}|{view}", expect_string(map));
-        self.cached_collection(cache, stand_in_class(kind), values)
+        let source = expect_string(map).to_owned();
+        let cache = format!("{source}|{view}");
+        let made = self.cached_collection(cache, stand_in_class(kind), values);
+        // A view copy whichever call site asked (a Gson `JsonObject` too):
+        // its mutators are counted, it follows the map, and it has no hash
+        // table of its own (`hash_collections.rs`).
+        if let Some(marker) = expect_ref(&made) {
+            let marker = marker.clone();
+            self.note_view_copy(&marker, &source);
+            self.note_view_kind(&marker, view);
+        }
+        made
     }
 
     /// The one collection Java answers for `cache` on every call (a map's
@@ -9619,8 +9629,14 @@ impl Host for StdHost {
                     .cloned()
                     .collect::<Vec<_>>();
                 if entries.is_empty() {
-                    // `EntrypointStorage.getEntrypoints`: a new `ArrayList`.
-                    return Ok(self.new_collection("java/util/ArrayList", Vec::new()));
+                    // `EntrypointStorage.getEntrypoints` of a key no mod
+                    // declares: `Collections.emptyList()`, one shared object.
+                    return Ok(self.unmodifiable_from(
+                        "java/util/Collections",
+                        "emptyList",
+                        "list",
+                        Vec::new(),
+                    ));
                 }
                 let mut values = Vec::new();
                 for entry in entries {
@@ -41113,7 +41129,12 @@ mandatory = true
                 &[],
             )
             .unwrap();
-        assert_eq!(entries, collection_value("set", &[]));
+        // An empty set of its own (a host-made collection, #156 P14d1).
+        assert!(jar_object::is_object(&entries), "{entries:?}");
+        assert_eq!(
+            host_collection_values(&host, &entries).unwrap(),
+            Vec::<Value>::new()
+        );
     }
 
     #[test]
