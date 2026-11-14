@@ -37,6 +37,7 @@ use javac_fixture::Fixture;
 const PROBE: &str = include_str!("fixtures/class_objects/Probe.java");
 const COPY: &str = include_str!("fixtures/class_objects/Copy.java");
 const TRACKER_COPY: &str = include_str!("fixtures/class_objects/ConfigTracker.java");
+const REVIEW: &str = include_str!("fixtures/class_objects/Review.java");
 
 const WOVEN: &str = r#"package demo;
 
@@ -83,6 +84,7 @@ fn fixture() -> Fixture {
         "class-objects",
         &[
             ("demo/Probe.java", PROBE),
+            ("demo/Review.java", REVIEW),
             ("demo/Woven.java", WOVEN),
             ("org/spongepowered/asm/mixin/Mixin.java", MIXIN_STUB),
         ],
@@ -196,4 +198,66 @@ fn a_mixin_added_interface_is_the_woven_classs() {
         .unwrap();
     assert_eq!(answer, Value::Ref(Some("truetruetruetruetrue".into())));
     assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());
+}
+
+/// `demo.Review.<method>()` and the calls the host counted.
+fn review(method: &str) -> (String, Vec<(String, usize)>) {
+    let fixture = fixture();
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let text = match fixture
+        .jar
+        .invoke_method_with_args(
+            "demo/Review",
+            method,
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        )
+        .unwrap_or_else(|error| panic!("{method} failed: {error}"))
+    {
+        Value::Ref(Some(text)) => text,
+        other => panic!("{method} did not return a string: {other:?}"),
+    };
+    (text, host.unknown_host_calls())
+}
+
+/// #215's review (B1): a `Class` from an annotation value, `annotationType()`,
+/// a `MethodType` or a `StackWalker` is the literal's object, so a `HashMap`,
+/// `HashSet`, `IdentityHashMap` or list keyed by `X.class` finds it. Java 25:
+/// `sasiri,truetruetrue,0v11[2]s,truetruetruetruetruetrue`. The one count is
+/// `StackWalker.Option.RETAIN_CLASS_REFERENCE`, a JDK enum constant the host
+/// does not model (read twice); `getCallerClass` needs it on a JVM.
+#[test]
+fn every_producer_finds_the_literals_entry() {
+    assert_eq!(
+        review("lookups"),
+        (
+            "sasiri,truetruetrue,0v11[2]s,truetruetruetruetruetrue".to_owned(),
+            vec![(
+                "java/lang/StackWalker$Option#RETAIN_CLASS_REFERENCELjava/lang/StackWalker$Option;"
+                    .to_owned(),
+                2
+            )]
+        )
+    );
+}
+
+/// #215's review: an interface's superclass, an array's interfaces, array
+/// covariance and primitives in `isAssignableFrom`, a primitive's `cast`,
+/// canonical and simple names of nested, array and anonymous classes, and
+/// `Class.forName` of array and slash names, as Java 25 answers them.
+#[test]
+fn arrays_primitives_and_interfaces_answer_as_java_25() {
+    assert_eq!(
+        review("members"),
+        (
+            "truetruetrue,truetruetruetruefalsefalsefalsefalse,\
+             ClassCastException:Cannot cast java.lang.Integer to int|null,\
+             demo.Review.Foo|int[]|demo.Review.Foo[][]|null|java.util.Map.Entry|Entry,\
+             truetruetrue|CNFE:java/lang/String|CNFE:[V|CNFE:[Ljava/lang/String"
+                .to_owned(),
+            Vec::new()
+        )
+    );
 }

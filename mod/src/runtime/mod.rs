@@ -20926,10 +20926,15 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 _ => false,
             };
+            // HotSpot names a malformed array class in its internal form.
             return if resolves {
                 Ok(host_class::class_value(&internal))
             } else {
-                Err(not_found())
+                Err(NativeError::UncaughtException {
+                    class: "java/lang/ClassNotFoundException".into(),
+                    message: Some(internal),
+                    frame: None,
+                })
             };
         }
         if self.has_class(&internal) {
