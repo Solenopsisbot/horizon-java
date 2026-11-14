@@ -252,6 +252,8 @@ impl<H: Host> Runtime<'_, H> {
             if let Value::Ref(Some(text)) = value
                 && crate::jdk_closure::in_jdk_package(target)
                 && crate::value_class::is_plain_string(text)
+                // A bare class name (`int`) may be a `Class` (#156 P13).
+                && !crate::class_marker_like(text, self.classes, &self.linked)
             {
                 if crate::value_class::string_instance_of(text, target) {
                     return Ok(());
