@@ -318,6 +318,17 @@ pub enum HostKind {
     AttachmentType,
     /// A NeoForge `AttachmentType$Builder`: key a serial minted per allocation.
     AttachmentBuilder,
+    /// A NeoForge `ModContainer`: key its mod id and what its class is known
+    /// to be (`host_neoforge_loader.rs`).
+    NeoForgeModContainer,
+    /// A NeoForge `IModInfo`: key its mod id.
+    NeoForgeModInfo,
+    /// A `ModFileInfo`: key its file's first mod id.
+    NeoForgeModFileInfo,
+    /// A `ModConfig.Type` constant: key its name.
+    NeoForgeConfigType,
+    /// A detected `WorldVersion`: key its name.
+    WorldVersion,
     /// The command surface (`host_brigadier.rs`): Brigadier's
     /// `CommandDispatcher` a registration callback receives (no key).
     BrigadierDispatcher,
@@ -341,6 +352,15 @@ pub enum HostKind {
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
+    /// The `Sink` a stream push hands a jar spliterator as its `Consumer`:
+    /// key `<push>:<stage>` (`stream_pipeline.rs`).
+    StreamSink,
+    /// `Collector.of(...)`'s `Collectors.CollectorImpl`: key the runtime's
+    /// collector number (`stream_pipeline.rs`).
+    Collector,
+    /// A modelled JDK spliterator over jar code (`jdk_spliterators.rs`): key
+    /// `iter:<n>` or `ra:<n>`, which names its class.
+    Spliterator,
     /// An object `new` (or a model) allocated: key `class#n`
     /// (`jar_object.rs`), one key per allocation.
     JarObject,
@@ -1217,6 +1237,56 @@ const KINDS: &[KindInfo] = &[
         canonical: always_canonical,
         methods: &crate::runtime::host_attachment::BUILDER_METHODS,
     },
+    KindInfo {
+        kind: HostKind::NeoForgeModContainer,
+        tag: "nfmc",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_neoforge_loader::container_types,
+        },
+        // `indexedMods.get(id)`: one container per mod.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_neoforge_loader::CONTAINER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::NeoForgeModInfo,
+        tag: "nfmi",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_neoforge_loader::mod_info_types,
+        },
+        // The container's final `modInfo` field.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_neoforge_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::NeoForgeModFileInfo,
+        tag: "nfmf",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_neoforge_loader::mod_file_info_types,
+        },
+        // `fileById.get(id)`: one per file, keyed by the file.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_neoforge_loader::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::NeoForgeConfigType,
+        tag: "nfct",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_neoforge_loader::config_type_types,
+        },
+        // An enum constant.
+        canonical: always_canonical,
+        methods: &crate::runtime::host_neoforge_loader::CONFIG_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::WorldVersion,
+        tag: "wver",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_neoforge_loader::world_version_types,
+        },
+        // A new record per detection.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_neoforge_loader::WORLD_VERSION_METHODS,
+    },
     // The command surface (`host_brigadier.rs`). An exact `getClass()` would
     // need a class side for brigadier's classes (#174's `ClassSide`): until
     // one is added, `getClass()` is counted.
@@ -1307,6 +1377,32 @@ const KINDS: &[KindInfo] = &[
         // builder, two equal keys from two runs prove nothing.
         canonical: never_canonical,
         methods: &crate::runtime::stream_pipeline::STREAM_BUILDER,
+    },
+    KindInfo {
+        kind: HostKind::StreamSink,
+        tag: "ssnk",
+        // The JDK's sink is a stage's own class, which is not modelled: only
+        // its declared types are known; `getClass()` and a cast's message are
+        // counted.
+        class: ClassRule::Unknown {
+            declared: crate::runtime::stream_pipeline::sink_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Collector,
+        tag: "coll",
+        class: ClassRule::Fixed("java/util/stream/Collectors$CollectorImpl"),
+        canonical: never_canonical,
+        methods: &crate::runtime::stream_pipeline::COLLECTOR_IMPL,
+    },
+    KindInfo {
+        kind: HostKind::Spliterator,
+        tag: "splt",
+        class: ClassRule::FromKey(crate::runtime::jdk_spliterators::spliterator_class),
+        canonical: never_canonical,
+        methods: &crate::runtime::jdk_spliterators::JDK_SPLITERATOR,
     },
     KindInfo {
         kind: HostKind::JarObject,

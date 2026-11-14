@@ -48,6 +48,25 @@ public final class Probe {
             + Stream.of(4, 5).parallel().filter(x -> x > 4).count());
     }
 
+    public static String collectorOf() {
+        java.util.stream.Collector<Object, List<Object>, String> c = java.util.stream.Collector.of(
+            () -> { log("supply"); return new ArrayList<>(); },
+            (l, x) -> { log("acc" + x); l.add(x); },
+            (a, b) -> { log("comb"); return a; },
+            l -> { log("finish"); return l.toString(); });
+        String a = Stream.of("x", "y").peek(x -> log("p" + x)).collect(c);
+        java.util.stream.Collector<Object, List<Object>, List<Object>> id = java.util.stream.Collector.of(
+            ArrayList::new, List::add, (l, r) -> l, java.util.stream.Collector.Characteristics.IDENTITY_FINISH);
+        List<Object> b = Stream.of(1, 2).collect(id);
+        java.util.stream.Collector<Object, List<Object>, Object> idf = java.util.stream.Collector.of(
+            ArrayList::new, List::add, (l, r) -> l, l -> { log("never"); return l; },
+            java.util.stream.Collector.Characteristics.IDENTITY_FINISH);
+        Object d = Stream.of(3).collect(idf);
+        String nul;
+        try { java.util.stream.Collector.<Object, List<Object>>of(null, List::add, (l, r) -> l); nul = "ok"; } catch (NullPointerException e) { nul = "npe"; }
+        return take(a + "," + b + "," + d + "," + nul);
+    }
+
     public static String interleave() {
         return take(Stream.of("a", "bb", "c")
             .peek(x -> log("p" + x))
@@ -262,6 +281,10 @@ fn per_element_terminals_run_as_jdk_25_does() {
             "acc10+1 acc11+2 acc13+3 p1 r1 p2 r2 p3 r3 o45 => 16,6,Optional[20],Optional.empty,xy",
         ),
         ("maxMin", "p2 p9 c29 p4 c94 => Optional[9],Optional[3]"),
+        (
+            "collectorOf",
+            "supply px accx py accy finish => [x, y],[1, 2],[3],npe",
+        ),
         ("forEachAndCollect", "supply pa adda pb addb => [a, b]"),
         (
             "nullCallbacks",

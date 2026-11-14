@@ -53,6 +53,10 @@ pub(crate) enum HostCast {
     /// (a collection whose JDK class the host does not track, a game
     /// object): counted.
     Unknown,
+    /// Provably not the class, but the value's exact class (which the
+    /// exception's message names) is unknown: counted, and still a
+    /// `ClassCastException`. Passing the cast would hand the jar a typed lie.
+    FailsCounted,
 }
 
 /// Whether the JDK class `class` is in module `java.base` (the packages a
@@ -88,6 +92,21 @@ fn in_java_base(class: &str) -> bool {
     ];
     BASE.iter().any(|prefix| class.starts_with(prefix))
         && !ELSEWHERE.iter().any(|prefix| class.starts_with(prefix))
+}
+
+/// The `ClassCastException` of a cast that fails where the runtime does not
+/// know the value's exact class: the cast is counted by the caller, and the
+/// message, which in Java names that class first, names only the target
+/// (never a marker).
+pub(crate) fn cast_failed_counted(target: &str) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/ClassCastException".into(),
+        message: Some(format!(
+            "cannot be cast to class {}",
+            target.replace('/', ".")
+        )),
+        frame: None,
+    }
 }
 
 /// The `ClassCastException` `checkcast target` throws for an object of
@@ -138,6 +157,10 @@ impl<H: Host> Runtime<'_, H> {
                 return Err(class_cast_exception(&runtime_class, target));
             }
             Some(HostCast::Unknown) => return self.count_cast(value, target),
+            Some(HostCast::FailsCounted) => {
+                self.count_cast(value, target)?;
+                return Err(cast_failed_counted(target));
+            }
             None => {}
         }
         // A JDK throwable target and a throwable value: the JDK hierarchy
@@ -147,6 +170,19 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(());
             }
             return Err(class_cast_exception(&runtime_class, target));
+        }
+        // A live stream is a pipeline stage of its stream interface: a cast to
+        // that interface, `BaseStream` or `AutoCloseable` passes; any other
+        // fails, naming a stage class the runtime does not model (counted,
+        // and never passed: its marker would become a jar `String`).
+        if let Value::Ref(Some(text)) = value
+            && self.is_live_stream(text)
+        {
+            if self.live_stream_instance_of(text, target) == Some(true) {
+                return Ok(());
+            }
+            self.count_cast(value, target)?;
+            return Err(cast_failed_counted(target));
         }
         // A plain `String`, or a `stream/...` text that is no live stream (a
         // jar `String` spelled like one), is never a stream: Java's CCE.
@@ -214,7 +250,7 @@ impl<H: Host> Runtime<'_, H> {
                 // The exception names the exact class: unknown, counted.
                 Some(false) => match handle.class() {
                     Some(class) => HostCast::Throws(class.to_owned()),
-                    None => HostCast::Unknown,
+                    None => HostCast::FailsCounted,
                 },
                 None => HostCast::Unknown,
             });
@@ -346,8 +382,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // An object a library model built itself: the model knows its whole
         // type, so its `false` is an answer.
-        if crate::runtime::gson_tree::is_tree(value) || crate::runtime::neoforge_loader::container_type_known(marker)
-        {
+        if crate::runtime::gson_tree::is_tree(value) {
             return false;
         }
         if self.class(target).is_some() {

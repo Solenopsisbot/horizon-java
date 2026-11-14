@@ -83,8 +83,8 @@ pub(crate) fn fired_event(value: &Value) -> Option<GameEvent> {
     crate::runtime::events::bus_event(&game_event_class_of(value)?).map(|(event, _)| event)
 }
 
-/// The event loading stage `class` posts, built for `container` (none for the one shared
-/// `RegisterPayloadHandlersEvent`).
+/// The event loading stage `class` posts, built for mod `container`'s container (its mod id;
+/// none for the one shared `RegisterPayloadHandlersEvent`).
 pub(crate) fn lifecycle_event(class: &str, container: Option<&str>) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::LifecycleEvent,

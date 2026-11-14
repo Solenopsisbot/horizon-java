@@ -2909,7 +2909,25 @@ mod tests {
 
         let mut loaded = load(Some("26.3"));
         let version = loaded.host.invoke(&detected, &[]).unwrap();
-        assert!(matches!(version, Value::Ref(Some(_))), "{version:?}");
+        // Java 25 on the real 26.3 server: a `WorldVersion$Simple` record whose `name()` and
+        // `id()` are `26.3`; two detections are `equals` (not `==`).
+        assert!(
+            matches!(&version, Value::Host(h) if h.kind() == runtime::HostKind::WorldVersion),
+            "{version:?}"
+        );
+        let again = loaded.host.invoke(&detected, &[]).unwrap();
+        let equals = MethodRef {
+            owner: "java/lang/Object".into(),
+            name: "equals".into(),
+            descriptor: "(Ljava/lang/Object;)Z".into(),
+        };
+        assert_eq!(
+            loaded
+                .host
+                .invoke_instance(&equals, &version, &[again])
+                .unwrap(),
+            Value::Int(1)
+        );
         assert_eq!(
             loaded.host.invoke_instance(&name, &version, &[]).unwrap(),
             Value::Ref(Some("26.3".to_owned()))

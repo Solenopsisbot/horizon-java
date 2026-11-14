@@ -246,21 +246,33 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Ok(Lookup::Unknown);
             }
+            // A handle whose hash the row cannot give: Java's hash may still
+            // put it in a stored handle's bucket (two `Collector.of` records
+            // of the same lambdas are equal, with equal hashes). Its row's
+            // `equals` decides against every stored handle of its kind, an
+            // equal key never a match by itself; one the row cannot decide
+            // makes the lookup unknown (counted), never a silent split.
+            if let Value::Host(handle) = key {
+                let mut unknown = false;
+                for stored in table.order() {
+                    let stored = parse_collection_value(&stored)?;
+                    if !matches!(&stored, Value::Host(other) if other.kind() == handle.kind()) {
+                        continue;
+                    }
+                    match handle.equals(&stored, &mut object_methods::RuntimeNested::new(self))? {
+                        Some(true) => return Ok(Lookup::Found(stored)),
+                        Some(false) => {}
+                        None => unknown = true,
+                    }
+                }
+                return Ok(if unknown {
+                    Lookup::Unknown
+                } else {
+                    Lookup::Absent
+                });
+            }
             if !table.contains(&marker) {
                 return Ok(Lookup::Absent);
-            }
-            // A handle with an equal key is stored: the same object only
-            // where `equals` says so (the row's, or identity proved by
-            // `same_object`); an equal key is never a match by itself.
-            if let Value::Host(handle) = key {
-                let stored = parse_collection_value(&marker)?;
-                return Ok(
-                    match handle.equals(&stored, &mut object_methods::RuntimeNested::new(self))? {
-                        Some(true) => Lookup::Found(stored),
-                        Some(false) => Lookup::Absent,
-                        None => Lookup::Unknown,
-                    },
-                );
             }
             return Ok(Lookup::Found(key.clone()));
         };
