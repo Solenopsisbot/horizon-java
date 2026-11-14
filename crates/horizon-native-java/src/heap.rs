@@ -188,7 +188,16 @@ impl StdHost {
         for field in self.persistent_static_fields.values() {
             value(field, out);
         }
+        // Only the logged calls the log is read back for (event
+        // registrations, `events::read_back_call`). Every other call is
+        // history: a constructor's receiver is the new object itself, and
+        // what any call left with the host lives in a table listed here (or
+        // keyed by its object, `keyed_texts`). Rooting the whole log kept
+        // every object a jar ever made alive (#197).
         for invocation in &self.invocations {
+            if !crate::events::read_back_call(&invocation.method) {
+                continue;
+            }
             if let Some(receiver) = &invocation.receiver {
                 value(receiver, out);
             }
@@ -222,13 +231,6 @@ impl StdHost {
             out.push(key);
             slots.iter().for_each(|slot| value(slot, out));
         }
-        for (key, cause) in &self.throwable_causes {
-            out.push(key);
-            if let Some(cause) = cause {
-                value(cause, out);
-            }
-        }
-        out.extend(self.throwable_messages.keys().map(String::as_str));
         out.extend(self.payload_bytes.keys().map(String::as_str));
         out.extend(self.packet_types.keys().map(String::as_str));
         out.extend(self.item_property_builders.keys().map(String::as_str));
@@ -240,6 +242,107 @@ impl StdHost {
         self.saved_data.root_texts(out);
         // NeoForge attachment types and live values (`neoforge_attachments.rs`).
         self.neoforge_attachments.root_texts(out);
+        // The objects the loader built and keeps (an entrypoint instance,
+        // a `DeferredRegister`'s values) and the JDK's shared empties.
+        self.constructed_entrypoints
+            .values()
+            .for_each(|held| value(held, out));
+        for (key, held) in &self.deferred_registers {
+            out.push(key);
+            if let Some((held, _)) = held {
+                value(held, out);
+            }
+        }
+        out.extend(self.shared_empties.values().map(String::as_str));
+    }
+
+    /// The host's own state that may name a jar object without a table this
+    /// module reads field by field: each one's whole `Debug` text, scanned
+    /// for markers as a root (keeping too much, never too little).
+    fn opaque_root_texts(&self, out: &mut Vec<String>) {
+        out.push(format!("{:?}", self.neoforge_bus));
+        out.push(format!("{:?}", self.imc));
+        out.push(format!("{:?}", self.threads));
+        out.push(format!("{:?}", self.levels));
+        out.push(format!("{:?}", self.capability_requests));
+        out.push(format!("{:?}", self.client));
+        out.push(format!("{:?}", self.game_event));
+        out.push(format!("{:?}", self.fabric_entrypoint_containers));
+        out.push(format!("{:?}", self.content_builders));
+        out.push(format!("{:?}", self.holder_rows));
+    }
+
+    /// What the host keeps for the object `marker` in a table keyed by it: a
+    /// view's source, a sublist's parent, an iterator's collection and
+    /// guard, a comparator, a reference's referent, a throwable's cause, a
+    /// collection's layout. Edges from `marker` when it is collectable,
+    /// roots when not.
+    fn keyed_texts(&self, marker: &str, out: &mut Vec<String>) {
+        fn push(entry: Option<&impl std::fmt::Debug>, out: &mut Vec<String>) {
+            if let Some(entry) = entry {
+                out.push(format!("{entry:?}"));
+            }
+        }
+        push(self.unmodifiable_collections.get(marker), out);
+        push(self.reversed_views.get(marker), out);
+        push(self.synchronized_views.get(marker), out);
+        push(self.view_copies.get(marker), out);
+        push(self.sub_lists.get(marker), out);
+        push(self.iterator_sources.get(marker), out);
+        push(self.list_iterators.get(marker), out);
+        push(self.iterator_guards.get(marker), out);
+        push(self.collection_comparators.get(marker), out);
+        push(self.references.get(marker), out);
+        push(self.throwable_causes.get(marker), out);
+        push(self.hash_tables.get(marker), out);
+        push(self.red_black_trees.get(marker), out);
+        push(self.probe_tables.get(marker), out);
+    }
+
+    /// Every key of the tables [`Self::keyed_texts`] reads, and of the other
+    /// tables kept per object.
+    fn keyed_table_keys(&self) -> impl Iterator<Item = &str> {
+        self.unmodifiable_collections
+            .keys()
+            .chain(self.reversed_views.keys())
+            .chain(self.synchronized_views.keys())
+            .chain(self.view_copies.keys())
+            .chain(self.sub_lists.keys())
+            .chain(self.iterator_sources.keys())
+            .chain(self.list_iterators.keys())
+            .chain(self.iterator_guards.keys())
+            .chain(self.collection_comparators.keys())
+            .chain(self.references.keys())
+            .chain(self.throwable_causes.keys())
+            .chain(self.throwable_messages.keys())
+            .chain(self.hash_tables.keys())
+            .chain(self.red_black_trees.keys())
+            .chain(self.probe_tables.keys())
+            .map(String::as_str)
+    }
+
+    /// Drop every per-object row of a collected object (`keep` false).
+    fn prune_keyed_tables(&mut self, keep: impl Fn(&str) -> bool) {
+        self.unmodifiable_collections.retain(|key, _| keep(key));
+        self.reversed_views.retain(|key, _| keep(key));
+        self.synchronized_views.retain(|key, _| keep(key));
+        self.view_copies.retain(|key, _| keep(key));
+        self.view_kinds.retain(|key, _| keep(key));
+        self.sub_lists.retain(|key, _| keep(key));
+        self.iterator_sources.retain(|key, _| keep(key));
+        self.list_iterators.retain(|key, _| keep(key));
+        self.iterator_guards.retain(|key, _| keep(key));
+        self.collection_comparators.retain(|key, _| keep(key));
+        self.references.retain(|key, _| keep(key));
+        self.throwable_causes.retain(|key, _| keep(key));
+        self.throwable_messages.retain(|key, _| keep(key));
+        self.hash_tables.retain(|key, _| keep(key));
+        self.red_black_trees.retain(|key, _| keep(key));
+        self.probe_tables.retain(|key, _| keep(key));
+        self.mod_stamps.retain(|key, _| keep(key));
+        self.deque_layouts.retain(|key, _| keep(key));
+        self.empty_collections.retain(|key| keep(key));
+        self.jdk_list_of.retain(|key| keep(key));
     }
 }
 
@@ -257,6 +360,11 @@ fn collectable(marker: &str) -> bool {
         .or_else(|| marker.strip_prefix("resource-enumeration/"))
     {
         return rest.ends_with(|c: char| c.is_ascii_digit());
+    }
+    // A collection the host made (`<class>#neutral<n>`, `#immutable<n>`,
+    // `#reversed<n>`, `jar_object::collection_key`): an object like any other.
+    if crate::jar_object::collection_key(marker).is_some() {
+        return true;
     }
     // `new` names an object `<class>#<n>` (`Runtime::new_object`).
     marker.rsplit_once('#').is_some_and(|(class, number)| {
@@ -353,6 +461,7 @@ impl Collectable {
             .chain(host.mutable_collections.keys().map(String::as_str))
             .chain(host.iterators.keys().map(String::as_str))
             .chain(host.component_states.keys().map(String::as_str))
+            .chain(host.keyed_table_keys())
             .filter(|marker| collectable(marker))
             .map(str::to_owned)
             .collect();
@@ -401,6 +510,16 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     {
         let mut roots: Vec<&str> = extra.iter().map(String::as_str).collect();
         host.root_texts(&mut roots);
+        // Opaque state, and what the per-object tables keep for an object
+        // that is never collected, are roots too.
+        let mut owned = Vec::new();
+        host.opaque_root_texts(&mut owned);
+        for key in host.keyed_table_keys() {
+            if !collectable.markers.contains(key) {
+                host.keyed_texts(key, &mut owned);
+            }
+        }
+        roots.extend(owned.iter().map(String::as_str));
         let kept_values = heap
             .fields
             .iter()
@@ -463,6 +582,12 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
                 collectable.scan(text, &mut found);
             }
         }
+        // What the host keeps for this object in a table keyed by it.
+        let mut keyed = Vec::new();
+        host.keyed_texts(&marker, &mut keyed);
+        for text in &keyed {
+            collectable.scan(text, &mut found);
+        }
         pending.extend(found.drain(..).filter(|next| !reached.contains(next)));
     }
     let keep = |marker: &str| !collectable.markers.contains(marker) || reached.contains(marker);
@@ -473,6 +598,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     host.mutable_collections.retain(|key, _| keep(key));
     host.iterators.retain(|key, _| keep(key));
     host.component_states.retain(|key, _| keep(key));
+    host.prune_keyed_tables(keep);
 }
 
 impl<H: Host> Runtime<'_, H> {
