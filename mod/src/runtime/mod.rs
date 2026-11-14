@@ -2316,7 +2316,7 @@ pub trait Host {
     /// keeps one. Interpreter helpers that need a collection's contents run
     /// through the generic `Host` boundary, so the table is exposed here
     /// rather than only on [`StdHost`].
-    fn mutable_collection_values(&self, _value: &Value) -> Option<Vec<String>> {
+    fn mutable_collection_values(&self, _value: &Value) -> Option<Vec<Value>> {
         None
     }
 
@@ -3547,7 +3547,10 @@ impl StdHost {
         self
     }
 
-    fn mutable_values(&self, receiver: &Value) -> Option<Vec<String>> {
+    /// The elements a host collection holds, as the `Value`s it stored (a
+    /// handle keeps its origin, so identity survives the read), or `None` for
+    /// a value the host keeps no elements for.
+    fn mutable_values(&self, receiver: &Value) -> Option<Vec<Value>> {
         let marker = self.synchronized_target(expect_ref(receiver)?);
         if let Some(values) = self.view_values(marker) {
             return Some(values);
@@ -3555,12 +3558,7 @@ impl StdHost {
         if let Some(values) = self.reversed_view_values(marker) {
             return Some(values);
         }
-        self.mutable_collections.get(marker).map(|values| {
-            values
-                .iter()
-                .map(collection_item_marker)
-                .collect::<Vec<_>>()
-        })
+        self.mutable_collections.get(marker).cloned()
     }
 
     /// Answer `java.util.Properties` members from the map a collection keeps.
@@ -4515,7 +4513,7 @@ impl Host for StdHost {
         }
     }
 
-    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<String>> {
+    fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         self.mutable_values(value)
     }
 
@@ -6900,10 +6898,7 @@ impl Host for StdHost {
                 && !is_map_owner(&r.owner)
             {
                 let predicate = Self::argument(r, args, 0)?.clone();
-                let values = host_collection_values(self, receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = host_collection_values(self, receiver)?;
                 let mut kept = Vec::with_capacity(values.len());
                 let mut removed = false;
                 for value in values {
@@ -6930,10 +6925,7 @@ impl Host for StdHost {
                 && !is_map_owner(&r.owner)
             {
                 let callback = Self::argument(r, args, 0)?.clone();
-                let values = host_collection_values(self, receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = host_collection_values(self, receiver)?;
                 for value in values {
                     self.invoke_instance(
                         &MethodRef {
@@ -6956,20 +6948,14 @@ impl Host for StdHost {
                 (owner, "<init>", "(Ljava/util/Map;)V") if is_map_owner(owner) => {
                     // `new HashMap<>(other)` copies the entries, and a config
                     // validator that builds a modified copy relies on it.
-                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?;
                     self.mutable_collections.insert(marker.to_owned(), source);
                     return Ok(Value::Void);
                 }
                 (owner, "<init>", "(Ljava/util/Collection;)V")
                     if is_collection_owner(owner) && !is_map_owner(owner) =>
                 {
-                    let mut source = host_collection_values(self, Self::argument(r, args, 0)?)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let mut source = host_collection_values(self, Self::argument(r, args, 0)?)?;
                     // A set built from a collection holds each element once
                     // (`addAll`: `equals`, so one `NaN`).
                     if is_set_owner(owner) {
@@ -7135,10 +7121,7 @@ impl Host for StdHost {
                 }
                 (owner, "addAll", "(Ljava/util/Collection;)Z") if is_list_like_owner(owner) => {
                     let source = Self::argument(r, args, 0)?;
-                    let additions = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let additions = host_collection_values(self, source)?;
                     let changed = !additions.is_empty();
                     self.mutable_collections
                         .entry(marker.to_owned())
@@ -7149,10 +7132,7 @@ impl Host for StdHost {
                 (owner, "addAll", "(ILjava/util/Collection;)Z") if is_list_like_owner(owner) => {
                     let at = expect_int(r, Self::argument(r, args, 0)?)?;
                     let source = Self::argument(r, args, 1)?;
-                    let additions = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let additions = host_collection_values(self, source)?;
                     let values = self
                         .mutable_collections
                         .entry(marker.to_owned())
@@ -7206,10 +7186,7 @@ impl Host for StdHost {
                     if is_collection_owner(owner) && !is_map_owner(owner) =>
                 {
                     let source = Self::argument(r, args, 0)?;
-                    let removed = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let removed = host_collection_values(self, source)?;
                     let values = self
                         .mutable_collections
                         .entry(marker.to_owned())
@@ -7222,10 +7199,7 @@ impl Host for StdHost {
                     if is_collection_owner(owner) && !is_map_owner(owner) =>
                 {
                     let source = Self::argument(r, args, 0)?;
-                    let retained = host_collection_values(self, source)?
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let retained = host_collection_values(self, source)?;
                     let values = self
                         .mutable_collections
                         .entry(marker.to_owned())
@@ -7541,10 +7515,7 @@ impl Host for StdHost {
                     let (pairs, remainder) = entries.as_chunks::<2>();
                     let mut updates = Vec::new();
                     for pair in pairs {
-                        updates.push((
-                            parse_collection_value(&pair[0])?,
-                            parse_collection_value(&pair[1])?,
-                        ));
+                        updates.push((pair[0].clone(), pair[1].clone()));
                     }
                     if !remainder.is_empty() {
                         return Err(NativeError::Metadata(
@@ -7763,10 +7734,7 @@ impl Host for StdHost {
             && is_collection_owner(&r.owner)
             && !is_map_owner(&r.owner)
         {
-            let values = host_collection_values(self, receiver)?
-                .into_iter()
-                .map(|value| parse_collection_value(&value))
-                .collect::<Result<Vec<_>, _>>()?;
+            let values = host_collection_values(self, receiver)?;
             let marker = format!("iterator/{}", self.next_iterator);
             self.next_iterator = self.next_iterator.saturating_add(1);
             self.iterators.insert(marker.clone(), (values, 0));
@@ -7960,22 +7928,17 @@ impl Host for StdHost {
                 Ok(Value::Int(
                     host_collection_values(self, receiver)?
                         .iter()
-                        .any(|value| value == &needle) as i32,
+                        .any(|value| collection_item_marker(value) == needle)
+                        as i32,
                 ))
             }
             (owner, "containsAll", "(Ljava/util/Collection;)Z")
                 if is_collection_owner(owner) && !is_map_owner(owner) =>
             {
                 let source = host_collection_values(self, Self::argument(r, args, 0)?)?;
-                let values = host_collection_values(self, receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = host_collection_values(self, receiver)?;
                 Ok(Value::Int(
                     source
-                        .into_iter()
-                        .map(|value| parse_collection_value(&value))
-                        .collect::<Result<Vec<_>, _>>()?
                         .iter()
                         .all(|needle| values.iter().any(|value| value == needle))
                         as i32,
@@ -7986,7 +7949,7 @@ impl Host for StdHost {
                 Ok(Value::Int(
                     host_collection_values(self, receiver)?
                         .iter()
-                        .position(|value| value == &needle)
+                        .position(|value| collection_item_marker(value) == needle)
                         .map_or(-1, |index| index as i32),
                 ))
             }
@@ -7995,7 +7958,7 @@ impl Host for StdHost {
                 Ok(Value::Int(
                     host_collection_values(self, receiver)?
                         .iter()
-                        .rposition(|value| value == &needle)
+                        .rposition(|value| collection_item_marker(value) == needle)
                         .map_or(-1, |index| index as i32),
                 ))
             }
@@ -8003,7 +7966,7 @@ impl Host for StdHost {
                 let at = expect_int(r, Self::argument(r, args, 0)?)?;
                 let values = host_collection_values(self, receiver)?;
                 let index = checked_list_index(at, values.len())?;
-                Ok(parse_collection_value(&values[index])?)
+                Ok(values[index].clone())
             }
             (owner, "get", "(Ljava/lang/Object;)Ljava/lang/Object;") if is_map_owner(owner) => {
                 let needle = collection_item_marker(Self::argument(r, args, 0)?);
@@ -8012,9 +7975,8 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .find(|pair| pair[0] == needle)
-                    .map(|pair| parse_collection_value(&pair[1]))
-                    .transpose()?
+                    .find(|pair| collection_item_marker(&pair[0]) == needle)
+                    .map(|pair| pair[1].clone())
                     .unwrap_or(Value::Ref(None)))
             }
             (owner, "getOrDefault", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;")
@@ -8027,9 +7989,9 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .find(|pair| pair[0] == needle)
+                    .find(|pair| collection_item_marker(&pair[0]) == needle)
                 {
-                    parse_collection_value(&pair[1])
+                    Ok(pair[1].clone())
                 } else {
                     Ok(fallback)
                 }
@@ -8041,7 +8003,8 @@ impl Host for StdHost {
                         .as_chunks::<2>()
                         .0
                         .iter()
-                        .any(|pair| pair[0] == needle) as i32,
+                        .any(|pair| collection_item_marker(&pair[0]) == needle)
+                        as i32,
                 ))
             }
             (owner, "containsValue", "(Ljava/lang/Object;)Z") if is_map_owner(owner) => {
@@ -8051,7 +8014,8 @@ impl Host for StdHost {
                         .as_chunks::<2>()
                         .0
                         .iter()
-                        .any(|pair| pair[1] == needle) as i32,
+                        .any(|pair| collection_item_marker(&pair[1]) == needle)
+                        as i32,
                 ))
             }
             (owner, "entrySet", "()Ljava/util/Set;") if is_map_owner(owner) => {
@@ -8061,8 +8025,8 @@ impl Host for StdHost {
                     .0
                     .iter()
                     .map(|pair| {
-                        let key = parse_collection_value(&pair[0])?;
-                        let value = parse_collection_value(&pair[1])?;
+                        let key = pair[0].clone();
+                        let value = pair[1].clone();
                         Ok(map_entry_value(&key, &value))
                     })
                     .collect::<Result<Vec<_>, NativeError>>()?;
@@ -8080,8 +8044,8 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|pair| parse_collection_value(&pair[0]))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|pair| pair[0].clone())
+                    .collect::<Vec<_>>();
                 Ok(collection_value("set", &keys))
             }
             (owner, "values", "()Ljava/util/Collection;") if is_map_owner(owner) => {
@@ -8090,8 +8054,8 @@ impl Host for StdHost {
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|pair| parse_collection_value(&pair[1]))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .map(|pair| pair[1].clone())
+                    .collect::<Vec<_>>();
                 Ok(collection_value("list", &values))
             }
             (owner, "toString", "()Ljava/lang/String;") if is_collection_owner(owner) => {
@@ -11720,7 +11684,9 @@ fn checked_list_insert(index: i32, length: usize) -> Result<usize, NativeError> 
         })
 }
 
-fn collection_values(value: &Value) -> Result<Vec<String>, NativeError> {
+/// The elements of an inline collection literal (`list/<m1>,<m2>`), parsed
+/// once into `Value`s (#156 P14d makes literals handles).
+fn collection_values(value: &Value) -> Result<Vec<Value>, NativeError> {
     let marker = expect_string(value);
     let (kind, values) = marker.split_once('/').unwrap_or((marker, ""));
     // A neutral collection carries a `#<n>` generation suffix so each
@@ -11735,7 +11701,10 @@ fn collection_values(value: &Value) -> Result<Vec<String>, NativeError> {
     if values.is_empty() {
         return Ok(Vec::new());
     }
-    split_capture_markers(values)
+    split_capture_markers(values)?
+        .iter()
+        .map(|marker| parse_collection_value(marker))
+        .collect()
 }
 
 /// The class a host collection marker was constructed as
@@ -11751,7 +11720,7 @@ fn iterated_kind(marker: &str) -> Option<String> {
     matches!(kind, "list" | "set").then(|| kind.to_owned())
 }
 
-fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<String>, NativeError> {
+fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<Value>, NativeError> {
     host.mutable_values(value).map_or_else(
         || collection_values(value).map_err(|error| host_call_context(host, error)),
         Ok,
@@ -11760,7 +11729,7 @@ fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<String>, 
 
 /// The same read through the generic `Host` boundary, for interpreter helpers
 /// (`Stream`, Gson) that do not know the concrete host type.
-fn runtime_collection_values<H: Host>(host: &H, value: &Value) -> Result<Vec<String>, NativeError> {
+fn runtime_collection_values<H: Host>(host: &H, value: &Value) -> Result<Vec<Value>, NativeError> {
     host.mutable_collection_values(value)
         .map_or_else(|| collection_values(value), Ok)
 }
@@ -11780,6 +11749,16 @@ fn host_call_context(host: &StdHost, error: NativeError) -> NativeError {
         "{message} (call {}#{}{})",
         call.owner, call.name, call.descriptor
     ))
+}
+
+/// Whether two element snapshots hold the same items, compared as their
+/// encoded items (the comparison the host made when it read collections as
+/// text: a `NaN` matches itself, a box its unboxed twin's encoding).
+pub(crate) fn same_items(a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(a, b)| collection_item_marker(a) == collection_item_marker(b))
 }
 
 fn parse_collection_value(value: &str) -> Result<Value, NativeError> {
@@ -11806,15 +11785,14 @@ fn collection_text(
     // `(this Collection)`/`(this Map)`.
     let mut texts = Vec::with_capacity(values.len());
     for element in &values {
-        texts.push(match parse_collection_value(element) {
-            Ok(Value::Ref(Some(inner))) if inner == marker => if is_map {
+        texts.push(match element {
+            Value::Ref(Some(inner)) if *inner == marker => if is_map {
                 "(this Map)"
             } else {
                 "(this Collection)"
             }
             .to_owned(),
-            Ok(element) => object_text(host, &element),
-            Err(_) => element.clone(),
+            element => object_text(host, element),
         });
     }
     Ok(if is_map {
@@ -20481,10 +20459,7 @@ impl<H: Host> Runtime<'_, H> {
                 && callback.target.descriptor == "()Ljava/util/stream/Stream;"
                 && is_collection_owner(&callback.target.owner)
             {
-                let values = runtime_collection_values(self.host, &receiver)?
-                    .into_iter()
-                    .map(|value| parse_collection_value(&value))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = runtime_collection_values(self.host, &receiver)?;
                 let stream = self.new_stream("callback", "stream", values);
                 self.mark_stream_origin(&stream, &receiver);
                 if self.collection_stream_sized(&receiver) {
@@ -23854,10 +23829,7 @@ impl<H: Host> Runtime<'_, H> {
             && !is_map_owner(&r.owner)
             && let Some(receiver) = receiver
         {
-            let values = runtime_collection_values(self.host, receiver)?
-                .into_iter()
-                .map(|value| parse_collection_value(&value))
-                .collect::<Result<Vec<_>, _>>()?;
+            let values = runtime_collection_values(self.host, receiver)?;
             let stream = self.new_stream(class, method, values);
             // A fail-fast collection's stream binds late and checks for
             // modification (`stream_pipeline.rs`).
@@ -37730,7 +37702,7 @@ mandatory = true
             .unwrap();
         assert_eq!(
             runtime_collection_values(runtime.host, &listed).unwrap(),
-            ["ralpha", "i2"]
+            [Value::Ref(Some("alpha".into())), Value::Int(2)]
         );
         let collector = Value::Ref(Some("collector/list".into()));
         let distinct = distinct_stream(&mut runtime);
@@ -37752,7 +37724,7 @@ mandatory = true
             .unwrap();
         assert_eq!(
             runtime_collection_values(runtime.host, &listed).unwrap(),
-            ["ralpha", "i2"]
+            [Value::Ref(Some("alpha".into())), Value::Int(2)]
         );
         let distinct = distinct_stream(&mut runtime);
         let array = runtime
