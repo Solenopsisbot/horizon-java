@@ -153,6 +153,11 @@ struct State {
     /// The player leaving in the logout firing now running: their last entry, so the
     /// runtime hands out the object earlier firings did (`EventFacade::departed`).
     departed: Vec<FacadePlayer>,
+    /// Players a refresh dropped whose logout firing has not run yet, with their last entry.
+    /// Horizon removes every player who left in one poll before the first logout hook, so the
+    /// first logout's refresh drops the others too; their own firings take their entry from
+    /// here (#228's re-check B2). Cleared by their logout, a new login, or a new server.
+    leavers: Vec<FacadePlayer>,
     /// `MinecraftServer.getTickCount()` as the last server tick reported it.
     tick_count: i32,
     /// Whether the open server is a dedicated one, from `server_about_to_start`.
@@ -836,7 +841,9 @@ impl Hooks for HorizonJava {
     /// A player joined (Fabric's `ServerPlayConnectionEvents.JOIN` and
     /// `ServerPlayerEvents.JOIN`, NeoForge's `PlayerLoggedInEvent`).
     fn player_logged_in(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent<'_>) {
-        // A login is a new `ServerPlayer`: its session.
+        // A login is a new `ServerPlayer`: its session. An entry left from an earlier session
+        // that never heard its logout is not this player.
+        self.lock().forget_leaver(event.player);
         self.next_life(event.player, true);
         // The hook names the joining player; the host knows every player's level and entity id.
         // A level it cannot name stays `None`, never a guessed overworld.
@@ -859,13 +866,16 @@ impl Hooks for HorizonJava {
     /// `ServerPlayerEvents.LEAVE`, NeoForge's `PlayerLoggedOutEvent`). The player is already off
     /// the list when a listener hears it, as the hook says.
     fn player_logged_out(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedOutEvent<'_>) {
-        // The leaver's last entry, taken before the refresh drops them: the same `ServerPlayer`.
-        let leaving: Vec<FacadePlayer> = (self.lock().players.iter())
-            .filter(|player| player.uuid == event.player)
-            .cloned()
-            .collect();
+        // The leaver's last entry, taken before the refresh drops them (or kept by an earlier
+        // refresh that already did): the same `ServerPlayer`.
+        let leaving = self.lock().take_leaver(event.player);
         self.refresh_players(host);
-        self.lock().departed = leaving;
+        {
+            let mut state = self.lock();
+            // This refresh dropped the leaver too; their entry is the firing's now.
+            state.forget_leaver(event.player);
+            state.departed = leaving;
+        }
         let context = EventContext {
             player: Some(event.player),
             ..EventContext::default()
@@ -1445,7 +1455,7 @@ impl HorizonJava {
                 life: lives.get(&player.uuid()).map_or(0, |&(_, life)| life),
             })
             .collect();
-        self.lock().players = players;
+        self.lock().replace_players(players);
     }
 
     /// Rebuilds the open level list from the host, with each level's clocks. A level whose
@@ -2097,6 +2107,38 @@ fn usage(path: &[String], arguments: &[(String, JavaArgument)]) -> String {
 }
 
 impl State {
+    /// The online players are now `players`: everyone the old list had and the new one doesn't
+    /// is kept as a leaver until their logout firing (`take_leaver`).
+    fn replace_players(&mut self, players: Vec<FacadePlayer>) {
+        let old = std::mem::replace(&mut self.players, players);
+        for gone in old {
+            if self.players.iter().all(|player| player.uuid != gone.uuid) {
+                self.leavers.retain(|left| left.uuid != gone.uuid);
+                self.leavers.push(gone);
+            }
+        }
+    }
+
+    /// The leaving player `uuid`'s last entry: from the online list, or kept since a refresh
+    /// dropped them; it is no longer kept afterwards. Empty for a player never listed.
+    fn take_leaver(&mut self, uuid: u128) -> Vec<FacadePlayer> {
+        let listed: Vec<FacadePlayer> = (self.players.iter())
+            .filter(|player| player.uuid == uuid)
+            .cloned()
+            .collect();
+        let kept: Vec<FacadePlayer> = (self.leavers.iter())
+            .filter(|left| left.uuid == uuid)
+            .cloned()
+            .collect();
+        self.forget_leaver(uuid);
+        if listed.is_empty() { kept } else { listed }
+    }
+
+    /// Stops keeping `uuid` as a leaver (their logout firing has its entry).
+    fn forget_leaver(&mut self, uuid: u128) {
+        self.leavers.retain(|left| left.uuid != uuid);
+    }
+
     /// The server state every firing this mod starts exposes: the dedicated flag, the tick, the
     /// online players and the open levels.
     ///
@@ -2138,6 +2180,7 @@ impl State {
             // No player value carries into another server's world.
             jar.host.reset_attachment_values();
         }
+        self.leavers.clear();
     }
 }
 
@@ -2464,6 +2507,40 @@ fn write_report(host: &dyn Host, state: &State) -> Result<String, ConfigFileErro
 mod tests {
     use super::*;
     use mod_api::{DamageContainer, EntityRef, Identifier, PermissionLevel, WorldEpoch};
+
+    /// Two players leave in one poll: Horizon drops both before the first logout hook, so the
+    /// first logout's refresh drops the second too. Each logout firing still gets its own
+    /// player's last entry (the same `ServerPlayer` earlier firings handed out), once, and a
+    /// player never listed gets none (#228's re-check B2).
+    #[test]
+    fn players_leaving_in_one_poll_each_keep_their_last_entry() {
+        let player = |uuid: u128, entity_id: i32| FacadePlayer {
+            uuid,
+            name: format!("p{uuid}"),
+            entity_id: Some(entity_id),
+            session: 1,
+            ..FacadePlayer::default()
+        };
+        let mut state = State::default();
+        state.replace_players(vec![player(1, 10), player(2, 20), player(3, 30)]);
+        // Players 1 and 2 left in one poll; player 1's logout fires first (as the hook does:
+        // take the entry, refresh, forget the leaver the refresh just kept).
+        assert_eq!(state.take_leaver(1), vec![player(1, 10)]);
+        state.replace_players(vec![player(3, 30)]);
+        state.forget_leaver(1);
+        // Player 2's logout: off the list since player 1's refresh, still their own entry.
+        assert_eq!(state.take_leaver(2), vec![player(2, 20)]);
+        state.replace_players(vec![player(3, 30)]);
+        state.forget_leaver(2);
+        assert!(state.leavers.is_empty());
+        // Taken once; a player never listed has none.
+        assert!(state.take_leaver(2).is_empty());
+        assert!(state.take_leaver(9).is_empty());
+        // A refresh that drops player 3 keeps their entry until their logout fires.
+        state.replace_players(Vec::new());
+        assert_eq!(state.take_leaver(3), vec![player(3, 30)]);
+        assert!(state.leavers.is_empty());
+    }
 
     /// A command block answers its own dimension (`CommandSource::CommandBlock.level`), the
     /// console the overworld (vanilla's console source), and the sources whose level the hook
