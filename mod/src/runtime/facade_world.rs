@@ -77,7 +77,9 @@ pub(crate) fn border_marker(dimension: &str) -> Value {
 fn identity(text: &str, r: &MethodRef, args: &[Value]) -> Option<Value> {
     match (r.name.as_str(), r.descriptor.as_str()) {
         ("equals", "(Ljava/lang/Object;)Z") => Some(Value::Int(i32::from(
-            args.first().and_then(expect_ref).is_some_and(|o| o == text),
+            args.first()
+                .and_then(crate::runtime::game_object::text)
+                .is_some_and(|o| o == text),
         ))),
         ("hashCode", "()I") => Some(Value::Int(stable_hash(text))),
         _ => None,
@@ -123,7 +125,7 @@ pub(crate) fn border_answer(
         // `isWithinBounds(pos.getX(), pos.getZ())`, the ints widened.
         ("isWithinBounds", "(Lnet/minecraft/core/BlockPos;)Z") => args
             .first()
-            .and_then(expect_ref)
+            .and_then(crate::runtime::game_object::text)
             .and_then(|text| text.strip_prefix("block-pos/"))
             .and_then(|coords| {
                 let mut parts = coords.split(',').map(|part| part.parse::<i32>().ok());

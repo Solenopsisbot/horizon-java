@@ -1202,7 +1202,7 @@ impl StdHost {
             return Some(source.level);
         }
         let exec = self.brigadier.exec()?;
-        let player = expect_ref(value)?.strip_prefix("game/player/")?;
+        let player = crate::game_object::text(value)?.strip_prefix("game/player/")?;
         let uuid = u128::from_str_radix(player, 16).ok()?;
         let source = exec.sources.first()?;
         Some(if source.player == Some(uuid) {
@@ -1530,7 +1530,7 @@ impl StdHost {
                 answer => answer,
             };
         }
-        let text = expect_ref(receiver)?.clone();
+        let text = crate::game_object::text(receiver)?.clone();
         // The objects `new` made of permission and exception classes.
         if name == "<init>" {
             return self.brigadier_init(r, &text, args);

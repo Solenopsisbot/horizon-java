@@ -218,7 +218,7 @@ impl MadeStacks {
 
 /// The id of an `ItemLike` marker (`client/item/<id>`, `client/block/<id>`).
 fn item_like(value: &Value) -> Option<&str> {
-    let text = crate::expect_ref(value)?;
+    let text = crate::game_object::text(value)?;
     text.strip_prefix(ITEM).or_else(|| text.strip_prefix(BLOCK))
 }
 
@@ -326,7 +326,7 @@ impl StdHost {
     /// The slot behind a stack value: a slot marker, or a stack the frame
     /// built (`new ItemStack`).
     pub(super) fn client_stack_slot(&self, value: &Value) -> Option<StackSlot> {
-        let text = crate::expect_ref(value)?;
+        let text = crate::game_object::text(value)?;
         if let Some(slot) = text.strip_prefix(STACK) {
             return StackSlot::parse(slot);
         }
@@ -368,11 +368,11 @@ impl StdHost {
                 collection_value("list", &effects)
             }
             ("hasEffect", "Z") => {
-                let id = crate::expect_ref(args.first()?)?.strip_prefix(EFFECT_HOLDER)?;
+                let id = crate::game_object::text(args.first()?)?.strip_prefix(EFFECT_HOLDER)?;
                 flag(p.effects.iter().any(|e| e.id == id))
             }
             ("getEffect", _) => {
-                let id = crate::expect_ref(args.first()?)?.strip_prefix(EFFECT_HOLDER)?;
+                let id = crate::game_object::text(args.first()?)?.strip_prefix(EFFECT_HOLDER)?;
                 p.effects
                     .iter()
                     .position(|e| e.id == id)
@@ -438,7 +438,7 @@ impl StdHost {
                 ("value", _) => Some(marker(format!("{MOB_EFFECT}{id}"))),
                 ("is", "Z") => {
                     Some(flag(args.first().is_some_and(|a| {
-                        crate::expect_ref(a).is_some_and(|a| a == object)
+                        crate::game_object::text(a).is_some_and(|a| a == object)
                     })))
                 }
                 ("getRegisteredName", _) => Some(marker(id.to_owned())),
@@ -640,7 +640,7 @@ fn effect_instance_member(
         // MobEffectInstance.endsWithin: not infinite and at most that long.
         ("endsWithin", "Z") => flag(effect.duration != -1 && effect.duration <= int_arg(args, 0)?),
         ("is", "Z") => {
-            let holder = crate::expect_ref(args.first()?)?.strip_prefix(EFFECT_HOLDER)?;
+            let holder = crate::game_object::text(args.first()?)?.strip_prefix(EFFECT_HOLDER)?;
             flag(holder == effect.id)
         }
         ("getDescriptionId", _) => marker(format!("effect.{}", effect.id.replacen(':', ".", 1))),

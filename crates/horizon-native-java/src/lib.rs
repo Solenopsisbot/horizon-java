@@ -55,6 +55,7 @@ mod files_move;
 mod frame_bound;
 mod game_codecs;
 mod game_hooks;
+mod game_object;
 mod game_rules;
 mod gson_model;
 mod gson_tree;
