@@ -462,9 +462,6 @@ impl<H: Host> Runtime<'_, H> {
         let Some(body) = body_for(owner, &r.name, &r.descriptor) else {
             return Ok(None);
         };
-        if body == Body::Default && !self.default_runs_here(owner, &r.name, this) {
-            return Ok(None);
-        }
         self.run_body(body, owner, r, this, args)
     }
 

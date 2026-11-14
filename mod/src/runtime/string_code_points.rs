@@ -59,6 +59,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 let points = text.chars().map(|c| Value::Int(c as i32)).collect();
                 let stream = self.new_stream(SOURCE.0, SOURCE.1, points);
+                self.record_stream_kind(&stream, "Ljava/util/stream/IntStream;");
                 // A Latin-1 string's code points are its chars (SIZED); a
                 // UTF-16 one's `CodePointsSpliterator` is not.
                 if text.chars().all(|c| u32::from(c) <= 0xFF) {
