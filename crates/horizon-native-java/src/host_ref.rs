@@ -390,6 +390,12 @@ pub enum HostKind {
     /// A codec the attachment model builds: key `compound-tag` or
     /// `codec:<n>`/`map:<n>` (`host_codec.rs`, `attachment_codec.rs`).
     ModelledCodec,
+    /// A `java.lang.reflect.Type` that is no class (`ParameterizedType`,
+    /// `TypeVariable`, `WildcardType`, `GenericArrayType`): key the node
+    /// (`host_reflect_type.rs`).
+    ReflectType,
+    /// An `AnnotatedType`: key the type it annotates.
+    AnnotatedType,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1549,6 +1555,26 @@ const KINDS: &[KindInfo] = &[
         // One node, one object.
         canonical: always_canonical,
         methods: &crate::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ReflectType,
+        tag: "rtyp",
+        class: ClassRule::Unknown {
+            declared: crate::host_reflect_type::type_types,
+        },
+        // Built afresh by every reflective call.
+        canonical: never_canonical,
+        methods: &crate::host_reflect_type::TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AnnotatedType,
+        tag: "rann",
+        class: ClassRule::Unknown {
+            declared: crate::host_reflect_type::annotated_types,
+        },
+        // Built afresh by every reflective call.
+        canonical: never_canonical,
+        methods: &crate::host_reflect_type::ANNOTATED_METHODS,
     },
 ];
 
