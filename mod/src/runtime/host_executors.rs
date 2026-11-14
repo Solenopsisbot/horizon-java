@@ -52,11 +52,12 @@ const SCHEDULED_FUTURE_TYPES: &[&str] = &[
 const CALLABLE_TYPES: &[&str] = &["java/util/concurrent/Callable"];
 const THREAD_FACTORY_TYPES: &[&str] = &["java/util/concurrent/ThreadFactory"];
 
-/// An allocation marker (`<prefix>#<n>`) as a handle of `kind`.
+/// An allocation (`<prefix>#<n>`, `Runtime::new_object`) as a handle of
+/// `kind` under the same key.
 pub(crate) fn allocated(kind: HostKind, marker: Value) -> Value {
-    match marker {
-        Value::Ref(Some(marker)) => Value::Host(HostRef::new(kind, marker)),
-        other => other,
+    match crate::runtime::jar_object::object_key(&marker) {
+        Some(key) => Value::Host(HostRef::new(kind, key)),
+        None => marker,
     }
 }
 

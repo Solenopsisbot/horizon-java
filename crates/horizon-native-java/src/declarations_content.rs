@@ -180,9 +180,14 @@ const ATTACHMENT_TYPE: &str = "net/fabricmc/fabric/api/attachment/v1/AttachmentT
 /// (`com/mojang/serialization/Codec`).
 fn codec_label(value: Option<&Value>) -> Option<String> {
     let value = value?;
+    // An opaque codec names its declared type; a jar's own codec object its
+    // `class#n` key, as its marker text did.
     let label = match crate::host_codec::opaque_codec_type(value) {
         Some(declared) => declared,
-        None => expect_ref(value)?,
+        None => match crate::jar_object::object_key(value) {
+            Some(key) => key,
+            None => expect_ref(value)?,
+        },
     };
     (!label.is_empty()
         && label.len() <= MAX_CODEC_LABEL
@@ -244,7 +249,7 @@ impl<H: Host> Runtime<'_, H> {
                         codec,
                     });
                 }
-                Ok(Some(Value::Ref(Some(builder))))
+                Ok(Some(crate::jar_object::stored_value(&builder)))
             }
             ATTACHMENT_REGISTRY_CLASS => self.attachment_registry_call(r, args),
             ATTACHMENT_BUILDER => {
@@ -283,7 +288,7 @@ impl<H: Host> Runtime<'_, H> {
                         codec,
                     });
                 }
-                Ok(Some(Value::Ref(Some(builder))))
+                Ok(Some(crate::jar_object::stored_value(&builder)))
             }
             _ => Ok(None),
         }

@@ -128,7 +128,8 @@ impl<H: Host> Runtime<'_, H> {
         let mut class = class.to_owned();
         let mut kind = table_kind_of(&class);
         if kind.is_none() {
-            crate::jar_object::key_class(marker)?;
+            // Only an object of a jar class extending one.
+            crate::jar_object::object_key(value)?;
             for _ in 0..MAX_SUPERCLASS_WALK {
                 match self.class(&class) {
                     Some(file) => class = file.super_name.clone(),
@@ -482,7 +483,7 @@ impl<H: Host> Runtime<'_, H> {
             )
         {
             let action = args.first().cloned().unwrap_or(Value::Ref(None));
-            let map = Value::Ref(Some(source));
+            let map = crate::jar_object::stored_value(&source);
             return match self.view_for_each(r, &map, &kind, &action)? {
                 Some(answer) => Ok(Some(Some(answer))),
                 None => Ok(None),
@@ -541,7 +542,7 @@ impl<H: Host> Runtime<'_, H> {
         if views.is_empty() {
             return;
         }
-        let Ok(entries) = self.collection_elements(&Value::Ref(Some(marker.to_owned()))) else {
+        let Ok(entries) = self.collection_elements(&crate::jar_object::stored_value(marker)) else {
             return;
         };
         for view in views {
@@ -558,7 +559,7 @@ impl<H: Host> Runtime<'_, H> {
                 _ => continue,
             };
             self.host
-                .replace_mutable_collection(&Value::Ref(Some(view)), contents);
+                .replace_mutable_collection(&crate::jar_object::stored_value(&view), contents);
         }
     }
 

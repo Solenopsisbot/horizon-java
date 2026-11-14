@@ -218,7 +218,12 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn nbt_entry(&self, marker: &str, key: &str) -> Option<String> {
-        expect_ref(self.nbt_field(marker, &entry_name(key))?).cloned()
+        expect_ref(self.nbt_entry_value(marker, key)?).cloned()
+    }
+
+    /// The tag object stored under `key`, as stored (a `JarObject` handle).
+    fn nbt_entry_value(&self, marker: &str, key: &str) -> Option<&Value> {
+        self.nbt_field(marker, &entry_name(key))
     }
 
     /// Builds heap objects for `tag` and answers its marker.
@@ -352,7 +357,8 @@ impl<H: Host> Runtime<'_, H> {
                 let tree = self.nbt_read_at(marker, depth)?;
                 Ok(self.nbt_alloc(&tree))
             }
-            Some(_) => Ok(text(marker)),
+            // The tag itself: `marker` is the key this module filed it under.
+            Some(_) => Ok(crate::jar_object::stored(marker)),
             None => Err(format!("{marker} is not a modelled tag")),
         }
     }
@@ -404,23 +410,28 @@ impl<H: Host> Runtime<'_, H> {
         let get = |runtime: &Self| runtime.nbt_entry(&marker, &key);
         let value = match (r.name.as_str(), r.descriptor.as_str()) {
             ("contains", "(Ljava/lang/String;)Z") => Value::Int(i32::from(get(self).is_some())),
-            ("get", "(Ljava/lang/String;)Lnet/minecraft/nbt/Tag;") => Value::Ref(get(self)),
+            ("get", "(Ljava/lang/String;)Lnet/minecraft/nbt/Tag;") => self
+                .nbt_entry_value(&marker, &key)
+                .cloned()
+                .unwrap_or(Value::Ref(None)),
             ("put", "(Ljava/lang/String;Lnet/minecraft/nbt/Tag;)Lnet/minecraft/nbt/Tag;") => {
                 let tag = args.get(1).cloned().unwrap_or(Value::Ref(None));
                 // @0-17: a null tag is an IllegalArgumentException naming the key.
-                let Some(tag) = expect_ref(&tag).cloned() else {
+                if tag == Value::Ref(None) {
                     return Err(illegal_argument(format!(
                         "Invalid null NBT value with key {key}"
                     )));
-                };
-                if self.nbt_kind(&tag).is_none() {
+                }
+                if crate::jar_object::object_key(&tag)
+                    .is_none_or(|tag| self.nbt_kind(tag).is_none())
+                {
                     // A tag this module did not build (an unmodelled call's answer): its contents
                     // are unknown, so the put stays the host's, and counted.
                     return Ok(None);
                 }
-                let previous = get(self);
-                self.set_nbt_field(&marker, &entry_name(&key), text(&tag));
-                Value::Ref(previous)
+                let previous = self.nbt_entry_value(&marker, &key).cloned();
+                self.set_nbt_field(&marker, &entry_name(&key), tag);
+                previous.unwrap_or(Value::Ref(None))
             }
             ("putString", "(Ljava/lang/String;Ljava/lang/String;)V") => {
                 // `StringTag.valueOf(null)` calls `isEmpty()` on the null: an NPE.
@@ -477,8 +488,15 @@ impl<H: Host> Runtime<'_, H> {
             ("getCompoundOrEmpty", "(Ljava/lang/String;)Lnet/minecraft/nbt/CompoundTag;") => {
                 // `getCompound(key).orElseGet(CompoundTag::new)`: the live child, or a new empty
                 // compound that is not put into this one.
-                match get(self).filter(|tag| self.nbt_kind(tag) == Some("compound")) {
-                    Some(child) => text(&child),
+                match self
+                    .nbt_entry_value(&marker, &key)
+                    .filter(|tag| {
+                        crate::jar_object::object_key(tag)
+                            .is_some_and(|tag| self.nbt_kind(tag) == Some("compound"))
+                    })
+                    .cloned()
+                {
+                    Some(child) => child,
                     None => self.nbt_new_compound(),
                 }
             }

@@ -107,13 +107,15 @@ fn pair_equals(
     let Some((first, second)) = pair_fields(handle) else {
         return Ok(None);
     };
+    // A jar object may be an instance of a `Pair` subclass.
+    if crate::runtime::jar_object::object_key(other).is_some() {
+        return Ok(None);
+    }
     let (their_first, their_second) = match other {
         Value::Host(other) => match pair_fields(other) {
             Some(fields) => fields,
             None => return Ok(Some(false)),
         },
-        // A jar object may be an instance of a `Pair` subclass.
-        Value::Ref(Some(_)) if crate::runtime::jar_object::object_key(other).is_some() => return Ok(None),
         _ => return Ok(Some(false)),
     };
     Ok(match nested.equals(&first, &their_first)? {

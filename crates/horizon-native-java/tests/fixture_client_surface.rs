@@ -11,7 +11,7 @@
 mod scratch;
 
 use horizon_native_java::{
-    ExecutionBudget, Host, NativeJar, StdHost, Value,
+    ExecutionBudget, Host, HostKind, NativeJar, StdHost, Value,
     client_surface::{
         ClientKeyMapping, ClientMessage, ClientPlayer, ClientSnapshot, ClientText, DrawOp,
         KeyPress, TextMetrics,
@@ -305,7 +305,10 @@ fn a_fabric_client_mod_gets_its_key_tick_listener_and_hud_element() {
         "ZOOMLnet/minecraft/client/KeyMapping;",
     )
     .and_then(|value| match value {
-        Value::Ref(Some(marker)) => Some(marker),
+        // The mapping the jar `new`ed: an object handle, keyed `class#n`.
+        Value::Host(handle) if handle.kind() == HostKind::JarObject => {
+            Some(handle.key().to_owned())
+        }
         _ => None,
     })
     .expect("registerKeyMapping hands the mapping back");

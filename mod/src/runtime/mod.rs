@@ -2860,7 +2860,7 @@ pub struct StdHost {
     charset_decoders: BTreeMap<String, charset_decoder::DecoderState>,
     /// `Collections.synchronized*` views and the collection each wraps
     /// (`synchronized_views.rs`).
-    synchronized_views: BTreeMap<String, String>,
+    synchronized_views: BTreeMap<String, Value>,
     /// `List.reversed()` views: view marker → (its list, whether it writes
     /// through) (`sequenced.rs`).
     reversed_views: BTreeMap<String, (String, bool)>,
@@ -3743,10 +3743,7 @@ impl StdHost {
         self.payload_registrations
             .iter()
             .filter_map(|registration| {
-                let marker = match &registration.payload_type {
-                    Value::Ref(Some(marker)) => marker,
-                    _ => return None,
-                };
+                let marker = jar_object::object_key(&registration.payload_type)?;
                 let id = self.packet_types.get(marker)?.clone();
                 // The declared type of an opaque codec; no codec the model makes
                 // has a name, and a String is not a codec.
@@ -6108,7 +6105,8 @@ impl Host for StdHost {
         }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
-        if matches!(receiver, Value::Host(_))
+        // An object's are its class's: the models below answer them.
+        if matches!(receiver, Value::Host(handle) if !jar_object::is_object_handle(handle))
             && (matches!(
                 (r.name.as_str(), r.descriptor.as_str()),
                 ("toString", "()Ljava/lang/String;")
@@ -6332,7 +6330,10 @@ impl Host for StdHost {
             // are `java/lang/Thread#<n>` markers.
             let marker = match receiver {
                 receiver if host_jdk::is_main_thread(receiver) => "main".to_owned(),
-                Value::Ref(Some(marker)) => marker.clone(),
+                // A thread a jar constructed (`jar_object.rs`).
+                receiver if jar_object::is_object(receiver) => jar_object::object_key(receiver)
+                    .unwrap_or_default()
+                    .to_owned(),
                 _ => {
                     return Err(NativeError::Metadata(
                         "malformed java/lang/Thread marker".into(),
@@ -7581,7 +7582,8 @@ impl Host for StdHost {
                     return Ok(Value::Int(stable_hash(id)));
                 }
                 ("equals", "(Ljava/lang/Object;)Z") => {
-                    let other = expect_ref(Self::argument(r, args, 0)?)
+                    // Only a type object: a `String` spelling one's key is not equal.
+                    let other = jar_object::object_key(Self::argument(r, args, 0)?)
                         .and_then(|other| self.packet_types.get(other));
                     return Ok(Value::Int((self.packet_types.get(marker) == other) as i32));
                 }
@@ -8566,9 +8568,8 @@ impl Host for StdHost {
                 if crate::runtime::jar_object::packaged_object_class(receiver).is_some() =>
             {
                 // `Object`'s own model is this arm: asking it would recurse.
-                let modelled = expect_ref(receiver)
-                    .and_then(|marker| java_tostring::owner(marker))
-                    .is_some_and(|owner| owner != "java/lang/Object");
+                let modelled =
+                    java_tostring::owner(receiver).is_some_and(|owner| owner != "java/lang/Object");
                 match modelled
                     .then(|| self.modelled_to_string(receiver))
                     .flatten()
@@ -8675,7 +8676,7 @@ impl Host for StdHost {
             (owner, "toString", "()Ljava/lang/String;")
             | (owner, "hashCode", "()I")
             | (owner, "equals", "(Ljava/lang/Object;)Z")
-                if matches!(receiver, Value::Host(_))
+                if matches!(receiver, Value::Host(handle) if !jar_object::is_object_handle(handle))
                     || (*receiver == Value::Ref(None) && HostKind::of_class(owner).is_some()) =>
             {
                 self.host_object_method(r, receiver, args)
@@ -9629,9 +9630,15 @@ fn expect_int(r: &MethodRef, value: &Value) -> Result<i32, NativeError> {
     }
 }
 
+/// A reference's text: a `String`'s, a host marker's, or an allocated
+/// object's key (`jar_object.rs`), which is the text the object used to be,
+/// so every table keyed by it keeps its rows. A reader that decides what the
+/// value *is* (a class, a string) reads the `Value`, never this text: a
+/// `String` may spell a key.
 fn expect_ref(value: &Value) -> Option<&String> {
     match value {
         Value::Ref(value) => value.as_ref(),
+        Value::Host(handle) if jar_object::is_object_handle(handle) => Some(handle.key_text()),
         _ => None,
     }
 }
@@ -9826,8 +9833,8 @@ fn builder_append_text<H: Host>(
         | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;" => match value {
             // `append(Object)` is `String.valueOf`: an object a model owns
             // prints its `toString`, and a box prints its value.
-            Value::Ref(Some(value)) => {
-                crate::runtime::java_tostring::modelled_marker(host, value).unwrap_or_else(|| value.clone())
+            Value::Ref(Some(text)) => {
+                crate::runtime::java_tostring::modelled_marker(host, value).unwrap_or_else(|| text.clone())
             }
             Value::Boxed(boxed) => boxed.text(),
             Value::Host(_) => {
@@ -10702,6 +10709,8 @@ impl host_ref::Nested for MarkerText {
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         Ok(Some(match value {
+            // An object prints its key, as its marker did.
+            Value::Host(handle) if jar_object::is_object_handle(handle) => handle.key().to_owned(),
             Value::Host(handle) => return handle.to_string(self),
             other => value_text(other),
         }))
@@ -10718,6 +10727,8 @@ struct HostNested<'a>(Option<&'a mut StdHost>);
 impl host_ref::Nested for HostNested<'_> {
     fn hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         Ok(match value {
+            // An object's own `hashCode` is jar code (or an identity hash).
+            Value::Host(handle) if jar_object::is_object_handle(handle) => None,
             Value::Host(handle) => return handle.hash_code(self),
             Value::Ref(Some(text)) if value_class::is_plain_string(text) => Some(stable_hash(text)),
             Value::Ref(Some(_)) | Value::Void => None,
@@ -10728,6 +10739,8 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError> {
         Ok(match a {
+            // `a == b` answers for any object; its own `equals` is jar code.
+            Value::Host(handle) if jar_object::is_object_handle(handle) => (a == b).then_some(true),
             Value::Host(handle) => return handle.equals(b, self),
             // `a == b` answers `Objects.equals` for any object; otherwise an
             // object's own `equals` is not the host's to run.
@@ -10740,6 +10753,11 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         Ok(match (value, self.0.as_deref_mut()) {
+            // An object prints what its class's model prints, if one does.
+            (Value::Host(handle), Some(host)) if jar_object::is_object_handle(handle) => {
+                host.modelled_to_string(value)
+            }
+            (Value::Host(handle), None) if jar_object::is_object_handle(handle) => None,
             (Value::Host(handle), _) => return handle.to_string(self),
             (Value::Ref(Some(text)), _) if value_class::is_plain_string(text) => Some(text.clone()),
             (Value::Ref(Some(_)), Some(host)) => host.modelled_to_string(value),
@@ -11225,8 +11243,12 @@ fn thrown_from_supplied(value: Value) -> NativeError {
             message: Some("Optional.orElseThrow supplier returned null".into()),
             frame: None,
         },
-        Value::Ref(Some(marker)) => {
-            let class = jar_object::marker_class_or_text(marker);
+        // A throwable object the supplier built (`jar_object.rs`), or a
+        // host marker.
+        value if jar_object::instance_key(value).is_some() => {
+            let class = jar_object::value_marker_class(value)
+                .or_else(|| jar_object::instance_key(value))
+                .unwrap_or_default();
             if class == "java/lang/Throwable"
                 || jdk_exception_superclass(class).is_some()
                 || class.starts_with("java/")
@@ -20470,6 +20492,8 @@ impl<H: Host> Runtime<'_, H> {
             // The supplied object itself is thrown (`jar_throwables.rs`).
             return Err(match supplied {
                 Value::Ref(Some(_)) => self.throw_object(&supplied, None),
+                // A throwable a jar `new`ed (`jar_object.rs`).
+                ref object if jar_object::is_object(object) => self.throw_object(object, None),
                 other => thrown_from_supplied(other),
             });
         }
@@ -20551,10 +20575,19 @@ impl<H: Host> Runtime<'_, H> {
         self.new_array_value(class, values)
     }
 
+    /// A new object of `class`: a [`HostKind::JarObject`] handle keyed by a
+    /// fresh allocation number (`jar_object.rs`).
     fn new_object(&mut self, class: &str) -> Value {
-        let marker = format!("{class}#{}", self.next_object);
+        let key = self.new_object_key(class);
+        jar_object::handle(key)
+    }
+
+    /// A fresh allocation key `class#n`, for a model whose object is a handle
+    /// of its own kind (an executor, a cache builder) kept under the key.
+    fn new_object_key(&mut self, class: &str) -> String {
+        let key = format!("{class}#{}", self.next_object);
         self.next_object = self.next_object.saturating_add(1);
-        Value::Ref(Some(marker))
+        key
     }
 
     /// Resolve `Class.forName` against the running jar's classes and the
@@ -20747,10 +20780,18 @@ impl<H: Host> Runtime<'_, H> {
         if self.class(&name).is_none() && HostKind::owning_class(&name).is_some() {
             return None;
         }
-        let interfaces = self
-            .class(&name)
-            .map(ClassFile::interface_names)
-            .unwrap_or_default();
+        // A JDK class: Java 25's table (`jdk_closure.rs`); one outside it is
+        // left to the host, which counts it.
+        let interfaces = match (self.class(&name), crate::runtime::jdk_closure::class(&name)) {
+            (Some(file), _) => file.interface_names(),
+            (None, Some(row)) => row
+                .interfaces
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            (None, None) if crate::runtime::jdk_closure::in_jdk_package(&name) => return None,
+            (None, None) => Vec::new(),
+        };
         let values = interfaces
             .into_iter()
             .map(|interface| Value::Ref(Some(interface)))
@@ -21177,6 +21218,10 @@ impl<H: Host> Runtime<'_, H> {
                     None => self.host.unknown_operand_call(r).map(Some),
                 };
             }
+            // A JDK class outside the table: its supertypes are not known here.
+            if crate::runtime::jdk_closure::in_jdk_package(&source) {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
         }
         if let Some(value) = self.invoke_reflect_enum(r, receiver)? {
             return Ok(Some(value));
@@ -21207,6 +21252,16 @@ impl<H: Host> Runtime<'_, H> {
             // one is the direct superclass. Counted.
             if self.class(&class).is_none() && HostKind::owning_class(&class).is_some() {
                 return self.host.unknown_operand_call(r).map(Some);
+            }
+            // A JDK class: Java 25's table (an interface's is null); one
+            // outside it is counted, never a made-up `Object`.
+            if self.class(&class).is_none() {
+                if let Some(row) = crate::runtime::jdk_closure::class(&class) {
+                    return Ok(Some(Value::Ref(row.superclass.map(str::to_owned))));
+                }
+                if crate::runtime::jdk_closure::in_jdk_package(&class) {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
             }
             let parent = self
                 .class(&class)
@@ -22567,7 +22622,8 @@ impl<H: Host> Runtime<'_, H> {
                             .map(|value| java_value_text(value, descriptor))
                             .unwrap_or_default();
                         self.io_write(&marker, &text);
-                        Value::Ref(Some(marker))
+                        // `return this`: the writer itself.
+                        jar_object::stored_value(&marker)
                     }
                     ("newLine", "()V") => {
                         self.io_write(&marker, "\n");
@@ -25140,7 +25196,10 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         // `new String(char[]|int[], ..)` (`string_constructors.rs`):
                         // the allocation marker becomes the text it built.
-                        if let Some(marker @ Value::Ref(Some(_))) = receiver.as_ref() {
+                        if let Some(marker) = receiver
+                            .as_ref()
+                            .filter(|value| jar_object::is_object(value))
+                        {
                             let built = Value::Ref(Some(text));
                             for slot in stack.iter_mut().chain(locals.iter_mut()) {
                                 if slot == marker {
@@ -25633,13 +25692,9 @@ impl<H: Host> Runtime<'_, H> {
                         // builder's object marker.
                         let captured = captured
                             .into_iter()
-                            .map(|value| {
-                                match expect_ref(&value)
-                                    .and_then(|marker| self.string_builders.get(marker))
-                                {
-                                    Some(text) => Value::Ref(Some(text.clone())),
-                                    None => value,
-                                }
+                            .map(|value| match self.builder_text(&value) {
+                                Some(text) => Value::Ref(Some(text.clone())),
+                                None => value,
                             })
                             .collect::<Vec<_>>();
                         // An object a library model answers `toString` for (a
@@ -29271,10 +29326,9 @@ pub fn dispatch_payload_frame_with(
     // has a handler (the payload type registry records the others).
     let Some(registration) = registrations.iter().find(|registration| {
         matches!(registration.handler, Value::Ref(Some(_)))
-            && matches!(
-                &registration.payload_type,
-                Value::Ref(Some(marker)) if host.packet_types.get(marker).is_some_and(|known| known == id)
-            )
+            // The `CustomPacketPayload.Type` object the jar built.
+            && jar_object::object_key(&registration.payload_type)
+                .is_some_and(|marker| host.packet_types.get(marker).is_some_and(|known| known == id))
     }) else {
         return Ok(false);
     };
@@ -39049,8 +39103,8 @@ mandatory = true
     #[test]
     fn standard_host_preserves_bounded_throwable_metadata() {
         let mut host = StdHost::new();
-        let error = Value::Ref(Some("java/lang/IllegalStateException#0".into()));
-        let cause = Value::Ref(Some("java/lang/IllegalArgumentException#1".into()));
+        let error = jar_object::handle("java/lang/IllegalStateException#0".into());
+        let cause = jar_object::handle("java/lang/IllegalArgumentException#1".into());
         let init = MethodRef {
             owner: "java/lang/IllegalStateException".into(),
             name: "<init>".into(),
@@ -40118,7 +40172,7 @@ mandatory = true
     #[test]
     fn unknown_collection_accessors_answer_an_empty_modelled_collection() {
         let mut host = StdHost::new();
-        let config = Value::Ref(Some("demo/Config#0".into()));
+        let config = jar_object::handle("demo/Config#0".into());
         let map = host
             .invoke_instance(
                 &MethodRef {
@@ -42913,7 +42967,7 @@ mandatory = true
     #[test]
     fn concrete_collection_classes_reach_the_mutable_table() {
         let mut host = StdHost::new();
-        let map = Value::Ref(Some("java/util/TreeMap#0".into()));
+        let map = jar_object::handle("java/util/TreeMap#0".into());
         host.invoke_instance(
             &MethodRef {
                 owner: "java/util/TreeMap".into(),
@@ -42948,7 +43002,7 @@ mandatory = true
             Value::Int(7)
         );
 
-        let list = Value::Ref(Some("java/util/concurrent/CopyOnWriteArrayList#1".into()));
+        let list = jar_object::handle("java/util/concurrent/CopyOnWriteArrayList#1".into());
         host.invoke_instance(
             &MethodRef {
                 owner: "java/util/concurrent/CopyOnWriteArrayList".into(),
@@ -43045,7 +43099,7 @@ mandatory = true
     #[test]
     fn object_get_class_names_the_marker_class() {
         assert_eq!(
-            class_of_value(&Value::Ref(Some("demo/Model#3".into()))),
+            class_of_value(&jar_object::handle("demo/Model#3".into())),
             Some("demo/Model".into())
         );
         assert_eq!(
@@ -43191,7 +43245,7 @@ mandatory = true
                     name: "getClass".into(),
                     descriptor: "()Ljava/lang/Class;".into(),
                 },
-                &Value::Ref(Some("demo/Model#3".into())),
+                &jar_object::handle("demo/Model#3".into()),
                 &[],
             )
             .unwrap();

@@ -193,6 +193,19 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Err(class_cast_exception("java/lang/String", target));
         }
+        // An object of a JDK class (`new ThreadPoolExecutor(..)`) cast to a
+        // JDK type: Java 25's table decides; a class outside it is counted,
+        // never a silent pass.
+        if let Some(verdict) = self.jdk_object_instance_of(value, target) {
+            return match verdict {
+                Some(true) => Ok(()),
+                Some(false) => Err(class_cast_exception(
+                    crate::runtime::jar_object::object_class(value).unwrap_or_default(),
+                    target,
+                )),
+                None => self.count_cast(value, target),
+            };
+        }
         let Some(target_file) = self.class(target) else {
             // A JDK or game target: the runtime models those values by marker
             // and keeps its previous behaviour.
@@ -234,6 +247,22 @@ impl<H: Host> Runtime<'_, H> {
             .map(|_| ())
     }
 
+    /// `value instanceof target` for an object of a JDK class the run does not
+    /// hold (`new StringBuilder()`, `new ThreadPoolExecutor(..)`) against a JDK
+    /// type, from Java 25's table (`jdk_closure.rs`): `Some(None)` when the
+    /// class is outside it (the caller counts), `None` for any other value or
+    /// target.
+    pub(crate) fn jdk_object_instance_of(
+        &self,
+        value: &Value,
+        target: &str,
+    ) -> Option<Option<bool>> {
+        let class = crate::runtime::jar_object::object_class(value)?;
+        let jdk = crate::runtime::jdk_closure::in_jdk_package;
+        (self.class(class).is_none() && self.class(target).is_none() && jdk(class) && jdk(target))
+            .then(|| host_ref::ClassHierarchy::is_instance(&host_ref::JdkHierarchy, class, target))
+    }
+
     /// `checkcast target` (and `Class.cast`) where a host handle decides it:
     /// a handle by its kind's row (`HostRef::instance_of`), or any value cast
     /// to a handle kind's class. Those classes are final and only handles
@@ -241,7 +270,10 @@ impl<H: Host> Runtime<'_, H> {
     /// class where the runtime knows it exactly. `None` when no handle is
     /// involved.
     pub(crate) fn host_cast(&self, value: &Value, target: &str) -> Option<HostCast> {
-        if let Value::Host(handle) = value {
+        // An object casts by its class's chain, as below (`jar_object.rs`).
+        if let Value::Host(handle) = value
+            && !crate::runtime::jar_object::is_object_handle(handle)
+        {
             return Some(match handle.instance_of(target, self) {
                 Some(true) => HostCast::Fits,
                 // The exception names the exact class: unknown, counted.
@@ -299,13 +331,14 @@ impl<H: Host> Runtime<'_, H> {
     /// whose JDK class (`List12` or `ListN`, `KeyValueHolder`) is not kept.
     pub(super) fn exact_class(&self, value: &Value) -> Option<String> {
         let marker = match value {
+            Value::Host(handle) if crate::runtime::jar_object::is_object_handle(handle) => handle.key(),
             Value::Ref(Some(marker)) => marker,
             Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {
                 return class_of_value(value);
             }
             _ => return None,
         };
-        if crate::runtime::value_class::is_plain_string(marker) {
+        if matches!(value, Value::Ref(_)) && crate::runtime::value_class::is_plain_string(marker) {
             return Some("java/lang/String".into());
         }
         // `class#n`: an object `new` built (a host model's own copies use
@@ -353,6 +386,8 @@ impl<H: Host> Runtime<'_, H> {
     pub(super) fn instance_of_is_guess(&self, value: &Value, target: &str) -> bool {
         let marker = match value {
             Value::Ref(Some(marker)) => marker.as_str(),
+            // An object: by its class's chain, below.
+            Value::Host(handle) if crate::runtime::jar_object::is_object_handle(handle) => handle.key(),
             // A host handle whose kind cannot tell (`host_ref.rs`).
             Value::Host(handle) => return handle.instance_of(target, self).is_none(),
             // `null` is never an instance; a box is a JDK object.
@@ -361,6 +396,11 @@ impl<H: Host> Runtime<'_, H> {
         // Every array is a handle (`host_array.rs`): no other value is one.
         if target.starts_with('[') {
             return false;
+        }
+        // An object of a JDK class against a JDK type: a guess exactly when
+        // Java 25's table cannot tell (a class outside it).
+        if let Some(verdict) = self.jdk_object_instance_of(value, target) {
+            return verdict.is_none();
         }
         if ["java/", "javax/", "jdk/"]
             .iter()
@@ -371,12 +411,12 @@ impl<H: Host> Runtime<'_, H> {
         // `String` is final and in `java.base`, so a text `instanceof String`
         // accepts is no jar, game or loader type. (`checkcast` still counts a
         // string cast to a jar type: a departure there, not here.)
-        if crate::runtime::value_class::is_plain_string(marker) {
+        if matches!(value, Value::Ref(_)) && crate::runtime::value_class::is_plain_string(marker) {
             return false;
         }
         // An object a library model built itself: the model knows its whole
         // type, so its `false` is an answer.
-        if crate::runtime::gson_tree::is_tree(marker) {
+        if crate::runtime::gson_tree::is_tree(value) {
             return false;
         }
         if self.class(target).is_some() {
@@ -408,6 +448,8 @@ impl<H: Host> Runtime<'_, H> {
         target_is_interface: Option<bool>,
     ) -> (Verdict, Option<String>) {
         let marker = match value {
+            // An object answers by its class's chain, below.
+            Value::Host(handle) if crate::runtime::jar_object::is_object_handle(handle) => handle.key(),
             // A host handle answers by its kind's class (`host_ref.rs`).
             Value::Host(handle) => {
                 let verdict = match handle.instance_of(target, self) {
