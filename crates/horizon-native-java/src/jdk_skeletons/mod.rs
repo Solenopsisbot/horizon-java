@@ -521,7 +521,7 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         if !matches!(opcode, 0xb6 | 0xb9)
             || (r.name.as_str(), r.descriptor.as_str()) != ("equals", "(Ljava/lang/Object;)Z")
-            || !expect_ref(this).is_some_and(|marker| marker.starts_with("map-entry/"))
+            || !crate::host_map_entry::is_entry(this)
         {
             return Ok(None);
         }

@@ -89,6 +89,7 @@ mod host_jdk;
 mod host_jdk_constant;
 mod host_jdk_value;
 mod host_list_iterator;
+mod host_map_entry;
 mod host_mixin;
 mod host_neoforge_loader;
 mod host_optional;
@@ -2325,6 +2326,31 @@ pub trait Host {
         None
     }
 
+    /// The key and value of a host `Map.Entry` now (`host_map_entry.rs`); `None` for any
+    /// other value, or when the entry's contents are unknown.
+    fn map_entry_parts(&self, _value: &Value) -> Option<(Value, Value)> {
+        None
+    }
+
+    /// A host `Map.Entry`: a new holder or snapshot, or `map`'s node of `key`
+    /// (`host_map_entry.rs`). A host that keeps no entries answers one whose contents are
+    /// unknown.
+    fn mint_map_entry(
+        &mut self,
+        _map: Option<&Value>,
+        _key: &Value,
+        _value: &Value,
+        _made: host_map_entry::EntryMade,
+    ) -> Value {
+        host_map_entry::unknown_entry()
+    }
+
+    /// Before and after a call on the map `marker`: its entries follow it
+    /// (`host_map_entry.rs`).
+    fn entries_before_call(&mut self, _marker: &str) {}
+
+    fn entries_after_call(&mut self, _marker: &str) {}
+
     /// The current elements of a mutable collection marker, when the host
     /// keeps one. Interpreter helpers that need a collection's contents run
     /// through the generic `Host` boundary, so the table is exposed here
@@ -2988,6 +3014,8 @@ pub struct StdHost {
     /// keyed by its object marker. The static constants (`Locale.US`) need no
     /// row: their marker already spells the pair.
     locales: BTreeMap<String, (String, String)>,
+    /// The `Map.Entry` objects the host made, by handle key (`host_map_entry.rs`).
+    map_entries: host_map_entry::Entries,
     /// The two halves of every `new UUID(msb, lsb)` a jar constructed, keyed
     /// by its object key (`host_jdk_value.rs`).
     constructed_uuids: BTreeMap<String, (i64, i64)>,
@@ -3148,6 +3176,7 @@ impl StdHost {
             view_copies: BTreeMap::new(),
             view_kinds: BTreeMap::new(),
             locales: BTreeMap::new(),
+            map_entries: host_map_entry::Entries::default(),
             constructed_uuids: BTreeMap::new(),
             levels: Vec::new(),
             references: BTreeMap::new(),
@@ -4925,6 +4954,28 @@ impl Host for StdHost {
         self.constructed_uuids
             .get(jar_object::object_key(value)?)
             .copied()
+    }
+
+    fn map_entry_parts(&self, value: &Value) -> Option<(Value, Value)> {
+        self.map_entry_now(value)
+    }
+
+    fn mint_map_entry(
+        &mut self,
+        map: Option<&Value>,
+        key: &Value,
+        value: &Value,
+        made: host_map_entry::EntryMade,
+    ) -> Value {
+        StdHost::mint_map_entry(self, map, key, value, made)
+    }
+
+    fn entries_before_call(&mut self, marker: &str) {
+        StdHost::entries_before_call(self, marker);
+    }
+
+    fn entries_after_call(&mut self, marker: &str) {
+        StdHost::entries_after_call(self, marker);
     }
 
     // No host marker answers `instanceof` any more: the command surface
@@ -8023,39 +8074,25 @@ impl Host for StdHost {
                 _ => {}
             }
         }
-        if r.owner == "java/util/Map$Entry" {
-            let (key, value) = map_entry_parts(receiver)?;
-            return match (r.name.as_str(), r.descriptor.as_str()) {
-                ("getKey", "()Ljava/lang/Object;") => Ok(key),
-                ("getValue", "()Ljava/lang/Object;") => Ok(value),
+        // A host `Map.Entry`'s accessors, whatever class the call names
+        // (`host_map_entry.rs`); its `equals`/`hashCode`/`toString` are its row.
+        if host_map_entry::is_entry(receiver) {
+            let part = |host: &Self, first: bool| {
+                host.map_entry_now(receiver)
+                    .map(|(key, value)| if first { key } else { value })
+            };
+            let answer = match (r.name.as_str(), r.descriptor.as_str()) {
+                ("getKey", "()Ljava/lang/Object;") => part(self, true),
+                ("getValue", "()Ljava/lang/Object;") => part(self, false),
                 ("setValue", "(Ljava/lang/Object;)Ljava/lang/Object;") => {
-                    let replacement = Self::argument(r, args, 0)?.clone();
-                    self.entry_set_value(&key, &value, replacement)
+                    let value = Self::argument(r, args, 0)?.clone();
+                    return self.map_entry_set_value(r, receiver, value);
                 }
-                ("equals", "(Ljava/lang/Object;)Z") => {
-                    let same = |a: &Value, b: &Value| boxed::canonical(a) == boxed::canonical(b);
-                    let equal = map_entry_parts(Self::argument(r, args, 0)?).is_ok_and(
-                        |(other_key, other_value)| {
-                            same(&key, &other_key) && same(&value, &other_value)
-                        },
-                    );
-                    Ok(Value::Int(equal as i32))
-                }
-                // The runtime answers it (`object_methods.rs`, `host_value_hash`):
-                // a jar key's own `hashCode` is not the host's to run.
-                ("hashCode", "()I") => self.unknown_host_call(r),
-                // JDK 25: `key + "=" + value`, each `String.valueOf`'d (a box
-                // as Java prints it; a jar object, which the host cannot run,
-                // counted as in any collection's text).
-                ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(format!(
-                    "{}={}",
-                    object_text(self, &key),
-                    object_text(self, &value)
-                )))),
-                _ => Err(NativeError::MissingMethod(format!(
-                    "{}#{}{}",
-                    r.owner, r.name, r.descriptor
-                ))),
+                _ => None,
+            };
+            return match answer {
+                Some(answer) => Ok(answer),
+                None => self.unknown_host_call(r),
             };
         }
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
@@ -8283,17 +8320,33 @@ impl Host for StdHost {
             }
             (owner, "entrySet", "()Ljava/util/Set;") if is_map_owner(owner) => {
                 let values = host_collection_values(self, receiver)?;
-                let entries = values
+                // `Map.of(..)`'s entry set makes a `KeyValueHolder` per entry; any other map
+                // hands out its nodes (`host_map_entry.rs`).
+                let made = match expect_ref(receiver)
+                    .and_then(|marker| marker.rsplit_once('#'))
+                    .map(|(class, _)| class)
+                {
+                    Some(
+                        "java/util/ImmutableCollections$MapN"
+                        | "java/util/ImmutableCollections$Map1",
+                    ) => host_map_entry::EntryMade::Holder,
+                    _ => host_map_entry::EntryMade::Node,
+                };
+                let entries: Vec<Value> = values
                     .as_chunks::<2>()
                     .0
                     .iter()
-                    .map(|pair| {
-                        let key = pair[0].clone();
-                        let value = pair[1].clone();
-                        Ok(map_entry_value(&key, &value))
-                    })
-                    .collect::<Result<Vec<_>, NativeError>>()?;
-                Ok(collection_value("set", &entries))
+                    .map(|pair| self.mint_map_entry(Some(receiver), &pair[0], &pair[1], made))
+                    .collect();
+                // A collection of its own holding the entry handles themselves, so every
+                // reading of one node stays the same object (a `set/...` literal would print
+                // and re-parse them). Its class is the literal's (`LinkedHashSet`) until
+                // P14d1 names each answer's JDK class.
+                let set = self.empty_collection("set");
+                if let Some(marker) = expect_ref(&set) {
+                    self.mutable_collections.insert(marker.clone(), entries);
+                }
+                Ok(set)
             }
             // `ConcurrentHashMap.keySet()` declares its `KeySetView`; the
             // snapshot is the same key set.
@@ -10630,9 +10683,8 @@ fn bounded_captured_markers(values: &[Value]) -> String {
 /// One element of a collection as the collection readers hand it out: the
 /// [`value_marker`] form with its separator escapes already removed, which is
 /// what splitting an immutable `list/...` marker yields. A mutable collection
-/// answers the same form, so an element that itself holds a comma (a
-/// `map-entry/k,v` from `new ArrayList<>(map.entrySet())`) parses back whole,
-/// and a lookup compares like with like.
+/// answers the same form, so an element that itself holds a comma parses back
+/// whole, and a lookup compares like with like.
 fn collection_item_marker(value: &Value) -> String {
     match value {
         Value::Ref(Some(value)) => format!("r{value}"),
@@ -11205,6 +11257,10 @@ impl host_ref::Nested for HostNested<'_> {
     fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
         self.0.as_deref()?.constructed_uuid(value)
     }
+
+    fn map_entry_parts(&mut self, value: &Value) -> Option<(Value, Value)> {
+        self.0.as_deref()?.map_entry_now(value)
+    }
 }
 
 impl StdHost {
@@ -11726,30 +11782,6 @@ fn collection_value(kind: &str, values: &[Value]) -> Value {
         // No literal spells a jar object's key (`jar_object::unspell_key`).
         jar_object::unspell_key(format!("{kind}/{values}"))
     }))
-}
-
-fn map_entry_value(key: &Value, value: &Value) -> Value {
-    Value::Ref(Some(format!(
-        "map-entry/{},{}",
-        value_marker(key),
-        value_marker(value)
-    )))
-}
-
-pub(crate) fn map_entry_parts(value: &Value) -> Result<(Value, Value), NativeError> {
-    let marker = expect_ref(value)
-        .and_then(|marker| marker.strip_prefix("map-entry/"))
-        .ok_or_else(|| NativeError::Metadata("expected a native map entry marker".into()))?;
-    let parts = split_capture_markers(marker)?;
-    if parts.len() != 2 {
-        return Err(NativeError::Metadata(
-            "map entry marker must contain key and value".into(),
-        ));
-    }
-    Ok((
-        parse_value_marker(&parts[0])?,
-        parse_value_marker(&parts[1])?,
-    ))
 }
 
 fn is_collection_owner(owner: &str) -> bool {
@@ -21159,9 +21191,6 @@ impl<H: Host> Runtime<'_, H> {
                 "java/lang/Iterable",
             ],
             "map" => &["java/util/Map"],
-            // A host map entry (`HashMap`/`TreeMap` node, `Map.entry`): every
-            // one implements only `Map.Entry`.
-            "map-entry" => &["java/util/Map$Entry"],
             _ => &[],
         };
         if collection_kinds.contains(&wanted) {
@@ -35272,12 +35301,11 @@ mandatory = true
             name: "hashCode".into(),
             descriptor: "()I".into(),
         };
-        // `Objects.hashCode(key) ^ Objects.hashCode(value)` is the runtime's
-        // (`object_methods.rs`): it may run a jar key's `hashCode`, so the
-        // host alone counts the call.
-        let before = host.unknown_host_call_count();
-        host.invoke_instance(&entry_hash, &entry, &[]).unwrap();
-        assert_eq!(host.unknown_host_call_count(), before + 1);
+        // `Objects.hashCode(key) ^ Objects.hashCode(value)`, both Strings here.
+        assert_eq!(
+            host.invoke_instance(&entry_hash, &entry, &[]).unwrap(),
+            Value::Int(stable_hash("key") ^ stable_hash("value"))
+        );
         let remove_if = MethodRef {
             owner: "java/util/Collection".into(),
             name: "removeIf".into(),

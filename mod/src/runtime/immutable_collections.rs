@@ -326,7 +326,7 @@ impl<H: Host> Runtime<'_, H> {
                     if *entry == Value::Ref(None) {
                         return Err(thrown("java/lang/NullPointerException", None));
                     }
-                    let Ok((key, value)) = map_entry_parts(entry) else {
+                    let Some((key, value)) = self.host.map_entry_parts(entry) else {
                         return Ok(None);
                     };
                     pairs.extend([key, value]);
@@ -771,9 +771,12 @@ impl<H: Host> Runtime<'_, H> {
         let ambiguous = wanted.iter().any(|value| match kind.as_deref() {
             Some("keySet") => unknown(self, value, &keys),
             Some("values") => unknown(self, value, &values),
-            Some("entrySet") => map_entry_parts(value).is_ok_and(|(key, value)| {
-                unknown(self, &key, &keys) || unknown(self, &value, &values)
-            }),
+            Some("entrySet") => self
+                .host
+                .map_entry_parts(value)
+                .is_some_and(|(key, value)| {
+                    unknown(self, &key, &keys) || unknown(self, &value, &values)
+                }),
             _ => false,
         });
         if ambiguous {

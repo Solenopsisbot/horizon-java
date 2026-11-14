@@ -56,6 +56,19 @@ pub struct RedBlackTree {
 }
 
 impl RedBlackTree {
+    /// The index of the node holding `key` (as stored), for a host entry that follows it
+    /// (`host_map_entry.rs`).
+    pub(crate) fn index_of(&self, key: &Value) -> Option<usize> {
+        self.nodes
+            .iter()
+            .position(|node| node.as_ref().is_some_and(|node| node.key == *key))
+    }
+
+    /// The key node `index` holds, `None` once the node is freed.
+    pub(crate) fn key_at(&self, index: usize) -> Option<&Value> {
+        self.nodes.get(index)?.as_ref().map(|node| &node.key)
+    }
+
     fn node(&self, at: usize) -> &Node {
         self.nodes[at].as_ref().expect("a live node")
     }
@@ -843,7 +856,13 @@ impl<H: Host> Runtime<'_, H> {
                     tree.delete_entry(node);
                 }
                 if map {
-                    map_entry_value(&key, &value)
+                    // `exportEntry`: an immutable snapshot, new each call.
+                    self.host.mint_map_entry(
+                        None,
+                        &key,
+                        &value,
+                        crate::host_map_entry::EntryMade::Snapshot,
+                    )
                 } else {
                     key
                 }
@@ -871,7 +890,12 @@ impl<H: Host> Runtime<'_, H> {
                     "ceilingEntry" | "floorEntry" | "higherEntry" | "lowerEntry"
                 ) {
                     match node {
-                        Some(_) => map_entry_value(&found, &value_of(&values, &found)),
+                        Some(_) => self.host.mint_map_entry(
+                            None,
+                            &found,
+                            &value_of(&values, &found),
+                            crate::host_map_entry::EntryMade::Snapshot,
+                        ),
                         None => Value::Ref(None),
                     }
                 } else {

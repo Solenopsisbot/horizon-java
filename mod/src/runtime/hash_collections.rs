@@ -752,13 +752,22 @@ impl<H: Host> Runtime<'_, H> {
             let contents: Vec<Value> = match self.host.view_copy_kind(&view).as_deref() {
                 Some("keySet") => entries.iter().step_by(2).cloned().collect(),
                 Some("values") => entries.iter().skip(1).step_by(2).cloned().collect(),
-                Some("entrySet") => entries
-                    .chunks(2)
-                    .filter_map(|pair| match pair {
-                        [key, value] => Some(map_entry_value(key, value)),
-                        _ => None,
-                    })
-                    .collect(),
+                // The map's nodes (`host_map_entry.rs`): every reading of one is one object.
+                Some("entrySet") => {
+                    let map = crate::runtime::jar_object::stored_value(marker);
+                    entries
+                        .chunks(2)
+                        .filter_map(|pair| match pair {
+                            [key, value] => Some(self.host.mint_map_entry(
+                                Some(&map),
+                                key,
+                                value,
+                                crate::runtime::host_map_entry::EntryMade::Node,
+                            )),
+                            _ => None,
+                        })
+                        .collect()
+                }
                 _ => continue,
             };
             self.host
@@ -859,7 +868,12 @@ impl<H: Host> Runtime<'_, H> {
             let element = match kind {
                 "keySet" => key.clone(),
                 "values" => value,
-                _ => map_entry_value(&key, &value),
+                _ => self.host.mint_map_entry(
+                    Some(map),
+                    &key,
+                    &value,
+                    crate::runtime::host_map_entry::EntryMade::Node,
+                ),
             };
             self.run_functional(
                 (

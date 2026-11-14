@@ -440,6 +440,13 @@ pub enum HostKind {
     Duration,
     /// `java.net.URI`: key its text (`host_jdk_value.rs`).
     Uri,
+    /// A `Map.Entry` whose class the host knows (`HashMap$Node`, `TreeMap$Entry`,
+    /// `KeyValueHolder`...): key `<class>#entry<n>` (one object per key) or
+    /// `<class>#node<n>` (a map's node, identity by origin) (`host_map_entry.rs`).
+    MapEntry,
+    /// A `Map.Entry` of a map whose entry class the host does not model: key
+    /// `java/util/Map$Entry#node<n>` (`host_map_entry.rs`).
+    OpaqueMapEntry,
 }
 
 /// How a kind's Java class follows from its key.
@@ -501,6 +508,13 @@ pub(crate) trait Nested {
     /// `host_component.rs`); `None` where this context cannot read the
     /// host's table (the caller counts).
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
+    /// The key and value a host `Map.Entry` holds now (`host_map_entry.rs`);
+    /// `None` where this context cannot read the host's table or the entry's
+    /// contents are unknown (the caller counts).
+    fn map_entry_parts(&mut self, value: &Value) -> Option<(Value, Value)> {
         let _ = value;
         None
     }
@@ -1792,6 +1806,25 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("java/net/URI"),
         canonical: never_canonical,
         methods: &crate::host_jdk_value::URI_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MapEntry,
+        tag: "ment",
+        class: ClassRule::FromKey(crate::host_map_entry::entry_class),
+        // A new `KeyValueHolder`/snapshot per key; a node's key is reused
+        // for every reading of that node, its identity told by origin.
+        canonical: crate::host_map_entry::entry_canonical,
+        methods: &crate::host_map_entry::ENTRY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::OpaqueMapEntry,
+        tag: "omen",
+        class: ClassRule::Unknown {
+            declared: crate::host_map_entry::opaque_types,
+        },
+        // Fresh or reused per reading, by a map this model does not know.
+        canonical: never_canonical,
+        methods: &crate::host_map_entry::ENTRY_METHODS,
     },
 ];
 

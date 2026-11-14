@@ -303,8 +303,16 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 }
             }
             "entry-key" | "entry-value" => {
-                let (ka, va) = super::map_entry_parts(a)?;
-                let (kb, vb) = super::map_entry_parts(b)?;
+                // `Map.Entry.comparingByKey/Value`: each entry's `getKey`/`getValue`
+                // (`host_map_entry.rs`).
+                let parts = |runtime: &Self, entry: &Value| {
+                    runtime
+                        .host
+                        .map_entry_parts(entry)
+                        .ok_or_else(|| NativeError::Metadata("expected a host map entry".into()))
+                };
+                let (ka, va) = parts(self, a)?;
+                let (kb, vb) = parts(self, b)?;
                 if kind == "entry-key" {
                     self.natural_order(&ka, &kb)
                 } else {

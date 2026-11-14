@@ -221,10 +221,13 @@ impl<H: Host> Runtime<'_, H> {
                 // A game id compares and hashes by its key (`host_ids.rs`).
                 crate::runtime::host_ids::pure_equality(value)
                     || is_map_entry(value)
-                        && map_entry_parts(value).is_ok_and(|(key, entry)| {
-                            self.pure_equality_at(&key, depth + 1)
-                                && self.pure_equality_at(&entry, depth + 1)
-                        })
+                        && self
+                            .host
+                            .map_entry_parts(value)
+                            .is_some_and(|(key, entry)| {
+                                self.pure_equality_at(&key, depth + 1)
+                                    && self.pure_equality_at(&entry, depth + 1)
+                            })
             }
             Equality::Jar { equals, hash_code } => {
                 if depth >= MAX_PURITY_DEPTH {
@@ -351,19 +354,11 @@ impl<H: Host> Runtime<'_, H> {
         {
             return handle.hash_code(&mut RuntimeNested::new(self));
         }
-        let Some(marker) = expect_ref(value) else {
+        if expect_ref(value).is_none() {
             return Ok(None);
-        };
+        }
         if let Some(path) = self.file_path(value) {
             return Ok(Some(file_hash(path)));
-        }
-        if marker.starts_with("map-entry/") {
-            // `Objects.hashCode(key) ^ Objects.hashCode(value)`.
-            let (key, entry) = map_entry_parts(value)?;
-            let (Some(key), Some(entry)) = (self.java_hash(&key)?, self.java_hash(&entry)?) else {
-                return Ok(None);
-            };
-            return Ok(Some(key ^ entry));
         }
         let Some(kind) = self.host_collection_kind(value) else {
             return Ok(None);
@@ -502,17 +497,6 @@ impl<H: Host> Runtime<'_, H> {
                             Ok(false)
                         }
                     };
-                }
-                if is_map_entry(a) {
-                    // `Map.Entry.equals`: an entry with `Objects.equals` keys
-                    // and values.
-                    if !is_map_entry(b) {
-                        return Ok(false);
-                    }
-                    let (left_key, left_value) = map_entry_parts(a)?;
-                    let (right_key, right_value) = map_entry_parts(b)?;
-                    return Ok(self.objects_equals(&left_key, &right_key)?
-                        && self.objects_equals(&left_value, &right_value)?);
                 }
                 if self.host_collection_kind(a) == Some(CollectionKind::List)
                     && self.host_collection_kind(b) == Some(CollectionKind::List)
@@ -885,7 +869,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             // `Map.Entry.hashCode()` is `host_value_hash`'s; an entry whose
             // key or value has no hash the runtime can compute is counted.
-            if expect_ref(receiver).is_some_and(|marker| marker.starts_with("map-entry/")) {
+            if is_map_entry(receiver) {
                 return match self.java_hash(receiver)? {
                     Some(hash) => Ok(Some(Value::Int(hash))),
                     None => self.host.unknown_operand_call(r).map(Some),
@@ -988,9 +972,9 @@ impl<H: Host> Runtime<'_, H> {
     }
 }
 
-/// Whether a value is the host's `Map.Entry` (`map-entry/k,v`).
+/// Whether a value is one of the host's `Map.Entry` handles (`host_map_entry.rs`).
 pub(crate) fn is_map_entry(value: &Value) -> bool {
-    expect_ref(value).is_some_and(|marker| marker.starts_with("map-entry/"))
+    crate::runtime::host_map_entry::is_entry(value)
 }
 
 /// `a.equals(b)` for a string or a box `a`: equal values of the same kind. A
@@ -1190,6 +1174,10 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
 
     fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
         self.runtime.host.constructed_uuid(value)
+    }
+
+    fn map_entry_parts(&mut self, value: &Value) -> Option<(Value, Value)> {
+        self.runtime.host.map_entry_parts(value)
     }
 }
 

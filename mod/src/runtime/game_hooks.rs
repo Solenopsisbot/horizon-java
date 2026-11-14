@@ -1005,6 +1005,28 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.constructed_uuid(value)
     }
 
+    fn map_entry_parts(&self, value: &Value) -> Option<(Value, Value)> {
+        self.inner.map_entry_parts(value)
+    }
+
+    fn mint_map_entry(
+        &mut self,
+        map: Option<&Value>,
+        key: &Value,
+        value: &Value,
+        made: crate::runtime::host_map_entry::EntryMade,
+    ) -> Value {
+        self.inner.mint_map_entry(map, key, value, made)
+    }
+
+    fn entries_before_call(&mut self, marker: &str) {
+        self.inner.entries_before_call(marker);
+    }
+
+    fn entries_after_call(&mut self, marker: &str) {
+        self.inner.entries_after_call(marker);
+    }
+
     fn component_states(&self) -> Option<&crate::runtime::host_component::States> {
         self.inner.component_states()
     }
