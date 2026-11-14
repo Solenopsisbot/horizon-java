@@ -513,6 +513,13 @@ impl<H: Host> Runtime<'_, H> {
     /// `value instanceof wanted`, by the same rules the `instanceof` opcode
     /// applies.
     pub(super) fn value_instance_of(&self, value: &Value, wanted: &str) -> bool {
+        // A `String` is an instance of `String`'s supertypes only, however it
+        // is spelled (`"java/lang/Class"` is no `Class`, #156 P13c).
+        if let Value::Ref(Some(text)) = value
+            && crate::runtime::value_class::is_plain_string(text)
+        {
+            return crate::runtime::value_class::string_instance_of(text, wanted);
+        }
         self.library_instance_of(value, wanted)
             || !crate::runtime::jar_object::spells_key(value)
                 && expect_ref(value).is_some_and(|marker| {
@@ -520,8 +527,7 @@ impl<H: Host> Runtime<'_, H> {
                         || self.object_is_instance_of(marker, wanted)
                         || self.host.host_instance_of(marker, wanted)
                         || crate::runtime::jdk_model::platform_instance_of(marker, wanted)
-                        || (wanted == "java/lang/Class"
-                            && crate::runtime::host_class::is_class(value, self.classes, &self.linked))
+                        || (wanted == "java/lang/Class" && crate::runtime::host_class::is_class(value))
                 })
     }
 
@@ -687,7 +693,7 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getModule"
             && r.descriptor == "()Ljava/lang/Module;"
         {
-            let Some(class) = expect_ref(receiver) else {
+            let Some(class) = crate::runtime::host_class::class_name(receiver) else {
                 return Ok(None);
             };
             // An array is in its element type's module, a primitive (and a
@@ -696,7 +702,7 @@ impl<H: Host> Runtime<'_, H> {
             let element = if class.starts_with('[') {
                 erased_field_type(class.trim_start_matches('['))
             } else {
-                class.clone()
+                class.to_owned()
             };
             let module = if PRIMITIVE_CLASSES.contains(&element.as_str()) {
                 Some(JAVA_BASE_MODULE)
@@ -716,7 +722,7 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "getPackageName"
             && r.descriptor == "()Ljava/lang/String;"
         {
-            let Some(class) = expect_ref(receiver) else {
+            let Some(class) = crate::runtime::host_class::class_name(receiver) else {
                 return Ok(None);
             };
             let element = class.trim_start_matches('[');

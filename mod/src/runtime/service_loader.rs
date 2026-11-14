@@ -69,7 +69,7 @@ fn service_error(service: &str, message: &str) -> NativeError {
 enum Lookup {
     /// A provider the runtime can construct exactly.
     Exact,
-    /// A provider it cannot (counted); the bare class name stands for it.
+    /// A provider it cannot (counted); an object of its class stands for it.
     Opaque,
 }
 
@@ -359,8 +359,7 @@ impl<H: Host> Runtime<'_, H> {
                 ));
             }
         }
-        let instance = Value::Ref(Some(provider.to_owned()));
-        match self.known_instance_of(&instance, service) {
+        match self.class_known_instance_of(provider, service) {
             Some(true) => {}
             Some(false) if self.class(service).is_some() => {
                 return Err(service_error(
@@ -407,8 +406,11 @@ impl<H: Host> Runtime<'_, H> {
 
     /// Look the provider up and build one instance, as `Provider.get` does.
     fn provider_instance(&mut self, service: &str, provider: &str) -> Result<Value, NativeError> {
+        // A provider the runtime cannot build (counted in `lookup`) stands
+        // as an object of its class whose constructor did not run: never its
+        // name, which is a `String` (#156 P13c).
         if let Lookup::Opaque = self.lookup(service, provider)? {
-            return Ok(Value::Ref(Some(provider.to_owned())));
+            return Ok(self.new_object(provider));
         }
         let cannot = || {
             service_error(

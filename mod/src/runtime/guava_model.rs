@@ -443,14 +443,10 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(inner) = args.first().filter(|value| **value != Value::Ref(None)) else {
                     return Err(thrown("java/lang/NullPointerException", None));
                 };
-                // A `Type` the model holds: a class marker, a JDK or a Gson node;
-                // anything else (a String cast to `Type`, a jar's own `Type`) counted.
-                let modelled = match inner {
-                    Value::Ref(Some(_)) => {
-                        crate::runtime::host_class::is_class(inner, self.classes, &self.linked)
-                    }
-                    _ => crate::runtime::host_gson_type::any_node(inner).is_some(),
-                };
+                // A `Type` the model holds: a `Class`, a JDK or a Gson node;
+                // anything else (a jar's own `Type`) counted. Text is never a
+                // `Type` (#156 P13c): a `(Type)` cast of a String throws first.
+                let modelled = crate::runtime::host_gson_type::any_node(inner).is_some();
                 if !modelled {
                     return self.host.unknown_operand_call(r).map(Some);
                 }

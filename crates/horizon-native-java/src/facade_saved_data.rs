@@ -104,7 +104,7 @@ impl SavedDataState {
         receiver: &Value,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
-        let text = expect_ref(receiver)?;
+        let text = crate::game_object::text(receiver)?;
         let name = r.name.as_str();
         let descriptor = r.descriptor.as_str();
         if r.owner == TYPE_CLASS && name == "<init>" {
@@ -238,7 +238,7 @@ impl<H: Host> Runtime<'_, H> {
         let (Some(storage), [saved_type]) = (receiver, args) else {
             return Ok(None);
         };
-        if expect_ref(storage).map(String::as_str) != Some(STORAGE) {
+        if crate::game_object::text(storage).map(String::as_str) != Some(STORAGE) {
             return Ok(None);
         }
         let call = |name: &str, descriptor: &str, owner: &str| MethodRef {

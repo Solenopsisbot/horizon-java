@@ -707,7 +707,7 @@ impl<H: Host> GameHookHost<'_, H> {
             ("<init>", "()V") if r.owner == "java/lang/Object" => return Ok(Value::Void),
             ("hashCode", "()I") => return Ok(Value::Int(stable_hash(marker))),
             ("equals", "(Ljava/lang/Object;)Z") => {
-                let other = args.first().and_then(expect_ref);
+                let other = args.first().and_then(crate::game_object::text);
                 return Ok(Value::Int(i32::from(other.is_some_and(|o| o == marker))));
             }
             _ => {}
@@ -783,7 +783,7 @@ impl<H: Host> GameHookHost<'_, H> {
                             None if crate::host_component::is_component(value) => {
                                 return Err(unmodelled(marker, r));
                             }
-                            None => expect_ref(value).cloned().unwrap_or_default(),
+                            None => crate::game_object::text(value).cloned().unwrap_or_default(),
                         }
                     }
                     None => String::new(),
@@ -978,7 +978,9 @@ impl<H: Host> GameHookHost<'_, H> {
             ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(address.to_owned()))),
             ("hashCode", "()I") => Ok(Value::Int(stable_hash(address))),
             ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(i32::from(
-                args.first().and_then(expect_ref).is_some_and(|o| o == text),
+                args.first()
+                    .and_then(crate::game_object::text)
+                    .is_some_and(|o| o == text),
             ))),
             _ => Err(NativeError::Metadata(format!(
                 "game hook value {text} does not model {}#{}{}",
@@ -988,7 +990,7 @@ impl<H: Host> GameHookHost<'_, H> {
     }
 
     fn is_game_object(value: &Value) -> Option<&str> {
-        expect_ref(value)
+        crate::game_object::text(value)
             .map(String::as_str)
             .filter(|marker| marker.starts_with(GAME_OBJECT_PREFIX))
     }
@@ -1046,8 +1048,9 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.send_feedback(r, component, broadcast)
     }
 
-    fn note_entrypoint_constructed(&mut self, class: &str) {
-        self.inner.note_entrypoint_constructed(class);
+    fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
+        self.inner
+            .note_entrypoint_constructed(kind, class, instance);
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
@@ -1114,7 +1117,7 @@ impl<H: Host> Host for GameHookHost<'_, H> {
     ) -> Result<Value, NativeError> {
         // The server's saved data (storage, types, a `SavedData`'s dirty
         // flag) lives on the jar's bootstrap host, across firings.
-        if facade_saved_data::owns_call(r, expect_ref(receiver).map(String::as_str)) {
+        if facade_saved_data::owns_call(r, crate::game_object::text(receiver).map(String::as_str)) {
             return self.inner.invoke_instance(r, receiver, args);
         }
         // A Fabric `Event`'s invoker is a host marker, not the jar's own
@@ -1127,7 +1130,7 @@ impl<H: Host> Host for GameHookHost<'_, H> {
                 r.owner, r.name, r.descriptor
             )));
         }
-        if let Some(text) = expect_ref(receiver).cloned()
+        if let Some(text) = crate::game_object::text(receiver).cloned()
             && let Some(answer) = self.answer_value(&text, r, args)
         {
             return answer;
@@ -1160,7 +1163,7 @@ impl<H: Host> Host for GameHookHost<'_, H> {
                 r.owner,
                 r.name,
                 r.descriptor,
-                expect_ref(receiver).map_or("null", String::as_str)
+                crate::game_object::text(receiver).map_or("null", String::as_str)
             )));
         }
         self.inner.invoke_instance(r, receiver, args)
@@ -1503,11 +1506,16 @@ impl NativeJar {
                     runtime.callback_infos.set_actual(&marker, actual.clone())?;
                 }
                 let before = hook_shapes::callback_info_snapshot(runtime.callback_infos, &marker)?;
-                let callback_receiver = is_instance.then(|| {
-                    receiver
-                        .clone()
-                        .unwrap_or_else(|| Value::Ref(Some(entry.callback.owner.clone())))
-                });
+                // No game object handed over: an object of the Mixin class
+                // stands for it (its name is a `String`, #156 P13c; #156 P16).
+                let callback_receiver = if is_instance {
+                    Some(match receiver.clone() {
+                        Some(receiver) => receiver,
+                        None => runtime.new_object(&entry.callback.owner),
+                    })
+                } else {
+                    None
+                };
                 // The first callback of a Mixin class on a game object runs the
                 // class's constructor on it: `javac` put the Mixin's field
                 // initialisers there, which real Mixin merges into the target's
@@ -1633,7 +1641,7 @@ impl NativeJar {
             let roots = state
                 .fields
                 .values()
-                .filter_map(|value| expect_ref(value).cloned())
+                .filter_map(|value| crate::game_object::text(value).cloned())
                 .collect();
             let persistence = runtime.persist_class_state();
             let heap = runtime.persist_resident_heap_with(roots);

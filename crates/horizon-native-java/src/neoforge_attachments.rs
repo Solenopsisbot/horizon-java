@@ -514,7 +514,9 @@ fn holder_op(r: &MethodRef) -> Option<(HolderOp, bool)> {
 }
 
 fn player_uuid(receiver: Option<&Value>) -> Option<u128> {
-    let hex = receiver.and_then(expect_ref)?.strip_prefix(PLAYER_PREFIX)?;
+    let hex = receiver
+        .and_then(crate::game_object::text)?
+        .strip_prefix(PLAYER_PREFIX)?;
     (hex.len() == 32).then(|| u128::from_str_radix(hex, 16).ok())?
 }
 
@@ -796,7 +798,7 @@ impl<H: Host> Runtime<'_, H> {
             };
             return self.attachment_holder_value(&key);
         }
-        let Some(marker) = receiver.and_then(expect_ref).cloned() else {
+        let Some(marker) = receiver.and_then(crate::game_object::text).cloned() else {
             return Ok(None);
         };
         if r.owner != DEFERRED_REGISTER {

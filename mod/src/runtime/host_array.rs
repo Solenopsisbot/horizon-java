@@ -54,19 +54,6 @@ pub(crate) fn handle_only_class(class: &str) -> bool {
     class.starts_with('[') || class == "color-collection"
 }
 
-/// Whether `text` is an array class in descriptor form (`[I`, `[[Ljava/lang/String;`).
-pub(crate) fn is_array_descriptor(text: &str) -> bool {
-    let element = text.trim_start_matches('[');
-    if element.len() == text.len() {
-        return false;
-    }
-    matches!(element, "Z" | "B" | "C" | "S" | "I" | "J" | "F" | "D")
-        || element
-            .strip_prefix('L')
-            .and_then(|name| name.strip_suffix(';'))
-            .is_some_and(|name| !name.is_empty() && !name.contains(['[', ';']))
-}
-
 /// The suffix of [`shared_empty`]'s key.
 const SHARED_EMPTY: &str = "empty";
 

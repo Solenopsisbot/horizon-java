@@ -72,7 +72,7 @@ fn codes_of(value: &Value) -> Option<String> {
     if let Value::Int(rgb) = value {
         return Some(rgb_code(*rgb));
     }
-    let text = expect_ref(value)?;
+    let text = crate::game_object::text(value)?;
     if let Some(codes) = text.strip_prefix(STYLE) {
         return Some(codes.to_owned());
     }
@@ -244,7 +244,7 @@ pub(super) fn style_of(json: &serde_json::Value) -> Value {
 pub(super) fn component_call(r: &MethodRef, args: &[Value]) -> Option<ComponentCall> {
     match (r.name.as_str(), return_desc(&r.descriptor)) {
         (name @ ("withStyle" | "setStyle"), _) => {
-            let codes = expect_ref(args.first()?)?.strip_prefix(STYLE)?;
+            let codes = crate::game_object::text(args.first()?)?.strip_prefix(STYLE)?;
             Some(ComponentCall::Restyle {
                 codes: codes.to_owned(),
                 replace: name == "setStyle",

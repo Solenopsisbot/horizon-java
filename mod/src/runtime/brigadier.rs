@@ -1202,7 +1202,7 @@ impl StdHost {
             return Some(source.level);
         }
         let exec = self.brigadier.exec()?;
-        let player = expect_ref(value)?.strip_prefix("game/player/")?;
+        let player = crate::runtime::game_object::text(value)?.strip_prefix("game/player/")?;
         let uuid = u128::from_str_radix(player, 16).ok()?;
         let source = exec.sources.first()?;
         Some(if source.player == Some(uuid) {
@@ -1422,7 +1422,7 @@ impl StdHost {
             // by the type's own getter; the raw object is not modelled.
             _ => return self.unknown_host_call(r),
         };
-        let Some(wanted) = args.get(1).and_then(expect_ref).map(String::as_str) else {
+        let Some(wanted) = args.get(1).and_then(crate::runtime::host_class::class_name) else {
             return self.unknown_host_call(r);
         };
         let wrapper = match wanted {
@@ -1530,7 +1530,7 @@ impl StdHost {
                 answer => answer,
             };
         }
-        let text = expect_ref(receiver)?.clone();
+        let text = crate::runtime::game_object::text(receiver)?.clone();
         // The objects `new` made of permission and exception classes.
         if name == "<init>" {
             return self.brigadier_init(r, &text, args);

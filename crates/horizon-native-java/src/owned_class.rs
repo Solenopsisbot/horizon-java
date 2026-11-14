@@ -26,9 +26,9 @@ const EXACT_ELSEWHERE: &[(&str, &str)] = &[
     ("equals", "(Ljava/lang/Object;)Z"),
 ];
 
-/// Whether `text` is a class name (internal form, the text a `Class` is until #156 P13) a family
-/// kind owns. A path that prints a value cannot tell such a `Class` from a String spelled like it,
-/// and Java prints the two differently (`class X` vs the text): it counts.
+/// Whether `text` (an internal name `Class.forName` resolved) names a class a family kind owns,
+/// which the run's loader may or may not provide. A `Class` is a handle (#156 P13c), so a String
+/// spelled like such a name is only that String everywhere else.
 pub(crate) fn owned_class_name(text: &str) -> bool {
     HostKind::owning_class(text)
         .and_then(HostKind::class_side)
@@ -56,7 +56,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         }
         let Some(class) = receiver
-            .and_then(expect_ref)
+            .and_then(crate::host_class::class_name)
             .map(|name| name.replace('.', "/"))
         else {
             return Ok(None);
@@ -101,7 +101,7 @@ impl<H: Host> Runtime<'_, H> {
 impl<H: Host> Runtime<'_, H> {
     /// `String.valueOf(c)` for a `Class`-typed concatenation operand naming a class a family kind
     /// owns: `Class.toString` (`class X`/`interface X`) when the kind knows which, else counted.
-    /// `None` for any other operand (a `Class` is still its name's text until #156 P13).
+    /// `None` for any other operand.
     pub(crate) fn owned_class_text(
         &mut self,
         value: &Value,

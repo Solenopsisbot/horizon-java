@@ -187,9 +187,9 @@ impl<H: Host> Runtime<'_, H> {
             self.class(component)?;
             return self.known_instance_of(value, component);
         }
-        // A `String`, a `Class` (text until #156 P13: `int.class` is "int")
-        // or a host marker whose class is unknown. A `String`'s components
-        // fit, or this is undecided either way.
+        // A `String` or a host marker whose class is unknown (a `Class` is
+        // a handle, #156 P13c). A `String`'s components fit, or this is
+        // undecided either way.
         if is_box(component) {
             return Some(false);
         }
@@ -199,7 +199,7 @@ impl<H: Host> Runtime<'_, H> {
             // A `String` fits; any other text is undecided.
             return string.then_some(true);
         }
-        if string && !self.text_may_be_class(text) {
+        if string {
             return Some(false);
         }
         self.class(component)?;
@@ -215,12 +215,6 @@ impl<H: Host> Runtime<'_, H> {
         }
         let class = crate::jar_object::packaged_object_class(value)?;
         (self.class(class).is_some() || class.starts_with("java/")).then_some(class)
-    }
-
-    /// Whether a text value may be a `Class` (a class name, a primitive's,
-    /// an array descriptor), since `Class` objects are still text.
-    fn text_may_be_class(&self, text: &str) -> bool {
-        class_marker_like(text, self.classes, &self.linked)
     }
 
     /// Whether every superclass of the held class `class` is held, up to
@@ -264,9 +258,7 @@ impl<H: Host> Runtime<'_, H> {
             Value::Ref(Some(text)) => match self.marker_class(value, text) {
                 Some(class) => Some(class.to_owned()),
                 // A text is a `String` unless it may be a `Class`.
-                None if value_class::is_plain_string(text) && !self.text_may_be_class(text) => {
-                    Some("java/lang/String".to_owned())
-                }
+                None if value_class::is_plain_string(text) => Some("java/lang/String".to_owned()),
                 None => None,
             },
             other => self.exact_class(other),

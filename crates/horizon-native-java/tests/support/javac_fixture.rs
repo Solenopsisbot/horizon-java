@@ -73,7 +73,13 @@ impl Fixture {
     /// [`Self::build`], packing every compiled class into the probe jar, not
     /// only `demo/`'s (a probe whose jar classes sit in other packages).
     pub fn build_every_package(test: &str, sources: &[(&str, &str)]) -> Self {
-        Self::build_packed(test, sources, &[], false, "")
+        Self::build_packed(test, sources, &[], false, "", None)
+    }
+
+    /// [`Self::build`] with `mod_json` as the jar's `fabric.mod.json` (its own
+    /// entrypoints).
+    pub fn build_with_mod_json(test: &str, sources: &[(&str, &str)], mod_json: &str) -> Self {
+        Self::build_packed(test, sources, &[], false, "demo", Some(mod_json))
     }
 
     fn build_jars(
@@ -82,7 +88,7 @@ impl Fixture {
         extra: &[(&str, &[u8])],
         with_lib: bool,
     ) -> Self {
-        Self::build_packed(test, sources, extra, with_lib, "demo")
+        Self::build_packed(test, sources, extra, with_lib, "demo", None)
     }
 
     /// Compile `sources` and pack the classes under `packed` (every class
@@ -93,6 +99,7 @@ impl Fixture {
         extra: &[(&str, &[u8])],
         with_lib: bool,
         packed: &str,
+        mod_json: Option<&str>,
     ) -> Self {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -122,7 +129,11 @@ impl Fixture {
         zip.start_file("fabric.mod.json", SimpleFileOptions::default())
             .unwrap();
         zip.write_all(
-            br#"{"id":"probe-fixture","version":"1.0","entrypoints":{"main":"demo.Probe"}}"#,
+            mod_json
+                .unwrap_or(
+                    r#"{"id":"probe-fixture","version":"1.0","entrypoints":{"main":"demo.Probe"}}"#,
+                )
+                .as_bytes(),
         )
         .unwrap();
         for class in files_under(&classes.join(packed)) {

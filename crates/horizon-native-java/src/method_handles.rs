@@ -781,7 +781,7 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 let types = classes
                     .iter()
-                    .map(|class| expect_ref(class).map(|class| field_descriptor(class)))
+                    .map(|class| crate::host_class::class_name(class).map(field_descriptor))
                     .collect::<Option<Vec<_>>>()
                     .ok_or_else(npe)?;
                 let parameters = descriptor_arguments(&target.descriptor()?);

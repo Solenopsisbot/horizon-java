@@ -67,7 +67,7 @@ public class Probe<T, E> {
         + ap.getAnnotatedActualTypeArguments()[0].getAnnotations().length;
   }
 
-  /** A class as a `Type` never equals a String spelling it (counted in Horizon until #156 P13). */
+  /** A class as a `Type` never equals a String spelling it (#156 P13c). */
   public static String classEqualsSpelling() {
     Type s = String.class;
     return "" + s.equals("java/lang/String");

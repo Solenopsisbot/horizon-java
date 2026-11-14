@@ -9,15 +9,15 @@
 //! * `unannotated`: a member with no type-use annotations has none, exactly.
 //! * `classEqualsOther`, `castPlain`: a class's `Type.equals` of another class
 //!   or `null`, and a plain String cast to `ParameterizedType`/`Type` (CCE).
+//! * `classEqualsSpelling`: `String.class.equals("java/lang/String")` is
+//!   `false`: a `Class` is a handle and the String only a String (#156 P13c;
+//!   counted while classes were text).
 //!
 //! Counted, where Java 25 answers what Horizon cannot read or tell apart:
 //! * `annotatedField`/`annotatedArgument`: a `RUNTIME` `TYPE_USE` annotation
 //!   (Java printed `1true,@demo.Probe.TU() java.lang.String` and
 //!   `java.util.List<java.lang.String>,1`): the annotation reads and the
-//!   annotated text, never "none";
-//! * `classEqualsSpelling`: `String.class.equals("java/lang/String")` (Java
-//!   `false`): a class marker and a String with its spelling are both text
-//!   until #156 P13.
+//!   annotated text, never "none".
 
 #[path = "support/javac_fixture.rs"]
 mod javac_fixture;
@@ -54,6 +54,7 @@ fn answers_as_java_25() {
         ),
         ("unannotated", "0false,java.lang.String,0"),
         ("classEqualsOther", "falsefalse"),
+        ("classEqualsSpelling", "false"),
         ("castPlain", "CCECCE"),
     ] {
         let (text, counted) = run(&fixture, method);
@@ -63,7 +64,7 @@ fn answers_as_java_25() {
 }
 
 #[test]
-fn unread_type_use_annotations_and_a_spelled_class_are_counted() {
+fn unread_type_use_annotations_are_counted() {
     let fixture = fixture();
     for (method, calls) in [
         (
@@ -77,10 +78,6 @@ fn unread_type_use_annotations_and_a_spelled_class_are_counted() {
             "annotatedArgument",
             &["java/lang/reflect/AnnotatedType#getAnnotations()[Ljava/lang/annotation/Annotation;"]
                 [..],
-        ),
-        (
-            "classEqualsSpelling",
-            &["java/lang/reflect/Type#equals(Ljava/lang/Object;)Z"][..],
         ),
     ] {
         let (_, counted) = run(&fixture, method);
