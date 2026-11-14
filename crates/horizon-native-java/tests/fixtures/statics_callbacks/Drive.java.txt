@@ -1,0 +1,13 @@
+package demo;
+
+/** Java 25's run of the same steps: each target's HEAD callbacks in Mixin's
+ *  order (declaration order), then its body. */
+public final class Drive {
+  public static void main(String[] args) {
+    CounterMixin.first(null); CounterMixin.second(null); Target.twice();
+    CounterMixin.third(null); Target.other();
+    new Probe().onInitialize();
+    CounterMixin.first(null); CounterMixin.second(null); Target.twice();
+    System.out.println("read=" + Probe.read());
+  }
+}

@@ -16580,6 +16580,12 @@ impl NativeJar {
         modify_hooks: Option<&mut ModifyHooks>,
     ) -> Result<Value, NativeError> {
         let class_name = class.replace('.', "/");
+        // A JVM's statics are per class for the whole run (#184): a call, a
+        // Mixin target or one of its callbacks runs against the host's
+        // persistent class state and resident heap, as an entrypoint and a
+        // listener do (`invoke_persistent`), so what one callback writes the
+        // next sees, and `<clinit>` runs once.
+        let (static_fields, initialized_classes) = host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
@@ -16587,8 +16593,8 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields,
+            initialized_classes,
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -16615,7 +16621,15 @@ impl NativeJar {
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
-        runtime.invoke(&class_name, method, descriptor, receiver, args)
+        let resident = runtime.adopt_resident_heap();
+        let result = runtime.invoke(&class_name, method, descriptor, receiver, args);
+        // A failed run keeps what it wrote before failing, as a JVM would.
+        let persistence = runtime.persist_class_state();
+        if resident {
+            runtime.persist_resident_heap()?;
+        }
+        persistence?;
+        result
     }
 
     fn execute_target_without_mixin<H: Host>(
