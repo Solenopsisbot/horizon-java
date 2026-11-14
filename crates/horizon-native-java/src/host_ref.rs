@@ -377,6 +377,9 @@ pub enum HostKind {
     /// An object `new` (or a model) allocated: key `class#n`
     /// (`jar_object.rs`), one key per allocation.
     JarObject,
+    /// A `java.lang.Class`: key its runtime name in internal form, one object
+    /// per name in a run (`host_class.rs`).
+    Class,
     /// A chat component (`MutableComponent`): key a serial per allocation, then its vanilla
     /// JSON, keys sorted
     /// (`host_component.rs`).
@@ -1518,6 +1521,17 @@ const KINDS: &[KindInfo] = &[
         // `Runtime::new_object` numbers every allocation once.
         canonical: always_canonical,
         methods: &crate::jar_object::JAR_OBJECT,
+    },
+    KindInfo {
+        kind: HostKind::Class,
+        tag: "cls",
+        // `FromKey`, not `Fixed`, until #156 P13c: a fixed class's objects are
+        // only its handles (`checkcast` throws for anything else), and until
+        // then a `Class` may still be class-marker text.
+        class: ClassRule::FromKey(crate::host_class::class_of_class),
+        // One `Class` per name in a run (`class_precedence`, #124).
+        canonical: always_canonical,
+        methods: &crate::host_class::CLASS_METHODS,
     },
     KindInfo {
         kind: HostKind::Component,
