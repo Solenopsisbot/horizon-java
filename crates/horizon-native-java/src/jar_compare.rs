@@ -40,6 +40,16 @@ impl<H: Host> Runtime<'_, H> {
                 None => self.count_compare_to(),
             };
         }
+        // A jar's `new UUID(msb, lsb)`: `UUID.compareTo` of the halves the host kept
+        // (`host_jdk_value.rs`), counted where it kept none.
+        if crate::host_jdk_value::is_uuid_object(a) {
+            let theirs =
+                crate::host_jdk_value::uuid_bits_of(b).or_else(|| self.host.constructed_uuid(b));
+            return match (self.host.constructed_uuid(a), theirs) {
+                (Some(own), Some(theirs)) => Ok(crate::host_jdk_value::uuid_order(own, theirs)),
+                _ => self.count_compare_to(),
+            };
+        }
         let Some(class) = self.interpreted_object_class(a) else {
             if self.interpreted_object_class(b).is_some() {
                 // A platform value's `compareTo` of a jar object: a JVM throws

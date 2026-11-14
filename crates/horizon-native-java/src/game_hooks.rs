@@ -655,11 +655,6 @@ fn is_host_value_class(owner: &str) -> bool {
     )
 }
 
-/// A value marker the bootstrap host built and models the members of.
-fn is_host_value_marker(marker: &str) -> bool {
-    marker.starts_with("uuid/")
-}
-
 fn uuid_text_of(uuid: u128) -> String {
     let hex = format!("{uuid:032x}");
     format!(
@@ -1006,6 +1001,10 @@ fn is_fabric_event_invoker(value: &Value) -> bool {
 }
 
 impl<H: Host> Host for GameHookHost<'_, H> {
+    fn constructed_uuid(&self, value: &Value) -> Option<(i64, i64)> {
+        self.inner.constructed_uuid(value)
+    }
+
     fn component_states(&self) -> Option<&crate::host_component::States> {
         self.inner.component_states()
     }
@@ -1135,7 +1134,6 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         if is_game_class(&r.owner)
             && !is_host_value_class(&r.owner)
             && !matches!(receiver, Value::Host(_))
-            && !expect_ref(receiver).is_some_and(|marker| is_host_value_marker(marker))
         {
             return Err(NativeError::Metadata(format!(
                 "game hook callback calls {}#{}{} on {}, which the hook tier does not model",
