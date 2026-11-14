@@ -1,5 +1,6 @@
-//! The two Commons IO file-text calls a config bootstrap writes its defaults
-//! through.
+//! The Commons IO file-text calls a config bootstrap writes its defaults
+//! through (`write`/`writeStringToFile`, with or without a `Charset`) and
+//! reads them back with.
 //!
 //! BiomesOPlenty checks for its `biome_toggles.json`, writes the defaults
 //! when it is absent, then reads the file back and parses it. The runtime's
@@ -40,6 +41,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
             }
             ("write", "(Ljava/io/File;Ljava/lang/CharSequence;)V")
+            | ("write", "(Ljava/io/File;Ljava/lang/CharSequence;Ljava/nio/charset/Charset;)V")
             | ("writeStringToFile", "(Ljava/io/File;Ljava/lang/String;)V")
             | (
                 "writeStringToFile",

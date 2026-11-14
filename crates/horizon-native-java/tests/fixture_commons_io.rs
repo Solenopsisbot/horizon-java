@@ -2,8 +2,8 @@
 //!
 //! BiomesOPlenty writes its default `biome_toggles.json` with
 //! `FileUtils.write`, then reads the same file back with
-//! `readFileToString` and parses it. `java` with the real library round-trips
-//! the text; the expectations below are that contract, and a read of a file
+//! `readFileToString` and parses it; resourcefulconfig saves a `.jsonc` with
+//! the `Charset` overload. `java` with the real library round-trips the text; the expectations below are that contract, and a read of a file
 //! nobody wrote is the `IOException` the library raises.
 
 #[path = "support/scratch.rs"]
@@ -18,6 +18,8 @@ import java.io.File;
 import java.io.IOException;
 public class FileUtils {
     public static void write(File file, CharSequence data) throws IOException {}
+    public static void write(File file, CharSequence data, java.nio.charset.Charset charset)
+            throws IOException {}
     public static String readFileToString(File file) throws IOException { return null; }
 }
 "#;
@@ -33,6 +35,10 @@ public final class IoProbe {
         File config = new File("/horizon/config/demo/toggles.json");
         FileUtils.write(config, "{\"minecraft:dirt\":true}");
         String readBack = FileUtils.readFileToString(config);
+        // The `Charset` overload resourcefulconfig saves a `.jsonc` with.
+        File jsonc = new File("/horizon/config/demo/settings.jsonc");
+        FileUtils.write(jsonc, "{\"a\":1}", java.nio.charset.StandardCharsets.UTF_8);
+        readBack += "|" + FileUtils.readFileToString(jsonc);
         String missing;
         try {
             FileUtils.readFileToString(new File("/horizon/config/demo/absent.json"));
@@ -113,7 +119,7 @@ fn source_built_probe_round_trips_commons_io_text() {
         .unwrap();
     assert_eq!(
         value,
-        Value::Ref(Some("{\"minecraft:dirt\":true}|missing".into()))
+        Value::Ref(Some("{\"minecraft:dirt\":true}|{\"a\":1}|missing".into()))
     );
 
     let _ = fs::remove_dir_all(root);
