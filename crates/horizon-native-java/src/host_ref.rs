@@ -1830,8 +1830,9 @@ const KINDS: &[KindInfo] = &[
             declared: crate::game_object::declared_types,
         },
         // One key per entity object: a player's carries their session and
-        // life (`game_object::player_value`).
-        canonical: always_canonical,
+        // life (`game_object::player_value`); an unlisted player's names no
+        // session, so no one object.
+        canonical: crate::game_object::entity_canonical,
         methods: &crate::game_object::ENTITY_METHODS,
     },
     KindInfo {

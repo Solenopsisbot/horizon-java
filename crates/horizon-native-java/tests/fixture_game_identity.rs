@@ -20,7 +20,8 @@ mod javac_fixture;
 use horizon_native_java::{
     ExecutionBudget, Host, NativeJar, StdHost, Value,
     events::{
-        EventContext, EventFacade, EventFiring, FacadeEntity, FacadePlayer, GameEvent, GameListener,
+        EventContext, EventFacade, EventFiring, FacadeEntity, FacadeOriginal, FacadePlayer,
+        GameEvent, GameListener,
     },
 };
 use javac_fixture::Fixture;
@@ -50,7 +51,26 @@ const STUBS: &[(&str, &str)] = &[
          import net.minecraft.server.level.ServerPlayer;\n\
          public final class ServerPlayerEvents {\n\
            public static final Event<AfterRespawn> AFTER_RESPAWN = null;\n\
-           public interface AfterRespawn { void afterRespawn(ServerPlayer oldPlayer, ServerPlayer newPlayer, boolean alive); } }",
+           public static final Event<CopyFrom> COPY_FROM = null;\n\
+           public static final Event<Join> JOIN = null;\n\
+           public static final Event<Leave> LEAVE = null;\n\
+           public interface AfterRespawn { void afterRespawn(ServerPlayer oldPlayer, ServerPlayer newPlayer, boolean alive); }\n\
+           public interface CopyFrom { void copyFromPlayer(ServerPlayer oldPlayer, ServerPlayer newPlayer, boolean alive); }\n\
+           public interface Join { void onJoin(ServerPlayer player); }\n\
+           public interface Leave { void onLeave(ServerPlayer player); } }",
+    ),
+    (
+        "net/fabricmc/fabric/api/networking/v1/ServerPlayConnectionEvents.java",
+        "package net.fabricmc.fabric.api.networking.v1;\n\
+         public final class ServerPlayConnectionEvents {\n\
+           public static final net.fabricmc.fabric.api.event.Event<Disconnect> DISCONNECT = null;\n\
+           public interface Disconnect { void onPlayDisconnect(\n\
+             net.minecraft.server.network.ServerGamePacketListenerImpl handler, net.minecraft.server.MinecraftServer server); } }",
+    ),
+    (
+        "net/minecraft/server/network/ServerGamePacketListenerImpl.java",
+        "package net.minecraft.server.network;\n\
+         public class ServerGamePacketListenerImpl { public net.minecraft.server.level.ServerPlayer player; }",
     ),
     (
         "net/fabricmc/fabric/api/entity/event/v1/ServerLivingEntityEvents.java",
@@ -107,6 +127,7 @@ import java.util.*;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.server.level.ServerPlayer;
 public final class Probe {
   static ServerPlayer last;
@@ -120,6 +141,15 @@ public final class Probe {
   public static int damageSelf, damageEq, damageEquals, entityEq, entityEquals, entityHash;
   public static int forgedInstance, forgedCast, forgedEquals, equalsForged, forgedEq, forgedSet;
   public static int forgedContains, forgedGet, forgedIdentity, forgedSetOf, forgedSwitch;
+  // A mod's list of online players, kept from `JOIN` to `LEAVE` (#228's review).
+  static final List<ServerPlayer> online = new ArrayList<>();
+  static final Set<ServerPlayer> onlineSet = new HashSet<>();
+  static ServerPlayer joined, current, copyOld, leave1;
+  static int disconnects;
+  public static int copyOldIsJoined, copyOldEqualsJoined, respawnOldIsCopyOld;
+  public static int leaveEq, leaveEquals, leaveEqualsJoined, leaveHash, listRemove, listSize;
+  public static int setRemove, setSize, leaveIdMap, disconnectEq, disconnectEquals;
+  public static int leave2Eq, leave2Equals, leave2EqJoined, leave2EqualsJoined;
   public void onInitialize() {
     ServerTickEvents.END_SERVER_TICK.register(server -> {
       ServerPlayer p = server.getPlayerList().getPlayers().get(0);
@@ -145,10 +175,51 @@ public final class Probe {
       last = p;
       forgery(p);
     });
+    ServerPlayerEvents.JOIN.register(p -> {
+      joined = p;
+      current = p;
+      online.add(p);
+      onlineSet.add(p);
+    });
+    ServerPlayerEvents.COPY_FROM.register((oldPlayer, newPlayer, alive) -> {
+      copyOldIsJoined = oldPlayer == joined ? 1 : 0;
+      copyOldEqualsJoined = oldPlayer.equals(joined) ? 1 : 0;
+      copyOld = oldPlayer;
+    });
+    ServerPlayerEvents.LEAVE.register(p -> {
+      if (leave1 == null) {
+        leave1 = p;
+        leaveEq = p == current ? 1 : 0;
+        leaveEquals = p.equals(current) ? 1 : 0;
+        leaveEqualsJoined = p.equals(joined) ? 1 : 0;
+        leaveHash = p.hashCode();
+        listRemove = online.remove(p) ? 1 : 0;
+        listSize = online.size();
+        setRemove = onlineSet.remove(p) ? 1 : 0;
+        setSize = onlineSet.size();
+        IdentityHashMap<Object, Integer> im = new IdentityHashMap<>();
+        im.put(current, 1);
+        im.put(p, 2);
+        leaveIdMap = im.size();
+      } else {
+        leave2Eq = leave1 == p ? 1 : 0;
+        leave2Equals = leave1.equals(p) ? 1 : 0;
+        leave2EqJoined = p == joined ? 1 : 0;
+        leave2EqualsJoined = p.equals(joined) ? 1 : 0;
+      }
+    });
+    ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+      if (disconnects++ == 0) {
+        disconnectEq = handler.player == current ? 1 : 0;
+        disconnectEquals = handler.player.equals(current) ? 1 : 0;
+      }
+    });
     ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> {
       oldEq = oldPlayer == newPlayer ? 1 : 0;
       oldEquals = oldPlayer.equals(newPlayer) ? 1 : 0;
       oldIsFirstLife = oldPlayer == firstLife ? 1 : 0;
+      respawnOldIsCopyOld = oldPlayer == copyOld ? 1 : 0;
+      current = newPlayer;
       absentEq = lastNew == newPlayer ? 1 : 0;
       lastNew = newPlayer;
     });
@@ -398,4 +469,104 @@ fn players_entities_and_damage_keep_the_servers_identity() {
         EventContext::default(),
     );
     assert_eq!(run.counted("java/lang/Object#if_acmp") - compared, 1);
+}
+
+/// Logout (#228's review): the mod keeps the leaving player's last entry for
+/// the `LEAVE`/`DISCONNECT` firing (`EventFacade::departed`), so a mod's
+/// "remove this player from my list" finds them, and the clone's old player
+/// is the first life's object itself. Expected: the reviewer's Java 25 run of
+/// this sequence against the real 26.3 `ServerPlayer`s (`PlayerList.respawn`'s
+/// `setId(old id)`, a relog's new id 9).
+#[test]
+fn a_leaving_player_is_the_object_earlier_firings_handed_out() {
+    let mut sources = STUBS.to_vec();
+    sources.push(("demo/Probe.java", MOD));
+    let fixture = Fixture::build("game-identity-logout", &sources);
+    let jar = &fixture.jar;
+    let entry = jar.discover_entrypoint("main").unwrap();
+    let mut host = StdHost::new();
+    jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
+        .unwrap();
+    let listeners = host.game_listeners(jar, true).listeners;
+    let mut run = Run {
+        jar,
+        host,
+        listeners,
+    };
+    let alex = || EventContext {
+        player: Some(ALEX),
+        ..EventContext::default()
+    };
+    // As the mod builds the logout firing: off the list, in `departed`.
+    let leaving = |id, session, life| {
+        let listed = facade(id, session, life);
+        Arc::new(EventFacade {
+            players: Vec::new(),
+            departed: listed.players.clone(),
+            ..EventFacade::default()
+        })
+    };
+    run.fire(GameEvent::PlayerJoin, facade(7, 1, 0), alex());
+    let original = FacadeOriginal {
+        uuid: ALEX,
+        name: Some("Alex".into()),
+        ..FacadeOriginal::default()
+    };
+    run.fire(
+        GameEvent::PlayerCopy,
+        facade(7, 1, 1),
+        EventContext {
+            original: Some(original),
+            ..alex()
+        },
+    );
+    run.fire(GameEvent::PlayerRespawn, facade(7, 1, 1), alex());
+    assert_eq!(
+        run.ints(&[
+            "copyOldIsJoined",
+            "copyOldEqualsJoined",
+            "respawnOldIsCopyOld"
+        ]),
+        [1, 1, 1]
+    );
+    run.fire(GameEvent::PlayerLeave, leaving(7, 1, 1), alex());
+    assert_eq!(
+        run.ints(&[
+            "leaveEq",
+            "leaveEquals",
+            "leaveEqualsJoined",
+            "leaveHash",
+            "listRemove",
+            "listSize",
+            "setRemove",
+            "setSize",
+            "leaveIdMap",
+            "disconnectEq",
+            "disconnectEquals",
+        ]),
+        [1, 1, 1, 7, 1, 0, 1, 0, 1, 1, 1]
+    );
+    // A second session: its own object, id 9; its `LEAVE` is that session's player.
+    run.fire(GameEvent::PlayerJoin, facade(9, 2, 0), alex());
+    run.fire(GameEvent::PlayerLeave, leaving(9, 2, 0), alex());
+    assert_eq!(
+        run.ints(&[
+            "leave2Eq",
+            "leave2Equals",
+            "leave2EqJoined",
+            "leave2EqualsJoined"
+        ]),
+        [0, 0, 1, 1]
+    );
+    // A player the façade does not list at all has no session: never a made-up
+    // object. Both `equals` (against the first leaver and the second session's
+    // player) are counted. (`==` between their keys still answers `false`: two
+    // keys are two objects to every kind, #228's reply.)
+    let before = run.counted("java/lang/Object#equals");
+    run.fire(
+        GameEvent::PlayerLeave,
+        Arc::new(EventFacade::default()),
+        alex(),
+    );
+    assert_eq!(run.counted("java/lang/Object#equals") - before, 2);
 }

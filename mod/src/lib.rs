@@ -150,6 +150,9 @@ struct State {
     /// object by them (`FacadePlayer::session`/`life`, #156 P16b). A dimension change keeps the
     /// object, and the counts.
     lives: BTreeMap<u128, (u32, u32)>,
+    /// The player leaving in the logout firing now running: their last entry, so the
+    /// runtime hands out the object earlier firings did (`EventFacade::departed`).
+    departed: Vec<FacadePlayer>,
     /// `MinecraftServer.getTickCount()` as the last server tick reported it.
     tick_count: i32,
     /// Whether the open server is a dedicated one, from `server_about_to_start`.
@@ -856,7 +859,13 @@ impl Hooks for HorizonJava {
     /// `ServerPlayerEvents.LEAVE`, NeoForge's `PlayerLoggedOutEvent`). The player is already off
     /// the list when a listener hears it, as the hook says.
     fn player_logged_out(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedOutEvent<'_>) {
+        // The leaver's last entry, taken before the refresh drops them: the same `ServerPlayer`.
+        let leaving: Vec<FacadePlayer> = (self.lock().players.iter())
+            .filter(|player| player.uuid == event.player)
+            .cloned()
+            .collect();
         self.refresh_players(host);
+        self.lock().departed = leaving;
         let context = EventContext {
             player: Some(event.player),
             ..EventContext::default()
@@ -869,6 +878,7 @@ impl Hooks for HorizonJava {
             context,
             |_| true,
         );
+        self.lock().departed.clear();
     }
 
     /// A player respawned (Fabric's `ServerPlayerEvents.AFTER_RESPAWN`, NeoForge's
@@ -2098,6 +2108,7 @@ impl State {
             dedicated: self.dedicated,
             tick_count: self.tick_count,
             players: self.players.clone(),
+            departed: self.departed.clone(),
             levels: self.levels.clone(),
             server: Arc::clone(&self.server),
             ..EventFacade::default()

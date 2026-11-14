@@ -917,7 +917,12 @@ impl<H: Host> Runtime<'_, H> {
         let Some((op, by_supplier)) = holder_op(r) else {
             return Ok(None);
         };
-        let original = original_uuid(receiver);
+        // The clone's old player: its marker, or its previous life's key
+        // (`events::clone_original`).
+        let original = original_uuid(receiver).or_else(|| {
+            self.host
+                .clone_original_of(crate::runtime::game_object::text(receiver?)?)
+        });
         let Some(player) = player_uuid(receiver).or(original) else {
             return Ok(None);
         };

@@ -1055,6 +1055,10 @@ pub struct EventFacade {
     /// `None` (the default) makes a read refuse and count instead of answering a made-up 0.
     pub max_players: Option<i32>,
     pub players: Vec<FacadePlayer>,
+    /// Players leaving in this firing (`PlayerLeave`): off `players`, as
+    /// `getPlayers()` reads it, but still the objects earlier firings handed
+    /// out, so their key keeps their session, life and id.
+    pub departed: Vec<FacadePlayer>,
     pub levels: Vec<FacadeLevel>,
     /// Server-wide facts (world folder, game rules, registries, the channels
     /// each client takes), shared between firings: the game rebuilds it only
@@ -1209,6 +1213,24 @@ fn player_marker(facade: &EventFacade, uuid: u128) -> Value {
 
 /// A clone's old player: its own holder (`neoforge_original.rs`) and façade, never the new
 /// player's `game/player/` marker.
+/// A clone's old player: the player's previous life when the façade counts
+/// the respawn (one key for the one object, #228's review), else the
+/// original-player marker.
+fn clone_original(facade: &EventFacade, original: &FacadeOriginal) -> Value {
+    crate::runtime::game_object::previous_player_value(facade, original.uuid)
+        .unwrap_or_else(|| original_marker(original.uuid))
+}
+
+/// Whether `text` is the firing's clone original as [`clone_original`] keys
+/// it: its facts and attachments are the original's.
+pub(crate) fn is_clone_original(firing: &EventFiring, text: &str) -> bool {
+    firing.context.original.as_ref().is_some_and(|original| {
+        crate::runtime::game_object::previous_player_value(&firing.facade, original.uuid).is_some_and(
+            |previous| crate::runtime::game_object::text(&previous).map(String::as_str) == Some(text),
+        )
+    })
+}
+
 fn original_marker(uuid: u128) -> Value {
     marker(format!(
         "{}{uuid:032x}",
@@ -1499,7 +1521,18 @@ impl StdHost {
                 _ => Err(NativeError::UnknownHostCall(r.clone())),
             });
         }
-        let kind = facade(text)?;
+        // The clone's old player, keyed as its previous life: the original's facts.
+        let kind = match facade(text)? {
+            Facade::Player(uuid)
+                if self
+                    .game_event
+                    .as_deref()
+                    .is_some_and(|firing| is_clone_original(firing, text)) =>
+            {
+                Facade::OriginalPlayer(uuid)
+            }
+            kind => kind,
+        };
         if matches!(
             kind,
             Facade::Server | Facade::Level(_) | Facade::Player(_) | Facade::Entity(_)
@@ -1543,7 +1576,7 @@ impl StdHost {
         let name = r.name.as_str();
         let int = |value: i32| Some(Value::Int(value));
         let flag = |value: bool| Some(Value::Int(i32::from(value)));
-        let player = |uuid: u128| facade.players.iter().find(|p| p.uuid == uuid);
+        let player = |uuid: u128| crate::runtime::game_object::facade_player(&facade, uuid);
         match kind {
             Facade::Server => match (name, returns) {
                 ("getTickCount", "I") => int(facade.tick_count),
@@ -1733,7 +1766,7 @@ impl StdHost {
                 ("getOriginal", _) if event == GameEvent::PlayerCopy => context
                     .original
                     .as_ref()
-                    .map(|original| original_marker(original.uuid)),
+                    .map(|original| clone_original(&facade, original)),
                 ("isCanceled", "Z") => flag(cancelled),
                 ("setCanceled", "V") => {
                     let cancel = matches!(args.first(), Some(Value::Int(v)) if *v != 0);
@@ -2391,7 +2424,7 @@ fn fabric_arguments(shape: Shape, firing: &EventFiring) -> Result<Vec<Value>, Na
                 .player
                 .and_then(|uuid| crate::runtime::game_object::previous_player_value(&firing.facade, uuid));
             let old = match (&context.original, previous) {
-                (Some(original), _) => original_marker(original.uuid),
+                (Some(original), _) => clone_original(&firing.facade, original),
                 (None, Some(previous)) => previous,
                 (None, None) => player.clone(),
             };

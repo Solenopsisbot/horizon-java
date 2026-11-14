@@ -2298,7 +2298,7 @@ impl NativeJar {
                 uuid: PROBE_PLAYER,
                 name: "Player".into(),
                 level: Some("minecraft:overworld".into()),
-                entity_id: Some(0),
+                entity_id: None,
                 session: 0,
                 life: 0,
             }],

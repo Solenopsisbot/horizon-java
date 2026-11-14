@@ -166,24 +166,43 @@ pub(crate) fn server_value(marker: String) -> Value {
 /// player (`events::FacadePlayer`), so one key is one object. The entity id,
 /// when the façade knows it, ends the key: `Entity.equals`/`hashCode` go by it.
 /// It is the same for every life of one session, so it splits no object.
+///
+/// A player the façade does not list is `game/player/<uuid>`: which session's
+/// object it is is unknown, so the key is not canonical and its `equals` and
+/// `hashCode` are counted (#228's review: a made-up session `0` was silently
+/// one object for every unlisted session).
 fn player_key(uuid: u128, player: Option<&crate::events::FacadePlayer>, life: u32) -> String {
-    let session = player.map_or(0, |player| player.session);
-    match player.and_then(|player| player.entity_id) {
+    let Some(player) = player else {
+        return format!("game/player/{uuid:032x}");
+    };
+    let session = player.session;
+    match player.entity_id {
         Some(id) => format!("game/player/{uuid:032x}/{session}.{life}/{id}"),
         None => format!("game/player/{uuid:032x}/{session}.{life}"),
     }
 }
 
-/// The façade's player `uuid`, if it lists them.
-fn facade_player(
+/// The façade's player `uuid`, if it lists them: online, or leaving in this
+/// firing (`EventFacade::departed`).
+pub(crate) fn facade_player(
     facade: &crate::events::EventFacade,
     uuid: u128,
 ) -> Option<&crate::events::FacadePlayer> {
-    facade.players.iter().find(|player| player.uuid == uuid)
+    facade
+        .players
+        .iter()
+        .chain(&facade.departed)
+        .find(|player| player.uuid == uuid)
+}
+
+/// Whether two equal entity keys are one object: every key but an unlisted
+/// player's (no session) names one.
+pub(crate) fn entity_canonical(key: &str) -> bool {
+    player_parts(key).is_none_or(|(_, session)| session.is_some())
 }
 
 /// The player `uuid` as the firing's façade knows them (session, life and id;
-/// `0.0` for a player the façade does not list).
+/// a non-canonical key for a player the façade does not list).
 pub(crate) fn player_value(facade: &crate::events::EventFacade, uuid: u128) -> Value {
     let player = facade_player(facade, uuid);
     server_value(player_key(
@@ -211,6 +230,7 @@ pub(crate) fn entity_value(facade: &crate::events::EventFacade, id: i32) -> Valu
     match facade
         .players
         .iter()
+        .chain(&facade.departed)
         .find(|player| player.entity_id == Some(id))
     {
         Some(player) => player_value(facade, player.uuid),
@@ -280,8 +300,18 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         })
         .unwrap_or(key);
     match (key.starts_with("client/"), family) {
-        (false, "player") => &["net/minecraft/server/level/ServerPlayer"],
-        (false, "original-player") => &["net/minecraft/world/entity/player/Player"],
+        // Vanilla's fixed supertypes are sure too (#228's review).
+        (false, "player") => &[
+            "net/minecraft/server/level/ServerPlayer",
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
+        (false, "original-player") => &[
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
         (false, "entity") => &["net/minecraft/world/entity/Entity"],
         (false, "level") => &["net/minecraft/server/level/ServerLevel"],
         (false, "server") => &["net/minecraft/server/MinecraftServer"],
@@ -451,9 +481,13 @@ mod tests {
         assert_ne!(same(&pos(), &pos()), Some(true));
         let damage = || value("game/damage/minecraft:generic").unwrap();
         assert_ne!(same(&damage(), &damage()), Some(true));
+        // A server player is surely a `ServerPlayer` and every vanilla supertype.
         assert_eq!(
-            declared_types("game/player/2a"),
-            &["net/minecraft/server/level/ServerPlayer"]
+            declared_types("game/player/2a")[..2],
+            [
+                "net/minecraft/server/level/ServerPlayer",
+                "net/minecraft/world/entity/player/Player"
+            ]
         );
         assert_eq!(
             declared_types("block-pos/1,2,3"),
