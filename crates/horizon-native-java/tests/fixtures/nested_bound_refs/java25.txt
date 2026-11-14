@@ -1,0 +1,4 @@
+iterator=java.util.NoSuchElementException|java.util.NoSuchElementException|java.util.NoSuchElementException
+listIterator=java.util.NoSuchElementException|java.util.NoSuchElementException|java.util.NoSuchElementException
+checked=java.io.IOException:io probe|java.io.IOException:io probe|java.io.IOException:io probe|java.lang.Exception:checked|java.lang.Exception:checked
+nested=java.util.NoSuchElementException|java.util.NoSuchElementException|java.util.NoSuchElementException|=y|=z

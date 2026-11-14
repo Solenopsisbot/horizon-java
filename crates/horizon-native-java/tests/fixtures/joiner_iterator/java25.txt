@@ -1,0 +1,4 @@
+consumes=2,3|false|a-b
+failsFast=java.util.ConcurrentModificationException: null
+jarIterator=p0+p1+p2|false
+nullPart=java.lang.NullPointerException: null|truec

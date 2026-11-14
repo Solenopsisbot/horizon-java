@@ -2548,10 +2548,11 @@ pub trait Host {
         host_iterator::enumeration(host_iterator::EMPTY_ENUMERATION.to_owned())
     }
 
-    /// A new enumeration over `over` (`Collections.enumeration`, `Vector.elements()`). A host
-    /// that keeps none answers one whose members are counted.
-    fn new_enumeration(&mut self, _over: host_iterator::EnumerationOver) -> Value {
-        host_iterator::enumeration("enumeration/0".to_owned())
+    /// A new enumeration over `over` (`Collections.enumeration`, `Vector.elements()`); `None`
+    /// for a host that keeps none, whose caller counts the call (a shared placeholder key
+    /// would make two of them one object, #225).
+    fn new_enumeration(&mut self, _over: host_iterator::EnumerationOver) -> Option<Value> {
+        None
     }
 
     /// What the enumeration `marker` reads, when this host made it with [`Self::new_enumeration`].
@@ -4910,11 +4911,11 @@ impl Host for StdHost {
         host_iterator::enumeration(host_iterator::EMPTY_ENUMERATION.to_owned())
     }
 
-    fn new_enumeration(&mut self, over: host_iterator::EnumerationOver) -> Value {
+    fn new_enumeration(&mut self, over: host_iterator::EnumerationOver) -> Option<Value> {
         let marker = format!("enumeration/{}", self.next_iterator);
         self.next_iterator = self.next_iterator.saturating_add(1);
         self.enumerations.insert(marker.clone(), over);
-        host_iterator::enumeration(marker)
+        Some(host_iterator::enumeration(marker))
     }
 
     fn enumeration_over(&self, marker: &str) -> Option<host_iterator::EnumerationOver> {
@@ -20834,6 +20835,17 @@ impl<H: Host> Runtime<'_, H> {
             };
             let (receiver, mut rest) = (receiver.clone(), rest.to_vec());
             method_ref_null_check(&callback.target.descriptor, Some(&receiver), &rest)?;
+            // A bound reference to a functional interface's method on a
+            // callback (`Supplier n = it::next; n::get`, any depth): the
+            // receiver's own body, exactly what the direct call `n.get()`
+            // runs, its exception included (#224). The host has no body for
+            // `Supplier.get` and answered it neutrally.
+            if is_jdk_functional_method(&callback.target)
+                && let Some(value) = self.invoke_callback(&receiver, &rest)?
+            {
+                return box_callback_result(self, &receiver, value, &callback.target.descriptor)
+                    .map(Some);
+            }
             jdk_model::unbox_for_descriptor(&callback.target.descriptor, &mut rest);
             // `Collection::size` on a jar object runs the object's own body
             // (`jvm_dispatch.rs`); a JDK body over its data is counted
@@ -26072,6 +26084,14 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         // A host handle's `toString`/`hashCode`/`equals`: its
                         // kind's row, held jar objects run here (`host_ref.rs`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_joiner_iterator(&r, op, receiver.as_ref(), &args)
+                    ) {
+                        // `Joiner.join(Iterator)` walks the iterator, a jar's own too, through
+                        // its own `hasNext`/`next` (`host_iterator.rs`), before a jar operand
+                        // would be counted.
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
