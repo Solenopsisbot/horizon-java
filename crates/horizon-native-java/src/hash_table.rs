@@ -115,7 +115,8 @@ pub struct HashTable {
     /// table last mirrored the host's list exactly (the same keys and, when
     /// [`Self::ordered`], in this table's order): while the generation is
     /// still that, the reconciliation (`Runtime::resync_hash_table`) has
-    /// nothing to do.
+    /// nothing to do. Every structural change clears it; the paths that
+    /// change the list and the table together set it again.
     pub(crate) synced: Option<u64>,
     /// Moves on every structural change (insert, remove, resize, clear), as
     /// a `HashMap`'s `modCount` does for a function run inside `compute`.
@@ -262,6 +263,7 @@ impl HashTable {
     /// `HashMap.resize()`.
     fn resize(&mut self) {
         self.version += 1;
+        self.synced = None;
         let old_cap = self.bins.len();
         let old_thr = self.threshold;
         let mut new_thr = 0_i64;
@@ -349,6 +351,7 @@ impl HashTable {
         let marker = collection_item_marker(key);
         let size = self.len() as i64;
         self.version += 1;
+        self.synced = None;
         self.index.insert(marker.clone(), hash.map(spread));
         if self.bins.is_empty() {
             self.resize();
@@ -379,6 +382,7 @@ impl HashTable {
     pub(crate) fn insert_at_head(&mut self, key: &Value, hash: Option<i32>) {
         let marker = collection_item_marker(key);
         self.version += 1;
+        self.synced = None;
         self.index.insert(marker.clone(), hash.map(spread));
         if self.bins.is_empty() {
             self.resize();
@@ -409,6 +413,7 @@ impl HashTable {
             return;
         };
         self.version += 1;
+        self.synced = None;
         let Some(spread) = spread else {
             self.unplaced.remove(marker);
             return;
@@ -427,6 +432,7 @@ impl HashTable {
         self.unplaced.clear();
         self.index.clear();
         self.version += 1;
+        self.synced = None;
     }
 }
 
