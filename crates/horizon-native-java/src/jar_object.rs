@@ -28,9 +28,17 @@
 //! A key is never built from text a jar chose apart from the class name the
 //! class file declares, and no other separator is read back out of it.
 //!
-//! Not objects here: a handle-only class's text (an array, `[I#0`), and the
-//! host's other `#` texts (`…#immutable3`, `…#neutral12`: collections, P14;
-//! a member reference `owner#name`), whose suffix is not a number.
+//! Not objects here: a handle-only class's text (an array, `[I#0`) and a
+//! member reference `owner#name`, whose suffix is not a number.
+//!
+//! **Host-made collections** (#156 P14c) are objects too, of
+//! [`HostKind::Collection`]: an unmodelled call's neutral answer, `subList`,
+//! an unmodifiable view, `List.of`, a reversed view. Their keys are the text
+//! they used to be, `<JDK class>#neutral<n>`, `#immutable<n>` and
+//! `#reversed<n>` ([`collection_key`]), so the host's tables keep their rows,
+//! and they share the object row: the readers below answer for both kinds
+//! alike, as for a jar's own `new ArrayList()`. A `String` spelling such a
+//! key is a `String`.
 
 use crate::Value;
 use crate::host_ref::{HostKind, HostRef, Methods, instance_of_class};
@@ -46,6 +54,9 @@ pub(crate) fn handle(key: String) -> Value {
 /// only, and a `String` spelling one is no object. The kind is canonical, so
 /// this is the same object the key was read from.
 pub(crate) fn stored(key: &str) -> Value {
+    if collection_key(key).is_some() {
+        return collection(key.to_owned());
+    }
     handle(key.to_owned())
 }
 
@@ -55,27 +66,68 @@ pub(crate) fn stored(key: &str) -> Value {
 /// (`expect_ref` of one), never a jar's: no `Ref` is an object, so a key the
 /// runtime holds is an object's.
 pub(crate) fn stored_value(text: &str) -> Value {
-    if parse_key(text).is_some() {
+    if parse_key(text).is_some() || collection_key(text).is_some() {
         stored(text)
     } else {
         Value::Ref(Some(text.to_owned()))
     }
 }
 
-/// Whether `value` is an allocated object (a [`HostKind::JarObject`]).
+/// A host-made collection's handle for its key (`<class>#neutral<n>`,
+/// `<class>#immutable<n>`).
+pub(crate) fn collection(key: String) -> Value {
+    debug_assert!(
+        collection_key(&key).is_some(),
+        "{key:?} is no collection key"
+    );
+    Value::Host(HostRef::new(HostKind::Collection, key))
+}
+
+/// A host-made collection's key: `(class, n)` for `<class>#neutral<n>`,
+/// `<class>#immutable<n>` or a reversed view's `<class>#reversed<n>`, a JDK
+/// (or Guava) class with no `#`, `:`, space, `.`, `,` or `\\`. The host
+/// wrote it; a `String` spelled so is no collection.
+pub(crate) fn collection_key(text: &str) -> Option<(&str, &str)> {
+    let (class, rest) = text.split_once('#')?;
+    let number = rest
+        .strip_prefix("neutral")
+        .or_else(|| rest.strip_prefix("immutable"))
+        .or_else(|| rest.strip_prefix("reversed"))?;
+    (!class.is_empty()
+        && !class.contains([':', ' ', '.', ',', '\\'])
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit()))
+    .then_some((class, number))
+}
+
+/// `ClassRule::FromKey` of a host-made collection: the JDK class before the
+/// `#` (`java/util/ArrayList#neutral3` is an `ArrayList`).
+pub(crate) fn collection_class(key: &str) -> &str {
+    key.split_once('#').map_or(key, |(class, _)| class)
+}
+
+/// Whether `value` is an allocated object (a [`HostKind::JarObject`] or a
+/// host-made [`HostKind::Collection`]).
 pub(crate) fn is_object(value: &Value) -> bool {
     object_key(value).is_some()
 }
 
-/// Whether `value` is a `String` whose text spells an object's key (no
-/// object is text, so it is just that string).
+/// Whether `value` is a `String` whose text spells an object's key, a jar
+/// object's or a host-made collection's (no object is text, so it is just
+/// that string).
 pub(crate) fn spells_key(value: &Value) -> bool {
-    matches!(value, Value::Ref(Some(text)) if parse_key(text).is_some())
+    matches!(value, Value::Ref(Some(text)) if spells_key_text(text))
 }
 
-/// Whether `handle` is an allocated object.
+/// [`spells_key`] of a reference's text.
+pub(crate) fn spells_key_text(text: &str) -> bool {
+    parse_key(text).is_some() || collection_key(text).is_some()
+}
+
+/// Whether `handle` is an allocated object: a jar's (or a model's) `new`, or
+/// a collection the host made.
 pub(crate) fn is_object_handle(handle: &HostRef) -> bool {
-    handle.kind() == HostKind::JarObject
+    matches!(handle.kind(), HostKind::JarObject | HostKind::Collection)
 }
 
 /// `ClassRule::FromKey` of a jar object: the class before the allocation
@@ -180,7 +232,7 @@ pub(crate) fn object_key(value: &Value) -> Option<&str> {
 /// `String` spelling a key has none.
 pub(crate) fn instance_key(value: &Value) -> Option<&str> {
     object_key(value).or_else(|| match value {
-        Value::Ref(Some(text)) if parse_key(text).is_none() => Some(text.as_str()),
+        Value::Ref(Some(text)) if !spells_key_text(text) => Some(text.as_str()),
         _ => None,
     })
 }
@@ -189,14 +241,19 @@ pub(crate) fn instance_key(value: &Value) -> Option<&str> {
 /// object's key (it is no marker).
 fn ref_marker_class(value: &Value) -> Option<&str> {
     match value {
-        Value::Ref(Some(text)) if parse_key(text).is_none() => marker_class(text),
+        Value::Ref(Some(text)) if !spells_key_text(text) => marker_class(text),
         _ => None,
     }
 }
 
 /// The class of the object `value` is, `None` for any other value.
 pub(crate) fn object_class(value: &Value) -> Option<&str> {
-    key_class(object_key(value)?)
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::Collection => {
+            Some(collection_class(handle.key()))
+        }
+        _ => key_class(object_key(value)?),
+    }
 }
 
 /// [`object_class`] of a class in a package (`a/B`, not `B`): the
