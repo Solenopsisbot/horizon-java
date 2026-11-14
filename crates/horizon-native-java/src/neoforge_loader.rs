@@ -8,6 +8,7 @@
 //! seeded. A question outside that set is left to the rest of the dispatch
 //! chain, which still reports and refuses it.
 
+use crate::host_neoforge_loader as loader;
 use crate::host_path::FML_PATHS_CLASS;
 use crate::{
     AnnotationValue, Method, MethodRef, NativeJar, StdHost, Value, expect_ref, expect_string,
@@ -67,17 +68,10 @@ impl NativeJar {
         let Some(id) = self.mod_annotation_id(class) else {
             return args;
         };
-        // The version is the metadata's when the annotation names the jar's
-        // own mod, as `seed_host` seeds it; any other id is not described.
-        let version = if self.neoforge_id.as_deref() == Some(id) {
-            self.neoforge_version.as_deref().unwrap_or("unknown")
-        } else {
-            "unknown"
-        };
         for arg in &mut args {
             if matches!(arg, Value::Ref(Some(marker)) if marker == "Lnet/neoforged/fml/ModContainer;")
             {
-                *arg = Value::Ref(Some(format!("neoforge-mod-container/{id}/{version}")));
+                *arg = self.neoforge_container(id);
             }
             // The bus FML passes is that container's mod bus.
             if matches!(arg, Value::Ref(Some(marker)) if marker == "Lnet/neoforged/bus/api/IEventBus;")
@@ -86,6 +80,13 @@ impl NativeJar {
             }
         }
         args
+    }
+
+    /// Mod `id`'s one container (`host_neoforge_loader.rs`), as
+    /// [`StdHost::neoforge_container`] builds it from the same
+    /// `neoforge.mods.toml` (the running jar's, which `seed_host` copies).
+    pub(crate) fn neoforge_container(&self, id: &str) -> Value {
+        loader::container(id, is_javafml(self.resource_bytes.get(MODS_TOML), id))
     }
 
     /// The id a class's NeoForge `@Mod("id")` annotation names.
@@ -142,15 +143,13 @@ impl StdHost {
             ) => Some(Value::Ref(Some(
                 "net/minecraftforge/eventbus/api/IEventBus".into(),
             ))),
-            // `ModConfig.Type` is a six-constant enum the loader itself
-            // defines. A config registration passes it straight back to the
-            // loader, and a `getType() ==` comparison uses reference equality,
-            // so one stable marker per constant is the whole value.
+            // `ModConfig.Type`'s constants (and older NeoForge's `COMMON`
+            // and `SERVER`), one canonical handle each.
             (
                 "net/neoforged/fml/config/ModConfig$Type",
-                name @ ("CLIENT" | "SERVER" | "COMMON" | "STARTUP" | "LOCAL" | "SYNCED"),
+                name,
                 "Lnet/neoforged/fml/config/ModConfig$Type;",
-            ) => Some(Value::Ref(Some(format!("fml-config-type/{name}")))),
+            ) if loader::CONFIG_TYPE_NAMES.contains(&name) => Some(loader::config_type(name)),
             // The loader's config tracker. A jar reading it sees no config:
             // its three maps are empty rather than null (a null map is an NPE
             // in the port's getters). `registerConfig` keeps its own record
@@ -237,10 +236,8 @@ impl StdHost {
                 "()Lnet/minecraft/WorldVersion;",
             ) => Some(
                 self.game_version
-                    .as_ref()
-                    .map_or(Value::Ref(None), |version| {
-                        Value::Ref(Some(format!("world-version/{version}")))
-                    }),
+                    .as_deref()
+                    .map_or(Value::Ref(None), loader::world_version),
             ),
             _ => None,
         }
@@ -260,6 +257,9 @@ impl StdHost {
             let name = crate::host_path::fml_path_name(receiver)?;
             return fml_path_root(name).map(crate::path_value);
         }
+        if let Some(value) = self.neoforge_loader_handle(r, receiver) {
+            return Some(value);
+        }
         let marker = match receiver {
             Value::Ref(Some(marker)) => marker.as_str(),
             _ => return None,
@@ -274,40 +274,15 @@ impl StdHost {
             ("net/neoforged/api/distmarker/Dist", "toString", "()Ljava/lang/String;") => {
                 Some(Value::Ref(Some(enum_name(marker).to_owned())))
             }
-            // A `javafml` mod's container is an `FMLModContainer`, whose
-            // `getEventBus()` is that mod's bus.
+            // A container's bus when the receiver is no container (FML's
+            // own `getEventBus` is only ever reached on one): no mod's.
             (
                 "net/neoforged/fml/ModContainer"
                 | "net/minecraftforge/fml/ModContainer"
                 | FML_MOD_CONTAINER,
                 "getEventBus" | "getModEventBus",
                 "()Lnet/neoforged/bus/api/IEventBus;",
-            ) => Some(crate::neoforge_bus::mod_bus(
-                mod_container_parts(marker).map(|(id, _)| id),
-            )),
-            (
-                "net/neoforged/fml/ModContainer" | "net/minecraftforge/fml/ModContainer",
-                "getModInfo",
-                "()Lnet/neoforged/neoforgespi/language/IModInfo;",
-            ) => {
-                let (id, version) = mod_container_parts(marker)?;
-                Some(Value::Ref(Some(format!("mod-info/{id}/{version}"))))
-            }
-            (
-                "net/neoforged/neoforgespi/language/IModInfo"
-                | "net/neoforged/neoforgespi/language/IModInfo$ModVersion",
-                "getModId",
-                "()Ljava/lang/String;",
-            ) => Some(Value::Ref(Some(mod_info_parts(marker)?.0.to_owned()))),
-            (
-                "net/neoforged/neoforgespi/language/IModInfo"
-                | "net/neoforged/neoforgespi/language/IModInfo$ModVersion",
-                "getVersion",
-                "()Lorg/apache/maven/artifact/versioning/ArtifactVersion;",
-            ) => {
-                let (_, version) = mod_info_parts(marker)?;
-                Some(Value::Ref(Some(format!("artifact-version/{version}"))))
-            }
+            ) => Some(crate::neoforge_bus::mod_bus(None)),
             (
                 "org/apache/maven/artifact/versioning/ArtifactVersion",
                 "toString",
@@ -318,9 +293,6 @@ impl StdHost {
                     .unwrap_or(marker)
                     .to_owned(),
             ))),
-            ("net/minecraft/WorldVersion", "name" | "getName", "()Ljava/lang/String;") => {
-                Some(Value::Ref(Some(world_version(marker)?.to_owned())))
-            }
             (
                 "net/neoforged/fml/loading/FMLLoader",
                 "getLoadingModList",
@@ -341,32 +313,90 @@ impl StdHost {
             ) => {
                 let id = args.first().map(expect_string).unwrap_or_default();
                 Some(match self.neoforge_mod_version(id) {
-                    Some(_) => Value::Ref(Some(format!("mod-file-info/{id}"))),
+                    Some(_) => loader::mod_file_info(id),
                     None => Value::Ref(None),
                 })
             }
-            (
-                "net/neoforged/fml/loading/moddiscovery/ModFileInfo",
-                "versionString",
-                "()Ljava/lang/String;",
-            ) => {
-                let id = marker.strip_prefix("mod-file-info/")?;
-                Some(Value::Ref(Some(
-                    self.neoforge_mod_version(id)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                )))
-            }
-            // `registerConfig` is answered by the runtime's config model
-            // (`mod_config_register.rs`) for a spec it built; any other
-            // registration reaches the host and is counted.
-            (
-                "net/neoforged/fml/ModContainer",
-                "registerExtensionPoint",
-                "(Ljava/lang/Class;Lnet/neoforged/fml/IExtensionPoint;)V",
-            ) => Some(Value::Void),
             _ => None,
         }
+    }
+
+    /// Mod `id`'s one container: every call that hands one out (the `@Mod`
+    /// constructor, `getModContainerById`, `getMods`, a loading event's
+    /// `getContainer`) builds it here or in [`NativeJar::neoforge_container`],
+    /// from the same `neoforge.mods.toml`, so its key is the same.
+    pub(crate) fn neoforge_container(&self, id: &str) -> Value {
+        loader::container(id, is_javafml(self.resource_bytes.get(MODS_TOML), id))
+    }
+
+    /// The methods of the loader's handles (`host_neoforge_loader.rs`): a
+    /// container's bus, info and extension points, a mod info's id and
+    /// version, a file info's version, a config type's name and ordinal, a
+    /// world version's name.
+    fn neoforge_loader_handle(&mut self, r: &MethodRef, receiver: &Value) -> Option<Value> {
+        if let Some(id) = loader::container_id(receiver) {
+            return match (r.name.as_str(), r.descriptor.as_str()) {
+                // A `javafml` mod's container is an `FMLModContainer`, whose
+                // `getEventBus()` is that mod's bus.
+                ("getEventBus" | "getModEventBus", "()Lnet/neoforged/bus/api/IEventBus;") => {
+                    Some(crate::neoforge_bus::mod_bus(Some(&id)))
+                }
+                // `ModContainer.getModId` is final: the id. (`getNamespace`
+                // is the mods.toml's override, which the host does not read.)
+                ("getModId", "()Ljava/lang/String;") => Some(Value::Ref(Some(id))),
+                ("getModInfo", "()Lnet/neoforged/neoforgespi/language/IModInfo;") => {
+                    Some(loader::mod_info(&id))
+                }
+                // `registerConfig` is answered by the runtime's config model
+                // (`mod_config_register.rs`) for a spec it built; any other
+                // registration reaches the host and is counted.
+                (
+                    "registerExtensionPoint",
+                    "(Ljava/lang/Class;Lnet/neoforged/fml/IExtensionPoint;)V",
+                ) => Some(Value::Void),
+                _ => None,
+            };
+        }
+        if let Some(id) = loader::mod_info_id(receiver) {
+            return match (r.name.as_str(), r.descriptor.as_str()) {
+                ("getModId", "()Ljava/lang/String;") => Some(Value::Ref(Some(id))),
+                ("getVersion", "()Lorg/apache/maven/artifact/versioning/ArtifactVersion;") => {
+                    let version = self.neoforge_mod_version(&id).unwrap_or("unknown");
+                    Some(Value::Ref(Some(format!("artifact-version/{version}"))))
+                }
+                _ => None,
+            };
+        }
+        if let Some(id) = loader::mod_file_info_id(receiver) {
+            return (r.name == "versionString" && r.descriptor == "()Ljava/lang/String;").then(
+                || {
+                    Value::Ref(Some(
+                        self.neoforge_mod_version(&id)
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                    ))
+                },
+            );
+        }
+        if let Some(name) = loader::config_type_name(receiver) {
+            return match (r.name.as_str(), r.descriptor.as_str()) {
+                ("name", "()Ljava/lang/String;") => Some(Value::Ref(Some(name))),
+                ("ordinal", "()I") => loader::config_type_ordinal(receiver).map(Value::Int),
+                // `StringUtils.toLowerCase(name())`: `Locale.ROOT`, ASCII here.
+                ("extension", "()Ljava/lang/String;") => {
+                    Some(Value::Ref(Some(name.to_ascii_lowercase())))
+                }
+                _ => None,
+            };
+        }
+        if let Some(name) = loader::world_version_name(receiver) {
+            return matches!(
+                (r.name.as_str(), r.descriptor.as_str()),
+                ("name" | "getName", "()Ljava/lang/String;")
+            )
+            .then(|| Value::Ref(Some(name)));
+        }
+        None
     }
 
     /// Whether `id` is a mod container this host can answer, and its version.
@@ -390,36 +420,12 @@ impl StdHost {
 
 const FML_MOD_CONTAINER: &str = "net/neoforged/fml/javafmlmod/FMLModContainer";
 
-impl StdHost {
-    /// `instanceof` for a mod container marker. Every container is a
-    /// `ModContainer`; FML builds an `FMLModContainer` for each mod of a jar
-    /// whose `neoforge.mods.toml` says `modLoader="javafml"`. Only the running
-    /// jar's metadata is read here, so another mod's container answers no
-    /// (and the interpreter counts that answer where it cannot stand behind it).
-    pub(super) fn mod_container_instance_of(&self, marker: &str, wanted: &str) -> bool {
-        let Some((id, _)) = mod_container_parts(marker) else {
-            return false;
-        };
-        match wanted {
-            "net/neoforged/fml/ModContainer" => true,
-            FML_MOD_CONTAINER => self
-                .resource_bytes
-                .get("META-INF/neoforge.mods.toml")
-                .is_some_and(|bytes| {
-                    javafml_mod_ids(&String::from_utf8_lossy(bytes)).contains(&id)
-                }),
-            _ => false,
-        }
-    }
-}
+const MODS_TOML: &str = "META-INF/neoforge.mods.toml";
 
-/// Whether the runtime knows the whole type of a mod container marker:
-/// FancyModLoader 12.0.12's `MinecraftModLanguageProvider` builds the
-/// `minecraft` container as a `MinecraftModContainer` (a `ModContainer` and
-/// nothing more). Another mod's container depends on its language loader,
-/// which only the running jar's metadata tells.
-pub(crate) fn container_type_known(marker: &str) -> bool {
-    mod_container_parts(marker).is_some_and(|(id, _)| id == "minecraft")
+/// Whether `toml` (a `neoforge.mods.toml`) declares mod `id` under
+/// `modLoader="javafml"`: FML then builds an `FMLModContainer` for it.
+fn is_javafml(toml: Option<&Vec<u8>>, id: &str) -> bool {
+    toml.is_some_and(|bytes| javafml_mod_ids(&String::from_utf8_lossy(bytes)).contains(&id))
 }
 
 /// The `modId`s a `neoforge.mods.toml` declares when its top-level
@@ -451,18 +457,4 @@ fn javafml_mod_ids(text: &str) -> Vec<&str> {
 
 fn enum_name(marker: &str) -> &str {
     marker.rsplit('/').next().unwrap_or(marker)
-}
-
-fn mod_container_parts(marker: &str) -> Option<(&str, &str)> {
-    let rest = marker.strip_prefix("neoforge-mod-container/")?;
-    rest.split_once('/')
-}
-
-fn mod_info_parts(marker: &str) -> Option<(&str, &str)> {
-    let rest = marker.strip_prefix("mod-info/")?;
-    rest.split_once('/')
-}
-
-fn world_version(marker: &str) -> Option<&str> {
-    marker.strip_prefix("world-version/")
 }

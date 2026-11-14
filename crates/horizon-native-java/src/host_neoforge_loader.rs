@@ -46,9 +46,7 @@
 //!
 //! [`ClassRule::Unknown`]: crate::host_ref::ClassRule
 
-use crate::host_ref::{
-    ClassHierarchy, HostKind, HostRef, Methods, Nested, instance_of_class,
-};
+use crate::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, Nested, instance_of_class};
 use crate::{NativeError, Value};
 
 const MOD_CONTAINER: &str = "net/neoforged/fml/ModContainer";
@@ -101,6 +99,12 @@ pub(crate) fn container(id: &str, javafml: bool) -> Value {
         HostKind::NeoForgeModContainer,
         &[text(id), Value::Int(class)],
     ))
+}
+
+/// [`container`] for an embedding or a test that hands a jar its container
+/// (FML's own handle for mod `id`).
+pub fn neoforge_mod_container(id: &str, javafml: bool) -> Value {
+    container(id, javafml)
 }
 
 /// A container handle's mod id.
@@ -163,7 +167,10 @@ pub(crate) fn mod_info_types(_: &str) -> &'static [&'static str] {
 
 /// The `ModFileInfo` `getModFileById(id)` answered.
 pub(crate) fn mod_file_info(id: &str) -> Value {
-    Value::Host(HostRef::of_values(HostKind::NeoForgeModFileInfo, &[text(id)]))
+    Value::Host(HostRef::of_values(
+        HostKind::NeoForgeModFileInfo,
+        &[text(id)],
+    ))
 }
 
 /// The mod id a file info handle was looked up by.
@@ -181,7 +188,10 @@ pub(crate) fn mod_file_info_types(_: &str) -> &'static [&'static str] {
 
 /// The `ModConfig.Type` constant `name` (one of [`CONFIG_TYPE_NAMES`]).
 pub(crate) fn config_type(name: &str) -> Value {
-    Value::Host(HostRef::of_values(HostKind::NeoForgeConfigType, &[text(name)]))
+    Value::Host(HostRef::of_values(
+        HostKind::NeoForgeConfigType,
+        &[text(name)],
+    ))
 }
 
 /// A config type handle's constant name.
