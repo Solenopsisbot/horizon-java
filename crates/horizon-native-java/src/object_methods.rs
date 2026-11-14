@@ -829,6 +829,13 @@ impl<H: Host> Runtime<'_, H> {
         if crate::jar_object::spells_key(value) {
             return None;
         }
+        // A collection the host made is the class it was made as (Guava's
+        // `RegularImmutableList` too, #156 P14c).
+        if let Value::Host(handle) = value
+            && handle.kind() == crate::host_ref::HostKind::Collection
+        {
+            return Some(crate::jar_object::collection_class(handle.key()).to_owned());
+        }
         let marker = expect_ref(value)?;
         let (head, _) = marker
             .split_once(['#', '/'])
