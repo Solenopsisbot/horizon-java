@@ -1,0 +1,4 @@
+emptyIterators=TTTTTTTT|false
+freshIterators=FFF
+collectors=TTFF2
+immutableSet=2:ba|3:312|true

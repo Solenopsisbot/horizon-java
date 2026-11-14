@@ -1164,7 +1164,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                         None => container,
                     }));
                 }
-                let collector = expect_ref(&arg(0)).cloned().unwrap_or_default();
+                let collector = arg(0);
                 let Some(state) = self.begin_to_map(&collector)? else {
                     return Ok(None);
                 };
