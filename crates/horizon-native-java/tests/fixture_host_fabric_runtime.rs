@@ -101,6 +101,57 @@ fn run_with_output(test: &str, method: &str) -> (String, Vec<(String, usize)>, S
     (text, host.unknown_host_calls(), printed)
 }
 
+/// What `demo.Containers` answers on Fabric Loader 0.19.5, read from its
+/// bytecode (`javap -c`, #233 review), since a container can't run outside a
+/// loader: `ModContainerImpl.getRootPaths` returns the container's own
+/// `roots` field, and `V1ModMetadata.getAuthors`/`getLicense` return the
+/// fields `V1ModMetadataParser` filled with a new `ArrayList` per field per
+/// mod (plain `getfield`s). So each is one object per container or metadata,
+/// never another mod's, and keeps what is added to it.
+const CONTAINERS_ORACLE: &[(&str, &str)] = &[("roots", "TFFTT11"), ("metadata", "FTFT[MIT][]")];
+
+/// Two mods' containers and metadata keep their own collections: `a`'s root
+/// paths are still `a`'s after `b`'s are read, each getter answers the same
+/// object on every call and a different one per mod, and an `add` to one
+/// mod's license stays there (#233 review B1: the cache keyed every handle
+/// under its empty text, so all containers shared one list, overwritten on
+/// each call). Nothing is counted.
+#[test]
+fn each_mod_container_keeps_its_own_collections() {
+    let sources = sources();
+    let sources = sources
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = javac_fixture::Fixture::build("containers", &sources);
+    for (method, expected) in CONTAINERS_ORACLE {
+        let mut host = fixture.jar.seed_host(
+            StdHost::new()
+                .with_environment_type("SERVER")
+                .with_mod("moda", "1.0")
+                .with_mod("modb", "1.0"),
+        );
+        let answer = fixture.jar.invoke_method_with_args(
+            "demo/Containers",
+            method,
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        );
+        let text = match answer {
+            Ok(horizon_native_java::Value::Ref(Some(text))) => text,
+            other => format!("{other:?}"),
+        };
+        assert_eq!(&text, expected, "{method}: {:?}", host.unknown_host_calls());
+        assert!(
+            host.unknown_host_calls().is_empty(),
+            "{method}: {:?}",
+            host.unknown_host_calls()
+        );
+    }
+}
+
 /// The loader and its mapping resolver are one object each (`==`, `equals`,
 /// `IdentityHashMap`, host lists, `instanceof`); `getEnvironmentType()` is the
 /// `EnvType` constant itself; `EnvType`'s constants are one object each in

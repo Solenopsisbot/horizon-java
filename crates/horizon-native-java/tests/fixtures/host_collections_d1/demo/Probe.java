@@ -4,6 +4,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
@@ -64,9 +65,27 @@ public final class Probe {
             + b(env.equals(System.getenv())) + "|" + env.getClass().getName() + "|" + put;
     }
 
+    /**
+     * `System.getProperties()` is the run's one properties object: a `put` through it is what the next
+     * `getProperties()` and `System.getProperty` read (main re-snapshotted it on every call and dropped the write).
+     */
+    public static String properties() {
+        Properties p = System.getProperties();
+        p.put("d1.k", "v");
+        Object held = p.get("d1.k");
+        String through = System.getProperties().get("d1.k") + "," + p.get("d1.k") + "," + held + ","
+            + b(System.getProperties().containsKey("d1.k")) + b(p.size() == System.getProperties().size());
+        System.getProperties().put("d1.k2", "w");
+        p.put("d1.flag", "TRUE");
+        return through + "|" + System.getProperties().get("d1.k2") + "," + p.get("d1.k2") + "|"
+            + System.getProperty("d1.k") + "," + System.getProperty("d1.k2", "dflt") + ","
+            + System.getProperty("d1.none", "dflt") + "," + b(Boolean.getBoolean("d1.flag"));
+    }
+
     public static void main(String[] args) {
         System.out.println("mapViews=" + mapViews());
         System.out.println("emptyViews=" + emptyViews());
         System.out.println("system=" + system());
+        System.out.println("properties=" + properties());
     }
 }

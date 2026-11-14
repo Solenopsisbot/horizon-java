@@ -2996,7 +2996,7 @@ pub struct StdHost {
     /// The collections Java hands out as the same object on every call (a
     /// map's views, `System.getProperties()`), by what they are of: their
     /// keys (`StdHost::cached_collection`).
-    cached_collections: BTreeMap<String, String>,
+    cached_collections: BTreeMap<(String, String), String>,
     /// The JDK's own `List.of`/`List.copyOf` lists among the unmodifiable
     /// ones (`java_immutable.rs`); `list_equality.rs` runs their
     /// null-hostile `List12`/`ListN` rules.
@@ -3382,8 +3382,7 @@ impl StdHost {
     /// step). Its class stands in for the view's (`HashMap$KeySet`).
     fn map_view(&mut self, map: &Value, view: &str, kind: &str, values: Vec<Value>) -> Value {
         let source = expect_string(map).to_owned();
-        let cache = format!("{source}|{view}");
-        let made = self.cached_collection(cache, stand_in_class(kind), values);
+        let made = self.cached_collection(map, view, stand_in_class(kind), true, values);
         // A view copy whichever call site asked (a Gson `JsonObject` too):
         // its mutators are counted, it follows the map, and it has no hash
         // table of its own (`hash_collections.rs`).
@@ -3395,17 +3394,39 @@ impl StdHost {
         made
     }
 
-    /// The one collection Java answers for `cache` on every call (a map's
-    /// `keySet()`, `System.getProperties()`, a mod container's root paths):
-    /// the same object each time, holding `values` now. Made by
-    /// [`Self::new_collection`] on first use (or after the heap collected the
-    /// last one, when nothing can compare it any more).
-    fn cached_collection(&mut self, cache: String, class: &str, values: Vec<Value>) -> Value {
+    /// The one collection Java answers for `member` of `of` on every call (a
+    /// map's `keySet()`, `System.getProperties()`, a mod container's root
+    /// paths): the same object each time. Made by [`Self::new_collection`]
+    /// on first use (or after the heap collected the last one, when nothing
+    /// can compare it any more).
+    ///
+    /// `follow`: the object is a view whose contents are its source's, read
+    /// again as `values` on every call (a map's views; writes through one
+    /// are counted). Otherwise it owns its contents: made once from
+    /// `values`, then read and written only through itself (#233 review).
+    ///
+    /// Cached by `of`'s identity ([`cache_identity`]): a value with none (a
+    /// `null`) gets a new object each time, never one shared by every such
+    /// receiver.
+    fn cached_collection(
+        &mut self,
+        of: &Value,
+        member: &str,
+        class: &str,
+        follow: bool,
+        values: Vec<Value>,
+    ) -> Value {
+        let Some(identity) = cache_identity(of) else {
+            return self.new_collection(class, values);
+        };
+        let cache = (identity, member.to_owned());
         if let Some(marker) = self.cached_collections.get(&cache)
             && self.mutable_collections.contains_key(marker)
         {
             let marker = marker.clone();
-            self.mutable_collections.insert(marker.clone(), values);
+            if follow {
+                self.mutable_collections.insert(marker.clone(), values);
+            }
             return jar_object::collection(marker);
         }
         let made = self.new_collection(class, values);
@@ -3413,6 +3434,25 @@ impl StdHost {
             self.cached_collections.insert(cache, marker.clone());
         }
         made
+    }
+
+    /// The system property `key`: once `System.getProperties()` made its
+    /// object, that object is the run's properties (a `put` on it is what
+    /// `System.getProperty` reads, as on a JVM); before, the host's own.
+    fn system_property(&self, key: &str) -> Option<String> {
+        let cache = (SYSTEM_IDENTITY.to_owned(), "getProperties".to_owned());
+        match self
+            .cached_collections
+            .get(&cache)
+            .and_then(|marker| self.mutable_collections.get(marker))
+        {
+            Some(values) => values.as_chunks::<2>().0.iter().find_map(|pair| {
+                matches!(&pair[0], Value::Ref(Some(name)) if name == key)
+                    .then(|| expect_ref(&pair[1]).cloned())
+                    .flatten()
+            }),
+            None => self.properties.get(key).cloned(),
+        }
     }
 
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -6298,7 +6338,7 @@ impl Host for StdHost {
                     Value::Ref(Some(key)) => key,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(Value::Ref(self.properties.get(key).cloned()))
+                Ok(Value::Ref(self.system_property(key)))
             }
             // `Boolean.getBoolean(name)`: whether the system property `name`
             // is `true`, ignoring case; an unset property or null name is
@@ -6306,8 +6346,7 @@ impl Host for StdHost {
             ("java/lang/Boolean", "getBoolean", "(Ljava/lang/String;)Z") => {
                 let set = match Self::argument(r, args, 0)? {
                     Value::Ref(Some(key)) => self
-                        .properties
-                        .get(key)
+                        .system_property(key)
                         .is_some_and(|value| value.eq_ignore_ascii_case("true")),
                     _ => false,
                 };
@@ -6326,7 +6365,7 @@ impl Host for StdHost {
                     Value::Ref(value) => value.clone(),
                     _ => None,
                 };
-                Ok(Value::Ref(self.properties.get(key).cloned().or(default)))
+                Ok(Value::Ref(self.system_property(key).or(default)))
             }
             // One `Properties` object for the run, holding the properties
             // now (`System.getProperties() == System.getProperties()`). Its
@@ -6343,8 +6382,10 @@ impl Host for StdHost {
                     })
                     .collect::<Vec<_>>();
                 Ok(self.cached_collection(
-                    "System.getProperties".into(),
+                    &Value::Ref(Some(SYSTEM_IDENTITY.into())),
+                    "getProperties",
                     stand_in_class("map"),
+                    false,
                     values,
                 ))
             }
@@ -9783,8 +9824,10 @@ impl Host for StdHost {
                 let id = host_fabric_loader::container_id(receiver).unwrap_or_default();
                 let roots = vec![path_value(&format!("/horizon/mods/{id}"))];
                 Ok(self.cached_collection(
-                    format!("{}|getRootPaths", expect_string(receiver)),
+                    receiver,
+                    "getRootPaths",
                     stand_in_class("list"),
+                    false,
                     roots,
                 ))
             }
@@ -9826,8 +9869,10 @@ impl Host for StdHost {
                 "getProvides" | "getAuthors" | "getContributors" | "getLicense",
                 "()Ljava/util/Collection;",
             ) => Ok(self.cached_collection(
-                format!("{}|{}", expect_string(receiver), r.name),
+                receiver,
+                &r.name,
                 stand_in_class("list"),
+                false,
                 Vec::new(),
             )),
             (
@@ -9840,8 +9885,10 @@ impl Host for StdHost {
                 "getDependencies",
                 "()Ljava/util/Map;",
             ) => Ok(self.cached_collection(
-                format!("{}|getDependencies", expect_string(receiver)),
+                receiver,
+                "getDependencies",
                 stand_in_class("map"),
+                false,
                 Vec::new(),
             )),
             (
@@ -9937,8 +9984,10 @@ impl Host for StdHost {
                 let register = expect_ref(receiver).map_or("", String::as_str).to_owned();
                 let holders = self.register_holders(&register);
                 Ok(self.cached_collection(
-                    format!("{register}|getEntries"),
+                    receiver,
+                    "getEntries",
                     stand_in_class("list"),
+                    true,
                     holders,
                 ))
             }
@@ -11427,6 +11476,22 @@ impl StdHost {
             Some(answer) => Ok(answer),
             None => self.unknown_host_call(r),
         }
+    }
+}
+
+/// The identity [`StdHost::cached_collection`] keys `System`'s own objects
+/// under.
+const SYSTEM_IDENTITY: &str = "java/lang/System";
+
+/// What a cached collection is cached under: a handle's encoded kind and key
+/// (a mod container, a map), or a host marker's own text; `None` for a value
+/// with no identity of its own, which is never cached (#233 review: an empty
+/// text made every mod container share one list).
+fn cache_identity(value: &Value) -> Option<String> {
+    match value {
+        Value::Host(handle) => Some(handle.encode()),
+        Value::Ref(Some(text)) if !text.is_empty() => Some(text.clone()),
+        _ => None,
     }
 }
 

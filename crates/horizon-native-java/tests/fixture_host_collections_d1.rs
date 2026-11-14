@@ -34,13 +34,16 @@ fn expected(method: &str) -> &'static str {
 ///   map's entry set stays empty after another map is written (main answered
 ///   every empty view with one shared `set` literal);
 /// - `system`: `getProperties()` and `getenv()` are one object each;
-///   `getenv()` is a `Collections$UnmodifiableMap` whose `put` throws.
+///   `getenv()` is a `Collections$UnmodifiableMap` whose `put` throws;
+/// - `properties`: `getProperties()` keeps what is `put` through it, so the
+///   next `getProperties()`, `System.getProperty` and `Boolean.getBoolean`
+///   read it (#233 review: every call used to re-snapshot it).
 #[test]
 fn host_answered_collections_are_objects() {
     let fixture =
         javac_fixture::Fixture::build("host-collections-d1", &[("demo/Probe.java", PROBE)]);
     let mut failures = Vec::new();
-    for method in ["mapViews", "emptyViews", "system"] {
+    for method in ["mapViews", "emptyViews", "system", "properties"] {
         let mut host = fixture.jar.seed_host(horizon_native_java::StdHost::new());
         let answer = fixture.jar.invoke_method_with_args(
             "demo/Probe",

@@ -1,3 +1,4 @@
 mapViews=TTTFT|2222|[a, b];TTTFT|2222|[a, b];TTTFT|2222|[a, b]
 emptyViews=FFT011
 system=TTT|java.util.Collections$UnmodifiableMap|UOE
+properties=v,v,v,TT|w,w|v,w,dflt,T
