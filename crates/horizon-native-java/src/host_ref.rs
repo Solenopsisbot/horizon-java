@@ -242,6 +242,26 @@ pub enum HostKind {
     GameEvent,
     /// The event a NeoForge loading stage posts: key its class and container.
     LifecycleEvent,
+    /// cloth-config's `AutoConfig` holder of a config class (`host_config.rs`).
+    AutoConfigHolder,
+    /// YetAnotherConfigLib's `ConfigClassHandler` of a config class.
+    YaclHandler,
+    /// YetAnotherConfigLib's `ConfigClassHandler.Builder` of a config class.
+    YaclBuilder,
+    /// SuperMartijn642's configlib `IConfigBuilder`.
+    ConfiglibBuilder,
+    /// A value a configlib builder defined: key its index.
+    ConfiglibValue,
+    /// Mixin's `CallbackInfo` of one injection point (`host_mixin.rs`).
+    CallbackInfo,
+    /// The `ClassNode` stand-in a Mixin config plugin's apply hooks receive.
+    MixinClassNode,
+    /// The `IMixinInfo` stand-in a Mixin config plugin's apply hooks receive.
+    MixinInfo,
+    /// Mixin's `MixinEnvironment`.
+    MixinEnvironment,
+    /// A `MixinEnvironment.Side` constant: key its name.
+    MixinSide,
     /// An `ExecutorService`: key its allocation marker (`host_executors.rs`).
     Executor,
     /// A `Future` an executor answered: key its allocation marker.
@@ -829,6 +849,101 @@ const KINDS: &[KindInfo] = &[
         // A stage posts one event per container.
         canonical: always_canonical,
         methods: &crate::host_game_event::LIFECYCLE_EVENT,
+    },
+    KindInfo {
+        kind: HostKind::AutoConfigHolder,
+        tag: "acfg",
+        class: ClassRule::Unknown {
+            declared: crate::host_config::auto_config_types,
+        },
+        // One holder per config class: `AutoConfig` keeps them in a map.
+        canonical: always_canonical,
+        methods: &crate::host_config::CONFIG_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::YaclHandler,
+        tag: "yhnd",
+        class: ClassRule::Unknown {
+            declared: crate::host_config::yacl_handler_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_config::CONFIG_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::YaclBuilder,
+        tag: "ybld",
+        class: ClassRule::Unknown {
+            declared: crate::host_config::yacl_builder_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_config::CONFIG_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ConfiglibBuilder,
+        tag: "clbld",
+        class: ClassRule::Unknown {
+            declared: crate::host_config::configlib_builder_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_config::CONFIG_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ConfiglibValue,
+        tag: "clval",
+        class: ClassRule::Unknown {
+            declared: crate::host_config::configlib_value_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_config::CONFIG_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CallbackInfo,
+        tag: "mci",
+        class: ClassRule::Unknown {
+            declared: crate::host_mixin::callback_info_types,
+        },
+        // A new object per injector per call of the target; one key per
+        // injector.
+        canonical: never_canonical,
+        methods: &crate::host_mixin::CALLBACK_INFO_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MixinClassNode,
+        tag: "mcn",
+        class: ClassRule::Unknown {
+            declared: crate::host_mixin::class_node_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::host_mixin::MIXIN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MixinInfo,
+        tag: "mmi",
+        class: ClassRule::Unknown {
+            declared: crate::host_mixin::mixin_info_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::host_mixin::MIXIN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MixinEnvironment,
+        tag: "menv",
+        class: ClassRule::Unknown {
+            declared: crate::host_mixin::environment_types,
+        },
+        // One per phase: the current and the default may differ.
+        canonical: never_canonical,
+        methods: &crate::host_mixin::MIXIN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::MixinSide,
+        tag: "mside",
+        class: ClassRule::Unknown {
+            declared: crate::host_mixin::side_types,
+        },
+        // An enum constant.
+        canonical: always_canonical,
+        methods: &crate::host_mixin::SIDE_METHODS,
     },
     KindInfo {
         kind: HostKind::Executor,
