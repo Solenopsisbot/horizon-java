@@ -235,3 +235,7 @@ pub(crate) fn modelled_codec_types(key: &str) -> &'static [&'static str] {
         ]
     }
 }
+
+#[cfg(test)]
+#[path = "host_codec_tests.rs"]
+mod tests;
