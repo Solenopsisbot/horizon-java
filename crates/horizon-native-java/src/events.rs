@@ -1560,7 +1560,7 @@ impl StdHost {
                 ("getMaxPlayers", "I") => facade.max_players.map(Value::Int),
                 ("getServer", _) => Some(marker(SERVER.into())),
                 ("getPlayer", _) if r.descriptor.starts_with("(Ljava/util/UUID;)") => {
-                    let wanted = args.first().and_then(expect_ref)?.strip_prefix("uuid/")?;
+                    let wanted = crate::host_jdk_value::uuid_text(args.first()?)?;
                     Some(
                         facade
                             .players
@@ -2871,7 +2871,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             uuid,
-            Value::Ref(Some("uuid/01234567-89ab-cdef-fedc-ba9876543210".into()))
+            crate::host_jdk_value::uuid("01234567-89ab-cdef-fedc-ba9876543210")
         );
         let name = host.game_event_call(
             &call(

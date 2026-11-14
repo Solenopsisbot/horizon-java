@@ -399,6 +399,12 @@ pub enum HostKind {
     ReflectType,
     /// An `AnnotatedType`: key the type it annotates.
     AnnotatedType,
+    /// `java.util.UUID`: key its canonical text (`host_jdk_value.rs`).
+    Uuid,
+    /// `java.time.Duration`: key its nanoseconds (`host_jdk_value.rs`).
+    Duration,
+    /// `java.net.URI`: key its text (`host_jdk_value.rs`).
+    Uri,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1589,6 +1595,29 @@ const KINDS: &[KindInfo] = &[
         // Built afresh by every reflective call.
         canonical: never_canonical,
         methods: &crate::host_reflect_type::ANNOTATED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Uuid,
+        tag: "uuid",
+        class: ClassRule::Fixed("java/util/UUID"),
+        // Each `fromString`/`randomUUID` is a new object.
+        canonical: never_canonical,
+        methods: &crate::host_jdk_value::UUID_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Duration,
+        tag: "dur",
+        class: ClassRule::Fixed("java/time/Duration"),
+        // Every zero duration is `Duration.ZERO`.
+        canonical: crate::host_jdk_value::duration_canonical,
+        methods: &crate::host_jdk_value::DURATION_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Uri,
+        tag: "uri",
+        class: ClassRule::Fixed("java/net/URI"),
+        canonical: never_canonical,
+        methods: &crate::host_jdk_value::URI_METHODS,
     },
 ];
 
