@@ -424,7 +424,7 @@ impl StdHost {
     /// its version (the first mod's as `seed_host` seeded it when FML
     /// substitutes the jar's).
     fn own_mod_file(&self) -> Vec<(String, Option<String>)> {
-        let Some(toml) = self.resource_bytes.get(MODS_TOML) else {
+        let Some(toml) = mods_toml(&self.resource_bytes) else {
             return Vec::new();
         };
         let entries = mod_file_entries(toml, None);
@@ -456,7 +456,15 @@ impl StdHost {
         match id {
             "minecraft" => Some(("minecraft".into(), self.game_version.clone())),
             "neoforge" => Some(("neoforge".into(), None)),
-            _ => None,
+            // Named departure: a mod the run knows a version for but whose
+            // mods.toml the host cannot read (seeded by an embedding) is
+            // taken as a one-mod file of its own. A dependency's `unknown`
+            // stand-in is not: its file is counted.
+            _ => self
+                .mods
+                .get(id)
+                .filter(|version| *version != "unknown")
+                .map(|version| (id.to_owned(), Some(version.clone()))),
         }
     }
 
@@ -537,6 +545,16 @@ pub(crate) struct LinkedMod {
 const FML_MOD_CONTAINER: &str = "net/neoforged/fml/javafmlmod/FMLModContainer";
 
 const MODS_TOML: &str = "META-INF/neoforge.mods.toml";
+
+/// A jar's mod file list: `neoforge.mods.toml`, or an older NeoForge's or
+/// Forge's `mods.toml`.
+pub(crate) fn mods_toml(
+    resources: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Option<&Vec<u8>> {
+    resources
+        .get(MODS_TOML)
+        .or_else(|| resources.get("META-INF/mods.toml"))
+}
 
 /// Whether `toml` (a `neoforge.mods.toml`) declares mod `id` under
 /// `modLoader="javafml"`: FML then builds an `FMLModContainer` for it.

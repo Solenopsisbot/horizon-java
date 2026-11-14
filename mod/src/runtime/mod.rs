@@ -3323,7 +3323,7 @@ impl StdHost {
     /// `ModList.isLoaded`, declared as a dependency or not.
     fn record_loaded_mod(&mut self, jar: &NativeJar) {
         self.record_fabric_metadata(jar);
-        if let Some(toml) = jar.resource_bytes.get("META-INF/neoforge.mods.toml") {
+        if let Some(toml) = neoforge_loader::mods_toml(&jar.resource_bytes) {
             let entries = neoforge_loader::mod_file_entries(toml, jar.neoforge_version.as_deref());
             if let Some((first, first_version)) = entries.first().cloned() {
                 for (id, version) in entries {
@@ -36109,7 +36109,15 @@ mandatory = true
             name: "getMods".into(),
             descriptor: "()Ljava/util/List;".into(),
         };
+        // `getMods()` is counted (the host cannot know the whole game's
+        // list) and holds every mod it knows: `demo` and `neoforge` (no game
+        // version was seeded, so no `minecraft`).
         let mods_value = host.invoke_instance(&mods, &list, &[]).unwrap();
+        assert!(
+            host.unknown_host_calls()
+                .iter()
+                .any(|(call, _)| call == "net/neoforged/fml/ModList#getMods()Ljava/util/List;")
+        );
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -36121,7 +36129,7 @@ mandatory = true
                 &[],
             )
             .unwrap(),
-            Value::Int(1)
+            Value::Int(2)
         );
     }
 

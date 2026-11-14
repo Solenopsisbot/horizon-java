@@ -2922,7 +2922,10 @@ mod tests {
             descriptor: "(Ljava/lang/Object;)Z".into(),
         };
         assert_eq!(
-            loaded.host.invoke_instance(&equals, &version, &[again]).unwrap(),
+            loaded
+                .host
+                .invoke_instance(&equals, &version, &[again])
+                .unwrap(),
             Value::Int(1)
         );
         assert_eq!(
