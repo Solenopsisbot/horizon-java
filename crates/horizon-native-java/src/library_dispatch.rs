@@ -520,8 +520,7 @@ impl<H: Host> Runtime<'_, H> {
                         || self.object_is_instance_of(marker, wanted)
                         || self.host.host_instance_of(marker, wanted)
                         || crate::jdk_model::platform_instance_of(marker, wanted)
-                        || (wanted == "java/lang/Class"
-                            && crate::host_class::is_class(value, self.classes, &self.linked))
+                        || (wanted == "java/lang/Class" && crate::host_class::is_class(value))
                 })
     }
 

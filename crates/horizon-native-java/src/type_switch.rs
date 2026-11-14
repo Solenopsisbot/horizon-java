@@ -141,11 +141,8 @@ impl<H: Host> Runtime<'_, H> {
         if crate::jar_object::spells_key(value) {
             return false;
         }
-        // A class is its class marker (#156 P13 will make it a handle): the
-        // same answer the `instanceof` opcode gives (`class_marker_like`).
-        if class == "java/lang/Class"
-            && crate::host_class::is_class(value, self.classes, &self.linked)
-        {
+        // A `Class` is a handle, never text (#156 P13c).
+        if class == "java/lang/Class" && crate::host_class::is_class(value) {
             return true;
         }
         self.object_is_instance_of(marker, class)

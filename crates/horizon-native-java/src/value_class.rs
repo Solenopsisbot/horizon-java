@@ -57,11 +57,15 @@ pub(crate) fn string_instance_of(marker: &str, wanted: &str) -> bool {
 ///   separator-free class. An object's key, `<class>#<n>` or a host-made
 ///   collection's `<class>#neutral<n>`/`#immutable<n>`/`#reversed<n>`, is a handle,
 ///   never text (#156 P12b, P14c), so a text spelled like one is a `String`;
-/// - a callback or comparator: a leading `@`; an array class: a whole
-///   descriptor (`[I`, `[Ljava/lang/String;`);
-/// - a marker kind or class name: a `/` whose first segment has no `:`, `.`
-///   or space (`list/3`, `registry/minecraft:item`, `demo/Main`), which a
-///   resource id like `minecraft:block/stone` does not match.
+/// - a callback or comparator: a leading `@`;
+/// - a marker kind: a `/` whose first segment has no `:`, `.` or space
+///   (`list/3`, `registry/minecraft:item`), which a resource id like
+///   `minecraft:block/stone` does not match.
+///
+/// A class is a handle (`host_class.rs`, #156 P13c), so a text spelled like
+/// one is a `String`: an array descriptor (`[I`, `[Ljava/lang/String;`) and a
+/// text shaped like an internal class name ([`class_name_shaped`]:
+/// `java/lang/String`, `demo/Probe$Foo`) are no markers.
 ///
 /// Arrays, `ColorCollection`s and the command surface's objects are
 /// handles, never text (`host_array.rs`, `host_brigadier.rs`): a text spelled
@@ -77,7 +81,7 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     // The last separator-free markers (`guava-cache-builder`,
     // `mixin-environment`) became handles in #179 and #180, so a text with no
     // `/`, `#`, `@` or `:` is never a runtime marker any more.
-    if marker.starts_with('@') || host_array::is_array_descriptor(marker) {
+    if marker.starts_with('@') {
         return false;
     }
     // An object is a handle (`jar_object.rs`), a host-made collection too
@@ -97,10 +101,100 @@ pub(crate) fn is_plain_string(marker: &str) -> bool {
     if let Some((head, _)) = marker.split_once('/')
         && !head.is_empty()
         && !head.contains([':', '.', ' '])
+        && !class_name_shaped(marker)
     {
         return false;
     }
     true
+}
+
+/// The first segment of the runtime's own `word/rest` markers that a class
+/// name's could be: lowercase words a package might be named, which the
+/// runtime writes ahead of a capitalized segment (`component/Hello`,
+/// `enum/…`, `game/…`). A hyphenated kind (`map-entry/`) is no package name,
+/// so it needs no entry. Until #156 P17 retires these markers, a text with one
+/// of these heads keeps reading as the marker.
+const MARKER_HEADS: &[&str] = &[
+    "annotation",
+    "array",
+    "attachments",
+    "block",
+    "brigadier",
+    "builder",
+    "cancelled",
+    "capability",
+    "charset",
+    "classloader",
+    "client",
+    "codec",
+    "collector",
+    "component",
+    "compound",
+    "computed",
+    "contains",
+    "deferred",
+    "direction",
+    "dist",
+    "duration",
+    "enum",
+    "event",
+    "file",
+    "game",
+    "handler",
+    "holder",
+    "identifier",
+    "iterator",
+    "life",
+    "linked",
+    "list",
+    "logger",
+    "made",
+    "map",
+    "mixin",
+    "module",
+    "null",
+    "object",
+    "optional",
+    "path",
+    "payload",
+    "rarity",
+    "recipe",
+    "registered",
+    "registry",
+    "runtime",
+    "set",
+    "stack",
+    "stream",
+    "thread",
+    "tick",
+    "token",
+    "type",
+    "typed",
+    "typetoken",
+    "uuid",
+];
+
+/// Whether `text` is shaped like a class's internal name: package segments
+/// that are lowercase Java identifiers, then a class name that starts with an
+/// uppercase letter or `$` (`java/lang/String`, `demo/Probe$Foo`,
+/// `net/minecraft/world/item/Item`), under no [`MARKER_HEADS`] head. A
+/// `Class` is a handle (#156 P13c), so such a text is a `String`.
+pub(crate) fn class_name_shaped(text: &str) -> bool {
+    let Some((package, class)) = text.rsplit_once('/') else {
+        return false;
+    };
+    let identifier = |segment: &str, first: fn(char) -> bool| {
+        segment.chars().next().is_some_and(first)
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    };
+    let head = package.split('/').next().unwrap_or(package);
+    !MARKER_HEADS.contains(&head)
+        && package
+            .split('/')
+            .all(|segment| identifier(segment, |c| c.is_ascii_lowercase()))
+        && identifier(class, |c| c.is_ascii_uppercase() || c == '$')
 }
 
 /// The class marker of an array whose elements are `component`: the JVM's

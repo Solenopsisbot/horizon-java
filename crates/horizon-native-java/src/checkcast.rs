@@ -159,14 +159,10 @@ impl<H: Host> Runtime<'_, H> {
             return Err(class_cast_exception("java/lang/String", target));
         }
         // A reference's text cast to a reflective `Type` shape: no text is a
-        // `ParameterizedType`, `TypeVariable`, `WildcardType` or
-        // `GenericArrayType` (those are handles, `host_reflect_type.rs`), and
-        // a `String` is no `Type`. A plain string throws Java's CCE; a host
-        // marker, or a text that may be a `Class` cast to a shape, is
-        // counted (the exception's class is not known). A class-like text
-        // cast to `Type` passes, as before: a `Class` is a `Type`, and
-        // `(Type) field.getGenericType()` of a plain field is one; telling it
-        // from a `String` spelled like a class is #156 P13's.
+        // `Type` (types and classes are handles, `host_reflect_type.rs`,
+        // `host_class.rs`). A plain string, however it is spelled, throws
+        // Java's CCE (#156 P13c); a host marker is counted (the exception's
+        // class is not known).
         if let Value::Ref(Some(text)) = value
             && matches!(
                 target,
@@ -177,11 +173,7 @@ impl<H: Host> Runtime<'_, H> {
                     | "java/lang/reflect/Type"
             )
         {
-            let maybe_class = crate::class_marker_like(text, self.classes, &self.linked);
-            if maybe_class && target == "java/lang/reflect/Type" {
-                return Ok(());
-            }
-            if crate::value_class::is_plain_string(text) && !maybe_class {
+            if crate::value_class::is_plain_string(text) {
                 return Err(class_cast_exception("java/lang/String", target));
             }
             return self.count_cast(value, target);

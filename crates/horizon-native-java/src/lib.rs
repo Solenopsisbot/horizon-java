@@ -5805,17 +5805,6 @@ impl Host for StdHost {
                     None => Value::Ref(None),
                 })
             }
-            // A `Class` against class-marker text of its name, until #156 P13c
-            // (`host_class.rs`): counted, the old answer kept.
-            ("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z")
-                if host_class::handle_against_same_text(
-                    Self::argument(r, args, 0)?,
-                    Self::argument(r, args, 1)?,
-                ) =>
-            {
-                self.unknown_host_call(r)?;
-                Ok(Value::Int(1))
-            }
             ("java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z") => Ok(
                 Value::Int((Self::argument(r, args, 0)? == Self::argument(r, args, 1)?) as i32),
             ),
@@ -6381,18 +6370,6 @@ impl Host for StdHost {
         self.record(r, Some(receiver), args);
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
-        }
-        // `equals` between a `Class` and class-marker text of its name (either
-        // side the receiver), until #156 P13c (`host_class.rs`): counted, the
-        // old answer (equal markers) kept.
-        if r.name == "equals"
-            && r.descriptor == "(Ljava/lang/Object;)Z"
-            && args
-                .first()
-                .is_some_and(|other| host_class::handle_against_same_text(receiver, other))
-        {
-            self.unknown_host_call(r)?;
-            return Ok(Value::Int(1));
         }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
@@ -9984,9 +9961,6 @@ fn expect_ref(value: &Value) -> Option<&String> {
     match value {
         Value::Ref(value) => value.as_ref(),
         Value::Host(handle) if jar_object::is_object_handle(handle) => Some(handle.key_text()),
-        // A `Class` reads as the class marker it was until #156 P13c
-        // (`host_class.rs`), for the readers not yet moved to `class_name`.
-        Value::Host(handle) if handle.kind() == HostKind::Class => Some(handle.key_text()),
         _ => None,
     }
 }
@@ -12617,54 +12591,9 @@ fn generic_type_value(value: &GenericType) -> Value {
     host_reflect_type::type_value(value)
 }
 
-/// The node a `Type` value (a type handle or a class marker) names.
+/// The node a `Type` value (a type handle or a `Class`) names.
 fn generic_type_marker(value: &Value) -> Option<GenericType> {
     host_reflect_type::type_node(value)
-}
-
-/// Whether a marker is one of the class markers the interpreter hands out.
-///
-/// Class values are deliberately ordinary marker strings (so `String.class`
-/// and a field's erased type compare equal), which leaves `instanceof Class`
-/// without a runtime tag. A jar's own classes are in `classes`; a JDK or game
-/// class is a slash-qualified name; and the interpreter's other marker
-/// namespaces (`@fn`, `list/`, `type/`, ...) are not classes.
-fn class_marker_like(
-    marker: &str,
-    classes: &BTreeMap<String, ClassFile>,
-    linked: &LinkedClassTable,
-) -> bool {
-    if classes.contains_key(marker) || linked.contains_key(marker) {
-        return true;
-    }
-    if matches!(
-        marker,
-        "boolean" | "byte" | "char" | "double" | "float" | "int" | "long" | "short" | "void"
-    ) || marker.starts_with('[')
-    {
-        return true;
-    }
-    const NON_CLASS_PREFIXES: [&str; 12] = [
-        "@",
-        "array/",
-        "capability/",
-        "enum/",
-        "fabric-",
-        "item-handler/",
-        "list",
-        "map",
-        "number-format/",
-        "reflect-",
-        "resource-",
-        "type/",
-    ];
-    if NON_CLASS_PREFIXES
-        .iter()
-        .any(|prefix| marker.starts_with(prefix))
-    {
-        return false;
-    }
-    marker.contains('/')
 }
 
 /// The name `Type.getTypeName` reports. It mirrors {@link Class#getName} for
@@ -21633,12 +21562,6 @@ impl<H: Host> Runtime<'_, H> {
         {
             let receiver = receiver.unwrap_or(&Value::Ref(None));
             let other = StdHost::argument(r, args, 0)?;
-            // A `Class` against class-marker text of its name, until #156
-            // P13c (`host_class.rs`): counted, the old answer kept.
-            if host_class::handle_against_same_text(receiver, other) {
-                self.host.unknown_operand_call(r)?;
-                return Ok(Some(Value::Int(1)));
-            }
             return Ok(Some(Value::Int(
                 (value_marker(receiver) == value_marker(other)) as i32,
             )));
@@ -21714,34 +21637,15 @@ impl<H: Host> Runtime<'_, H> {
                         .filter(|marker| !marker.is_empty())
                         .map(|marker| Value::Ref(Some(class_type_display(marker)))));
                 }
-                // `Class.equals` is identity, and one class has one marker
-                // (#156 P13 makes it a handle): another class's marker, a type
-                // handle (no `Class`) or `null` is another object. The same
-                // spelling may be that `Class` or a `String` spelled like it
-                // (text until P13): counted, never `true` from the text.
+                // `Class.equals` is identity, and one name is one `Class`
+                // (#156 P13): another class, a type handle, a `String` (however
+                // it is spelled) or `null` is another object.
                 if r.name == "equals"
                     && r.descriptor == "(Ljava/lang/Object;)Z"
-                    && let Some(receiver) = receiver.filter(|receiver| {
-                        host_class::is_class(receiver, self.classes, &self.linked)
-                    })
                     && let Some(marker) = marker
                 {
-                    let other = args.first().unwrap_or(&Value::Ref(None));
-                    return Ok(match other {
-                        other if host_class::is_class(other, self.classes, &self.linked) => {
-                            let both_handles =
-                                matches!((receiver, other), (Value::Host(_), Value::Host(_)));
-                            match host_class::class_name(other) {
-                                Some(name) if name != marker => Some(Value::Int(0)),
-                                // Two `Class` handles of one name: one object.
-                                _ if both_handles => Some(Value::Int(1)),
-                                _ => None,
-                            }
-                        }
-                        Value::Ref(None) | Value::Host(_) => Some(Value::Int(0)),
-                        // A string or a jar object: no class marker.
-                        _ => None,
-                    });
+                    let other = args.first().and_then(host_class::class_name);
+                    return Ok(Some(Value::Int(i32::from(other == Some(marker)))));
                 }
                 return Ok(None);
             };
@@ -25576,8 +25480,7 @@ impl<H: Host> Runtime<'_, H> {
                                     || self.object_is_instance_of(marker, &wanted)
                                     || self.host.host_instance_of(marker, &wanted)
                                     || jdk_model::platform_instance_of(marker, &wanted)
-                                    || (wanted == "java/lang/Class"
-                                        && host_class::is_class(&value, self.classes, &self.linked))
+                                    || (wanted == "java/lang/Class" && host_class::is_class(&value))
                             });
                     // A `false` no model can stand behind is counted
                     // (`checkcast.rs`), and the host's answer is the result.
