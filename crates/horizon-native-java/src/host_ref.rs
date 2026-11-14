@@ -94,7 +94,9 @@ use crate::{NativeError, Value};
 #[derive(Clone)]
 pub struct HostRef {
     kind: HostKind,
-    key: Arc<str>,
+    /// A `String` (not `str`) so that a jar object's key reads back as the
+    /// `&String` the text readers take (`expect_ref`, [`Self::key_text`]).
+    key: Arc<String>,
     origin: u64,
 }
 
@@ -372,6 +374,13 @@ pub enum HostKind {
     FabricPayloadTypes,
     /// A `ResourceLoader`: key its `PackType`.
     FabricResourceLoader,
+    /// An object `new` (or a model) allocated: key `class#n`
+    /// (`jar_object.rs`), one key per allocation.
+    JarObject,
+    /// A chat component (`MutableComponent`): key a serial per allocation, then its vanilla
+    /// JSON, keys sorted
+    /// (`host_component.rs`).
+    Component,
     /// A `java.lang.reflect.Type` that is no class (`ParameterizedType`,
     /// `TypeVariable`, `WildcardType`, `GenericArrayType`): key the node
     /// (`host_reflect_type.rs`).
@@ -435,6 +444,13 @@ pub(crate) trait Nested {
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError>;
     /// `String.valueOf(value)`.
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError>;
+    /// The vanilla JSON a chat component holds now (its host's state,
+    /// `host_component.rs`); `None` where this context cannot read the
+    /// host's table (the caller counts).
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
 }
 
 /// `toString()` of a handle.
@@ -565,6 +581,10 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::FabricEnvType,
         &crate::host_fabric_runtime::ENV_TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::Component,
+        &crate::host_component::COMPONENT_CLASS_SIDE,
     ),
 ];
 
@@ -1482,6 +1502,22 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::host_fabric_runtime::OBJECT_METHODS,
     },
     KindInfo {
+        kind: HostKind::JarObject,
+        tag: "obj",
+        class: ClassRule::FromKey(crate::jar_object::class_of_key),
+        // `Runtime::new_object` numbers every allocation once.
+        canonical: always_canonical,
+        methods: &crate::jar_object::JAR_OBJECT,
+    },
+    KindInfo {
+        kind: HostKind::Component,
+        tag: "comp",
+        class: ClassRule::FromKey(crate::host_component::component_class),
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_component::COMPONENT_METHODS,
+    },
+    KindInfo {
         kind: HostKind::ReflectType,
         tag: "rtyp",
         class: ClassRule::Unknown {
@@ -1587,10 +1623,10 @@ impl HostKind {
 impl HostRef {
     /// A handle with `key` as it is (a number, a name). A key that holds
     /// values is built with [`Self::of_values`].
-    pub(crate) fn new(kind: HostKind, key: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn new(kind: HostKind, key: impl Into<String>) -> Self {
         Self {
             kind,
-            key: key.into(),
+            key: Arc::new(key.into()),
             origin: NEXT_ORIGIN.fetch_add(1, AtomicOrdering::Relaxed),
         }
     }
@@ -1624,6 +1660,11 @@ impl HostRef {
     }
 
     pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// [`Self::key`] as the `&String` a text reader takes.
+    pub(crate) fn key_text(&self) -> &String {
         &self.key
     }
 

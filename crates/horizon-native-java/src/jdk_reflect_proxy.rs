@@ -287,7 +287,8 @@ impl<H: Host> Runtime<'_, H> {
             .get(&proxy_field(marker, "h"))
             .cloned()
             .unwrap_or(Value::Ref(None));
-        let call = [Value::Ref(Some(marker.to_owned())), method, arguments];
+        // The proxy object itself (`jar_object.rs`).
+        let call = [crate::jar_object::stored_value(marker), method, arguments];
         let answer = self.call_invocation_handler(&handler, &call)?;
         let result = return_desc(&r.descriptor);
         Ok(match result {

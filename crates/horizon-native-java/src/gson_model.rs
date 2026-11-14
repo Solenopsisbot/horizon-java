@@ -528,7 +528,7 @@ impl<H: Host> Runtime<'_, H> {
         };
         // Every fluent method answers the receiver, so the chain stays on the
         // builder the constructor made, exactly as Gson's `return this` does.
-        let answer = || Ok(Some(Value::Ref(Some(marker.clone()))));
+        let answer = || Ok(Some(crate::jar_object::stored_value(&marker)));
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("<init>", "()V") => {
                 self.set_gson_style(&marker, GsonStyle::default());
@@ -799,7 +799,7 @@ impl<H: Host> Runtime<'_, H> {
             Value::Ref(None) | Value::Void => Some("null".to_owned()),
             // A host model's object (`Optional`): Gson reflects its private
             // fields, which JDK 25's module system refuses; not answered.
-            Value::Host(_) => None,
+            Value::Host(handle) if !crate::jar_object::is_object_handle(handle) => None,
             // A boxed number or boolean is a JSON number or literal; a
             // `Character` is a one-character string.
             Value::Boxed(boxed @ Boxed::Character(_)) => {
@@ -837,7 +837,9 @@ impl<H: Host> Runtime<'_, H> {
                     });
                 }
             }
-            Value::Ref(Some(marker)) => {
+            // A marker, or an object by its key (`jar_object.rs`).
+            Value::Ref(Some(_)) | Value::Host(_) => {
+                let marker = expect_ref(value).map_or("", String::as_str);
                 // A jar enum constant serializes as its name.
                 if let Some(name) = marker
                     .strip_prefix("enum/")
@@ -951,9 +953,7 @@ impl<H: Host> Runtime<'_, H> {
                 descriptor: descriptor.clone(),
             };
             let value = if access & 0x0008 != 0 {
-                self.static_fields
-                    .get(&Self::static_field_key(&field))
-                    .cloned()
+                self.stored_static(&field)?
             } else {
                 self.fields
                     .get(&format!("{marker}|{declaring}#{name}{descriptor}"))

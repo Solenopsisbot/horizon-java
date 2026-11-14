@@ -128,7 +128,8 @@ impl<H: Host> Runtime<'_, H> {
         let mut class = class.to_owned();
         let mut kind = table_kind_of(&class);
         if kind.is_none() {
-            crate::runtime::jar_object::key_class(marker)?;
+            // Only an object of a jar class extending one.
+            crate::runtime::jar_object::object_key(value)?;
             for _ in 0..MAX_SUPERCLASS_WALK {
                 match self.class(&class) {
                     Some(file) => class = file.super_name.clone(),
@@ -228,6 +229,30 @@ impl<H: Host> Runtime<'_, H> {
         key: &Value,
         hash: Option<i32>,
     ) -> Result<Lookup, NativeError> {
+        self.table_lookup_with(table, key, hash, false)
+    }
+
+    /// [`Self::table_lookup`] for a member that only reads or removes
+    /// (`get`, `containsKey`, `contains`, `remove`): the same object stored
+    /// under the hash it had before it changed is a miss, as in the JDK. An
+    /// insert keeps it unknown instead (the host's list holds one entry per
+    /// object, and the JDK would add a second node).
+    pub(crate) fn table_lookup_read(
+        &mut self,
+        table: &HashTable,
+        key: &Value,
+        hash: Option<i32>,
+    ) -> Result<Lookup, NativeError> {
+        self.table_lookup_with(table, key, hash, true)
+    }
+
+    fn table_lookup_with(
+        &mut self,
+        table: &HashTable,
+        key: &Value,
+        hash: Option<i32>,
+        displaced_misses: bool,
+    ) -> Result<Lookup, NativeError> {
         let marker = collection_item_marker(key);
         let Some(hash) = hash else {
             // An identity-hashed (or unhashable) key. With `Object.equals`
@@ -252,6 +277,21 @@ impl<H: Host> Runtime<'_, H> {
             // equal key never a match by itself; one the row cannot decide
             // makes the lookup unknown (counted), never a silent split.
             if let Value::Host(handle) = key {
+                // A chat component whose hash is unknown (styled, arguments):
+                // Java finds a stored component only where the hash it has now
+                // equals the one that component had when it was added, which
+                // no answer here can show. Counted among components.
+                if handle.kind() == crate::runtime::host_ref::HostKind::Component {
+                    let components = table.order().iter().any(|stored| {
+                        parse_collection_value(stored)
+                            .is_ok_and(|value| crate::runtime::host_component::is_component(&value))
+                    });
+                    return Ok(if components {
+                        Lookup::Unknown
+                    } else {
+                        Lookup::Absent
+                    });
+                }
                 let mut unknown = false;
                 for stored in table.order() {
                     let stored = parse_collection_value(&stored)?;
@@ -290,7 +330,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         // The same object under another stored hash (a key mutated after it
         // was put): the JDK misses it, the host's list would find it.
-        if table.contains(&marker) {
+        if table.contains(&marker) && !displaced_misses {
             return Ok(Lookup::Unknown);
         }
         Ok(Lookup::Absent)
@@ -482,7 +522,7 @@ impl<H: Host> Runtime<'_, H> {
             )
         {
             let action = args.first().cloned().unwrap_or(Value::Ref(None));
-            let map = Value::Ref(Some(source));
+            let map = crate::runtime::jar_object::stored_value(&source);
             return match self.view_for_each(r, &map, &kind, &action)? {
                 Some(answer) => Ok(Some(Some(answer))),
                 None => Ok(None),
@@ -541,7 +581,7 @@ impl<H: Host> Runtime<'_, H> {
         if views.is_empty() {
             return;
         }
-        let Ok(entries) = self.collection_elements(&Value::Ref(Some(marker.to_owned()))) else {
+        let Ok(entries) = self.collection_elements(&crate::runtime::jar_object::stored_value(marker)) else {
             return;
         };
         for view in views {
@@ -558,7 +598,7 @@ impl<H: Host> Runtime<'_, H> {
                 _ => continue,
             };
             self.host
-                .replace_mutable_collection(&Value::Ref(Some(view)), contents);
+                .replace_mutable_collection(&crate::runtime::jar_object::stored_value(&view), contents);
         }
     }
 
@@ -872,7 +912,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Lookup::Absent);
         }
         let hash = self.java_hash(key)?;
-        self.table_lookup(table, key, hash)
+        self.table_lookup_read(table, key, hash)
     }
 
     /// `removeNode(hash(key), ...)`: the hash runs even on an empty map.
@@ -888,7 +928,7 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Option<Value>>, NativeError> {
         let hash = self.java_hash(key)?;
         let found = if table.allocated() {
-            self.table_lookup(table, key, hash)?
+            self.table_lookup_read(table, key, hash)?
         } else {
             Lookup::Absent
         };

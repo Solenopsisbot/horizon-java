@@ -78,7 +78,7 @@ pub(crate) fn key(class: &str, number: u64) -> String {
 /// The handle of the array whose elements are at `key` in the `arrays` table.
 /// Call it once per allocation and clone the value from then on: two calls
 /// are two constructions, which identity cannot tell apart.
-pub(crate) fn handle(key: impl Into<std::sync::Arc<str>>) -> Value {
+pub(crate) fn handle(key: impl Into<String>) -> Value {
     Value::Host(HostRef::new(HostKind::Array, key))
 }
 

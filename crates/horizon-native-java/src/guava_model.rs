@@ -925,7 +925,7 @@ impl<H: Host> Runtime<'_, H> {
             ));
         };
         let marker = marker.to_owned();
-        let answer = || Ok(Some(Value::Ref(Some(marker.clone()))));
+        let answer = || Ok(Some(crate::jar_object::stored_value(&marker)));
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("<init>", "()V") => Ok(Some(Value::Void)),
             ("initialCapacity" | "concurrencyLevel", "(I)Lcom/google/common/collect/MapMaker;") => {

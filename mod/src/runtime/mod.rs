@@ -71,6 +71,7 @@ mod hook_shapes;
 mod host_array;
 mod host_attachment;
 mod host_brigadier;
+mod host_component;
 mod host_config;
 mod host_entry;
 mod host_events;
@@ -2258,6 +2259,38 @@ pub trait Host {
         Ok(Value::default_for(return_desc(&r.descriptor)))
     }
 
+    /// The chat components this host changed in place (`host_component.rs`
+    /// `States`), `None` for a host that keeps none: its components are as
+    /// they were made, and a change to one is counted.
+    fn component_states(&self) -> Option<&host_component::States> {
+        None
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        None
+    }
+
+    /// `CommandSourceStack.sendSuccess(supplier, broadcast)` on `source`:
+    /// whether vanilla calls the supplier now (`Some(Some(true))`), skips it
+    /// (`Some(Some(false))`), or the host cannot tell (`Some(None)`, counted);
+    /// `None` when `source` is not the running command's (the host answers
+    /// the call as before).
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        let _ = (source, broadcast);
+        None
+    }
+
+    /// Deliver the component a `sendSuccess` supplier gave, as it is now.
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        let _ = (component, broadcast);
+        self.unknown_operand_call(r)
+    }
+
     /// Invoke an instance method with its receiver preserved. Existing hosts
     /// keep their old behavior through the default forwarding implementation.
     fn invoke_instance(
@@ -2722,8 +2755,13 @@ const MAX_SEEDED_SERVICE_PROVIDERS: usize = 256;
 /// Resident Java class state is bounded per native mod instance. Static
 /// fields and initialized-class markers are retained across callbacks, but a
 /// jar cannot grow an unbounded heap through repeated event dispatch.
-const MAX_PERSISTENT_CLASS_FIELDS: usize = 1024;
-const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1024;
+/// The host's bound on a jar's persistent statics and initialized classes:
+/// far above any real jar (the largest census jar keeps a few thousand). A
+/// `ConstantValue` static is never stored (`class_init.rs`), so constants do
+/// not count; a store over the bound is refused and counted, never an error
+/// in place of the call's result (`Runtime::persist_class_state`).
+const MAX_PERSISTENT_CLASS_FIELDS: usize = 1 << 20;
+const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1 << 20;
 
 /// Deterministic, game-independent mappings for the small standard-library
 /// surface commonly reached during mod bootstrap.
@@ -2846,6 +2884,8 @@ pub struct StdHost {
     /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
     holder_binding: host_registry::Binding,
     mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Chat components changed in place, by marker (`host_component.rs`).
+    pub(crate) component_states: host_component::States,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
     unmodifiable_collections: BTreeMap<String, Option<String>>,
@@ -2860,7 +2900,7 @@ pub struct StdHost {
     charset_decoders: BTreeMap<String, charset_decoder::DecoderState>,
     /// `Collections.synchronized*` views and the collection each wraps
     /// (`synchronized_views.rs`).
-    synchronized_views: BTreeMap<String, String>,
+    synchronized_views: BTreeMap<String, Value>,
     /// `List.reversed()` views: view marker → (its list, whether it writes
     /// through) (`sequenced.rs`).
     reversed_views: BTreeMap<String, (String, bool)>,
@@ -3023,6 +3063,7 @@ impl StdHost {
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
             mutable_collections: BTreeMap::new(),
+            component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
             jdk_list_of: std::collections::BTreeSet::new(),
@@ -3742,10 +3783,7 @@ impl StdHost {
         self.payload_registrations
             .iter()
             .filter_map(|registration| {
-                let marker = match &registration.payload_type {
-                    Value::Ref(Some(marker)) => marker,
-                    _ => return None,
-                };
+                let marker = jar_object::object_key(&registration.payload_type)?;
                 let id = self.packet_types.get(marker)?.clone();
                 let codec = match &registration.codec {
                     Value::Ref(Some(codec)) => codec.strip_prefix("codec/").map(str::to_owned),
@@ -4385,6 +4423,27 @@ impl StdHost {
 impl Host for StdHost {
     fn unknown_operand_call(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         self.unknown_host_call(r)
+    }
+
+    fn component_states(&self) -> Option<&host_component::States> {
+        Some(&self.component_states)
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        Some(&mut self.component_states)
+    }
+
+    fn feedback_calls_supplier(&self, source: &Value, broadcast: bool) -> Option<Option<bool>> {
+        self.brigadier_feedback_calls_supplier(source, broadcast)
+    }
+
+    fn send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        self.brigadier_send_feedback(r, component, broadcast)
     }
 
     fn counted_unknown_calls(&self) -> usize {
@@ -6108,7 +6167,8 @@ impl Host for StdHost {
         }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
-        if matches!(receiver, Value::Host(_))
+        // An object's are its class's: the models below answer them.
+        if matches!(receiver, Value::Host(handle) if !jar_object::is_object_handle(handle))
             && (matches!(
                 (r.name.as_str(), r.descriptor.as_str()),
                 ("toString", "()Ljava/lang/String;")
@@ -6332,7 +6392,10 @@ impl Host for StdHost {
             // are `java/lang/Thread#<n>` markers.
             let marker = match receiver {
                 receiver if host_jdk::is_main_thread(receiver) => "main".to_owned(),
-                Value::Ref(Some(marker)) => marker.clone(),
+                // A thread a jar constructed (`jar_object.rs`).
+                receiver if jar_object::is_object(receiver) => jar_object::object_key(receiver)
+                    .unwrap_or_default()
+                    .to_owned(),
                 _ => {
                     return Err(NativeError::Metadata(
                         "malformed java/lang/Thread marker".into(),
@@ -7581,7 +7644,8 @@ impl Host for StdHost {
                     return Ok(Value::Int(stable_hash(id)));
                 }
                 ("equals", "(Ljava/lang/Object;)Z") => {
-                    let other = expect_ref(Self::argument(r, args, 0)?)
+                    // Only a type object: a `String` spelling one's key is not equal.
+                    let other = jar_object::object_key(Self::argument(r, args, 0)?)
                         .and_then(|other| self.packet_types.get(other));
                     return Ok(Value::Int((self.packet_types.get(marker) == other) as i32));
                 }
@@ -8566,9 +8630,8 @@ impl Host for StdHost {
                 if crate::runtime::jar_object::packaged_object_class(receiver).is_some() =>
             {
                 // `Object`'s own model is this arm: asking it would recurse.
-                let modelled = expect_ref(receiver)
-                    .and_then(|marker| java_tostring::owner(marker))
-                    .is_some_and(|owner| owner != "java/lang/Object");
+                let modelled =
+                    java_tostring::owner(receiver).is_some_and(|owner| owner != "java/lang/Object");
                 match modelled
                     .then(|| self.modelled_to_string(receiver))
                     .flatten()
@@ -8633,26 +8696,57 @@ impl Host for StdHost {
                 "()Ljava/lang/String;",
             )
             | ("net/minecraft/network/chat/Component", "getString", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(component_text(receiver))))
+                if !host_component::is_component(receiver) {
+                    return Ok(Value::Ref(Some(
+                        expect_ref(receiver).cloned().unwrap_or_default(),
+                    )));
+                }
+                match facade_text::json_now(receiver, Some(&self.component_states)) {
+                    // A translation's text is the server language's: counted.
+                    Some(json) if facade_text::has_translation(&json) => {
+                        self.unknown_host_call(r)?;
+                        Ok(Value::Ref(Some(facade_text::plain(&json))))
+                    }
+                    Some(json) => Ok(Value::Ref(Some(facade_text::plain(&json)))),
+                    // Nested past what resolves (Java: a cycle overflows).
+                    None => self.unknown_host_call(r),
+                }
             }
+            // `siblings.add(c); return this` (`append(String)` adds
+            // `Component.literal(text)`), as `facade_text.rs` answers it in
+            // the interpreter; a receiver or sibling the model did not make
+            // (a jar's own `Component`) is counted.
             ("net/minecraft/network/chat/MutableComponent", "append", descriptor)
             | ("net/minecraft/network/chat/Component", "append", descriptor)
                 if descriptor.ends_with(")Lnet/minecraft/network/chat/MutableComponent;") =>
             {
-                let current = component_text(receiver);
-                let suffix = Self::argument(r, args, 0)?;
-                let suffix = if descriptor.contains("Ljava/lang/String;") {
-                    expect_string(suffix).to_owned()
+                let sibling = Self::argument(r, args, 0)?;
+                let sibling = if descriptor.contains("Ljava/lang/String;") {
+                    host_component::literal(expect_string(sibling))
                 } else {
-                    component_text(suffix)
+                    sibling.clone()
                 };
-                Ok(component_value("literal", &format!("{current}{suffix}")))
+                if !host_component::is_component(receiver)
+                    || !host_component::is_component(&sibling)
+                {
+                    return self.unknown_host_call(r);
+                }
+                host_component::change(
+                    &mut self.component_states,
+                    receiver,
+                    &facade_text::argument,
+                    |state| state.siblings.push(sibling),
+                )?;
+                Ok(receiver.clone())
             }
             ("net/minecraft/network/chat/MutableComponent", "copy", descriptor)
             | ("net/minecraft/network/chat/Component", "copy", descriptor)
                 if descriptor == "()Lnet/minecraft/network/chat/MutableComponent;" =>
             {
-                Ok(component_value("literal", &component_text(receiver)))
+                match host_component::copy(Some(&mut self.component_states), receiver, false) {
+                    Some(copy) => Ok(copy),
+                    None => self.unknown_host_call(r),
+                }
             }
             ("java/util/UUID", "toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
                 uuid_text(receiver)
@@ -8675,7 +8769,7 @@ impl Host for StdHost {
             (owner, "toString", "()Ljava/lang/String;")
             | (owner, "hashCode", "()I")
             | (owner, "equals", "(Ljava/lang/Object;)Z")
-                if matches!(receiver, Value::Host(_))
+                if matches!(receiver, Value::Host(handle) if !jar_object::is_object_handle(handle))
                     || (*receiver == Value::Ref(None) && HostKind::of_class(owner).is_some()) =>
             {
                 self.host_object_method(r, receiver, args)
@@ -9629,9 +9723,15 @@ fn expect_int(r: &MethodRef, value: &Value) -> Result<i32, NativeError> {
     }
 }
 
+/// A reference's text: a `String`'s, a host marker's, or an allocated
+/// object's key (`jar_object.rs`), which is the text the object used to be,
+/// so every table keyed by it keeps its rows. A reader that decides what the
+/// value *is* (a class, a string) reads the `Value`, never this text: a
+/// `String` may spell a key.
 fn expect_ref(value: &Value) -> Option<&String> {
     match value {
         Value::Ref(value) => value.as_ref(),
+        Value::Host(handle) if jar_object::is_object_handle(handle) => Some(handle.key_text()),
         _ => None,
     }
 }
@@ -9826,8 +9926,8 @@ fn builder_append_text<H: Host>(
         | "(Ljava/lang/Object;)Ljava/lang/StringBuffer;" => match value {
             // `append(Object)` is `String.valueOf`: an object a model owns
             // prints its `toString`, and a box prints its value.
-            Value::Ref(Some(value)) => {
-                crate::runtime::java_tostring::modelled_marker(host, value).unwrap_or_else(|| value.clone())
+            Value::Ref(Some(text)) => {
+                crate::runtime::java_tostring::modelled_marker(host, value).unwrap_or_else(|| text.clone())
             }
             Value::Boxed(boxed) => boxed.text(),
             Value::Host(_) => {
@@ -9871,21 +9971,12 @@ fn identifier_value(namespace: &str, path: &str) -> Value {
     host_ids::identifier(namespace, path)
 }
 
+/// A new `literal` or `translatable` component (`host_component.rs`).
 fn component_value(kind: &str, text: &str) -> Value {
-    Value::Ref(Some(format!("component/{kind}/{text}")))
-}
-
-fn component_text(value: &Value) -> String {
-    let raw = expect_ref(value).map_or("", |value| value.as_str());
-    // A styled component or one with arguments (`facade_text.rs`).
-    if raw.starts_with(facade_text::JSON_PREFIX) {
-        return facade_text::to_json(value)
-            .map_or_else(String::new, |json| facade_text::plain(&json));
+    match kind {
+        "translatable" => host_component::translatable(text),
+        _ => host_component::literal(text),
     }
-    raw.strip_prefix("component/literal/")
-        .or_else(|| raw.strip_prefix("component/translatable/"))
-        .unwrap_or(raw)
-        .to_owned()
 }
 
 fn identifier_parse(value: &str) -> Value {
@@ -10702,6 +10793,8 @@ impl host_ref::Nested for MarkerText {
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         Ok(Some(match value {
+            // An object prints its key, as its marker did.
+            Value::Host(handle) if jar_object::is_object_handle(handle) => handle.key().to_owned(),
             Value::Host(handle) => return handle.to_string(self),
             other => value_text(other),
         }))
@@ -10718,6 +10811,8 @@ struct HostNested<'a>(Option<&'a mut StdHost>);
 impl host_ref::Nested for HostNested<'_> {
     fn hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         Ok(match value {
+            // An object's own `hashCode` is jar code (or an identity hash).
+            Value::Host(handle) if jar_object::is_object_handle(handle) => None,
             Value::Host(handle) => return handle.hash_code(self),
             Value::Ref(Some(text)) if value_class::is_plain_string(text) => Some(stable_hash(text)),
             Value::Ref(Some(_)) | Value::Void => None,
@@ -10728,6 +10823,8 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError> {
         Ok(match a {
+            // `a == b` answers for any object; its own `equals` is jar code.
+            Value::Host(handle) if jar_object::is_object_handle(handle) => (a == b).then_some(true),
             Value::Host(handle) => return handle.equals(b, self),
             // `a == b` answers `Objects.equals` for any object; otherwise an
             // object's own `equals` is not the host's to run.
@@ -10740,12 +10837,21 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         Ok(match (value, self.0.as_deref_mut()) {
+            // An object prints what its class's model prints, if one does.
+            (Value::Host(handle), Some(host)) if jar_object::is_object_handle(handle) => {
+                host.modelled_to_string(value)
+            }
+            (Value::Host(handle), None) if jar_object::is_object_handle(handle) => None,
             (Value::Host(handle), _) => return handle.to_string(self),
             (Value::Ref(Some(text)), _) if value_class::is_plain_string(text) => Some(text.clone()),
             (Value::Ref(Some(_)), Some(host)) => host.modelled_to_string(value),
             (Value::Ref(Some(_)), None) => None,
             (other, _) => Some(value_text(other)),
         })
+    }
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let host = self.0.as_deref()?;
+        facade_text::json_now(value, Some(&host.component_states))
     }
 }
 
@@ -11225,8 +11331,12 @@ fn thrown_from_supplied(value: Value) -> NativeError {
             message: Some("Optional.orElseThrow supplier returned null".into()),
             frame: None,
         },
-        Value::Ref(Some(marker)) => {
-            let class = jar_object::marker_class_or_text(marker);
+        // A throwable object the supplier built (`jar_object.rs`), or a
+        // host marker.
+        value if jar_object::instance_key(value).is_some() => {
+            let class = jar_object::value_marker_class(value)
+                .or_else(|| jar_object::instance_key(value))
+                .unwrap_or_default();
             if class == "java/lang/Throwable"
                 || jdk_exception_superclass(class).is_some()
                 || class.starts_with("java/")
@@ -16591,6 +16701,12 @@ impl NativeJar {
         modify_hooks: Option<&mut ModifyHooks>,
     ) -> Result<Value, NativeError> {
         let class_name = class.replace('.', "/");
+        // A JVM's statics are per class for the whole run (#184): a call, a
+        // Mixin target or one of its callbacks runs against the host's
+        // persistent class state and resident heap, as an entrypoint and a
+        // listener do (`invoke_persistent`), so what one callback writes the
+        // next sees, and `<clinit>` runs once.
+        let (static_fields, initialized_classes) = host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
@@ -16598,8 +16714,8 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields,
+            initialized_classes,
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -16626,7 +16742,15 @@ impl NativeJar {
             depth: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
-        runtime.invoke(&class_name, method, descriptor, receiver, args)
+        let resident = runtime.adopt_resident_heap();
+        let result = runtime.invoke(&class_name, method, descriptor, receiver, args);
+        // A failed run keeps what it wrote before failing, as a JVM would.
+        let persistence = runtime.persist_class_state();
+        if resident {
+            runtime.persist_resident_heap()?;
+        }
+        persistence?;
+        result
     }
 
     fn execute_target_without_mixin<H: Host>(
@@ -19227,11 +19351,26 @@ impl<H: Host> Runtime<'_, H> {
     /// Commit jar-owned class state to the resident host after an invocation.
     /// The host applies its own bounded retention policy; a failed commit is
     /// surfaced instead of silently dropping static fields or initialization.
+    ///
+    /// A store the host refuses (over its bound) leaves this run's statics
+    /// unkept: that is counted, and never turns a call that succeeded into an
+    /// error.
     fn persist_class_state(&mut self) -> Result<(), NativeError> {
-        self.host.store_persistent_class_state(
-            self.static_fields.clone(),
-            self.initialized_classes.clone(),
-        )
+        if self
+            .host
+            .store_persistent_class_state(
+                self.static_fields.clone(),
+                self.initialized_classes.clone(),
+            )
+            .is_err()
+        {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/lang/Class".into(),
+                name: "<persistent-statics>".into(),
+                descriptor: "()V".into(),
+            })?;
+        }
+        Ok(())
     }
 
     /// Open one `CallbackInfo` object for a host hook callback.
@@ -19936,9 +20075,7 @@ impl<H: Host> Runtime<'_, H> {
         match plan.kind {
             MixinAccessorKind::Getter => {
                 let value = if plan.static_target {
-                    self.static_fields
-                        .get(&Self::static_field_key(&target))
-                        .cloned()
+                    self.stored_static(&target)?
                 } else {
                     receiver
                         .and_then(|receiver| instance_field_key(receiver, &target))
@@ -20373,6 +20510,8 @@ impl<H: Host> Runtime<'_, H> {
             // The supplied object itself is thrown (`jar_throwables.rs`).
             return Err(match supplied {
                 Value::Ref(Some(_)) => self.throw_object(&supplied, None),
+                // A throwable a jar `new`ed (`jar_object.rs`).
+                ref object if jar_object::is_object(object) => self.throw_object(object, None),
                 other => thrown_from_supplied(other),
             });
         }
@@ -20454,10 +20593,19 @@ impl<H: Host> Runtime<'_, H> {
         self.new_array_value(class, values)
     }
 
+    /// A new object of `class`: a [`HostKind::JarObject`] handle keyed by a
+    /// fresh allocation number (`jar_object.rs`).
     fn new_object(&mut self, class: &str) -> Value {
-        let marker = format!("{class}#{}", self.next_object);
+        let key = self.new_object_key(class);
+        jar_object::handle(key)
+    }
+
+    /// A fresh allocation key `class#n`, for a model whose object is a handle
+    /// of its own kind (an executor, a cache builder) kept under the key.
+    fn new_object_key(&mut self, class: &str) -> String {
+        let key = format!("{class}#{}", self.next_object);
         self.next_object = self.next_object.saturating_add(1);
-        Value::Ref(Some(marker))
+        key
     }
 
     /// Resolve `Class.forName` against the running jar's classes and the
@@ -20571,6 +20719,13 @@ impl<H: Host> Runtime<'_, H> {
         {
             return self.class_is_instance(class, wanted);
         }
+        // A host kind's objects are handles, never text: a String spelled
+        // like one (`"…/MutableComponent#0"`) is no instance of its class, and
+        // the class's row is not asked (`instance_of_is_guess` counts it).
+        let class = jar_object::marker_class_or_text(marker);
+        if self.class(class).is_none() && HostKind::owning_class(class).is_some() {
+            return false;
+        }
         self.class_is_instance(marker, wanted)
     }
 
@@ -20647,10 +20802,18 @@ impl<H: Host> Runtime<'_, H> {
         if self.class(&name).is_none() && HostKind::owning_class(&name).is_some() {
             return None;
         }
-        let interfaces = self
-            .class(&name)
-            .map(ClassFile::interface_names)
-            .unwrap_or_default();
+        // A JDK class: Java 25's table (`jdk_closure.rs`); one outside it is
+        // left to the host, which counts it.
+        let interfaces = match (self.class(&name), crate::runtime::jdk_closure::class(&name)) {
+            (Some(file), _) => file.interface_names(),
+            (None, Some(row)) => row
+                .interfaces
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            (None, None) if crate::runtime::jdk_closure::in_jdk_package(&name) => return None,
+            (None, None) => Vec::new(),
+        };
         let values = interfaces
             .into_iter()
             .map(|interface| Value::Ref(Some(interface)))
@@ -21114,6 +21277,10 @@ impl<H: Host> Runtime<'_, H> {
                     None => self.host.unknown_operand_call(r).map(Some),
                 };
             }
+            // A JDK class outside the table: its supertypes are not known here.
+            if crate::runtime::jdk_closure::in_jdk_package(&source) {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
         }
         if let Some(value) = self.invoke_reflect_enum(r, receiver)? {
             return Ok(Some(value));
@@ -21144,6 +21311,16 @@ impl<H: Host> Runtime<'_, H> {
             // one is the direct superclass. Counted.
             if self.class(&class).is_none() && HostKind::owning_class(&class).is_some() {
                 return self.host.unknown_operand_call(r).map(Some);
+            }
+            // A JDK class: Java 25's table (an interface's is null); one
+            // outside it is counted, never a made-up `Object`.
+            if self.class(&class).is_none() {
+                if let Some(row) = crate::runtime::jdk_closure::class(&class) {
+                    return Ok(Some(Value::Ref(row.superclass.map(str::to_owned))));
+                }
+                if crate::runtime::jdk_closure::in_jdk_package(&class) {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
             }
             let parent = self
                 .class(&class)
@@ -21470,13 +21647,20 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("get", "(Ljava/lang/Object;)Ljava/lang/Object;") => {
                     // An unset field answers its type's default, exactly as a
-                    // JVM field does before the constructor assigns it.
-                    let value = self
+                    // JVM field does before the constructor assigns it; an
+                    // unset static its `ConstantValue` (never stored).
+                    let stored = self
                         .fields
                         .get(&key)
                         .or_else(|| self.static_fields.get(&key))
-                        .cloned()
-                        .unwrap_or_else(|| Value::default_for(&descriptor));
+                        .cloned();
+                    let value = match stored {
+                        Some(value) => value,
+                        None if access & 8 != 0 => self
+                            .static_constant(class, name, &descriptor)?
+                            .unwrap_or_else(|| Value::default_for(&descriptor)),
+                        None => Value::default_for(&descriptor),
+                    };
                     declared_value(&descriptor, value)
                 }
                 ("set", "(Ljava/lang/Object;Ljava/lang/Object;)V") => {
@@ -22504,7 +22688,8 @@ impl<H: Host> Runtime<'_, H> {
                             .map(|value| java_value_text(value, descriptor))
                             .unwrap_or_default();
                         self.io_write(&marker, &text);
-                        Value::Ref(Some(marker))
+                        // `return this`: the writer itself.
+                        jar_object::stored_value(&marker)
                     }
                     ("newLine", "()V") => {
                         self.io_write(&marker, "\n");
@@ -24817,6 +25002,8 @@ impl<H: Host> Runtime<'_, H> {
                                 // static of a class the jar does not declare
                                 // is the host's to answer (a strict host would
                                 // refuse the read otherwise).
+                                // A `ConstantValue` static is its constant
+                                // (never stored, `class_init.rs`).
                                 None if self.class(&field.owner).is_some_and(|file| {
                                     file.fields.iter().any(|declared| {
                                         declared.name == field.name
@@ -24824,7 +25011,12 @@ impl<H: Host> Runtime<'_, H> {
                                     })
                                 }) =>
                                 {
-                                    Value::default_for(&field.descriptor)
+                                    self.static_constant(
+                                        &field.owner,
+                                        &field.name,
+                                        &field.descriptor,
+                                    )?
+                                    .unwrap_or_else(|| Value::default_for(&field.descriptor))
                                 }
                                 None => self.host.get_static(&field)?,
                             }
@@ -25076,7 +25268,10 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         // `new String(char[]|int[], ..)` (`string_constructors.rs`):
                         // the allocation marker becomes the text it built.
-                        if let Some(marker @ Value::Ref(Some(_))) = receiver.as_ref() {
+                        if let Some(marker) = receiver
+                            .as_ref()
+                            .filter(|value| jar_object::is_object(value))
+                        {
                             let built = Value::Ref(Some(text));
                             for slot in stack.iter_mut().chain(locals.iter_mut()) {
                                 if slot == marker {
@@ -25569,13 +25764,9 @@ impl<H: Host> Runtime<'_, H> {
                         // builder's object marker.
                         let captured = captured
                             .into_iter()
-                            .map(|value| {
-                                match expect_ref(&value)
-                                    .and_then(|marker| self.string_builders.get(marker))
-                                {
-                                    Some(text) => Value::Ref(Some(text.clone())),
-                                    None => value,
-                                }
+                            .map(|value| match self.builder_text(&value) {
+                                Some(text) => Value::Ref(Some(text.clone())),
+                                None => value,
                             })
                             .collect::<Vec<_>>();
                         // An object a library model answers `toString` for (a
@@ -29207,10 +29398,9 @@ pub fn dispatch_payload_frame_with(
     // has a handler (the payload type registry records the others).
     let Some(registration) = registrations.iter().find(|registration| {
         matches!(registration.handler, Value::Ref(Some(_)))
-            && matches!(
-                &registration.payload_type,
-                Value::Ref(Some(marker)) if host.packet_types.get(marker).is_some_and(|known| known == id)
-            )
+            // The `CustomPacketPayload.Type` object the jar built.
+            && jar_object::object_key(&registration.payload_type)
+                .is_some_and(|marker| host.packet_types.get(marker).is_some_and(|known| known == id))
     }) else {
         return Ok(false);
     };
@@ -33509,8 +33699,8 @@ mandatory = true
                 &[Value::Ref(Some("Hello".into()))],
             )
             .unwrap();
-        assert_eq!(
-            host.invoke_instance(
+        let appended = host
+            .invoke_instance(
                 &MethodRef {
                     owner: "net/minecraft/network/chat/MutableComponent".into(),
                     name: "append".into(),
@@ -33520,9 +33710,14 @@ mandatory = true
                 &literal,
                 &[Value::Ref(Some(" world".into()))],
             )
-            .unwrap(),
-            component_value("literal", "Hello world")
+            .unwrap();
+        // `return this`, the receiver changed in place.
+        assert_eq!(appended, literal);
+        assert_eq!(
+            facade_text::json_now(&literal, Some(&host.component_states)),
+            Some(serde_json::json!({"text": "Hello", "extra": [{"text": " world"}]}))
         );
+        assert_eq!(host.unknown_host_call_count(), 0);
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
@@ -38985,8 +39180,8 @@ mandatory = true
     #[test]
     fn standard_host_preserves_bounded_throwable_metadata() {
         let mut host = StdHost::new();
-        let error = Value::Ref(Some("java/lang/IllegalStateException#0".into()));
-        let cause = Value::Ref(Some("java/lang/IllegalArgumentException#1".into()));
+        let error = jar_object::handle("java/lang/IllegalStateException#0".into());
+        let cause = jar_object::handle("java/lang/IllegalArgumentException#1".into());
         let init = MethodRef {
             owner: "java/lang/IllegalStateException".into(),
             name: "<init>".into(),
@@ -40054,7 +40249,7 @@ mandatory = true
     #[test]
     fn unknown_collection_accessors_answer_an_empty_modelled_collection() {
         let mut host = StdHost::new();
-        let config = Value::Ref(Some("demo/Config#0".into()));
+        let config = jar_object::handle("demo/Config#0".into());
         let map = host
             .invoke_instance(
                 &MethodRef {
@@ -42849,7 +43044,7 @@ mandatory = true
     #[test]
     fn concrete_collection_classes_reach_the_mutable_table() {
         let mut host = StdHost::new();
-        let map = Value::Ref(Some("java/util/TreeMap#0".into()));
+        let map = jar_object::handle("java/util/TreeMap#0".into());
         host.invoke_instance(
             &MethodRef {
                 owner: "java/util/TreeMap".into(),
@@ -42884,7 +43079,7 @@ mandatory = true
             Value::Int(7)
         );
 
-        let list = Value::Ref(Some("java/util/concurrent/CopyOnWriteArrayList#1".into()));
+        let list = jar_object::handle("java/util/concurrent/CopyOnWriteArrayList#1".into());
         host.invoke_instance(
             &MethodRef {
                 owner: "java/util/concurrent/CopyOnWriteArrayList".into(),
@@ -42981,7 +43176,7 @@ mandatory = true
     #[test]
     fn object_get_class_names_the_marker_class() {
         assert_eq!(
-            class_of_value(&Value::Ref(Some("demo/Model#3".into()))),
+            class_of_value(&jar_object::handle("demo/Model#3".into())),
             Some("demo/Model".into())
         );
         assert_eq!(
@@ -43127,7 +43322,7 @@ mandatory = true
                     name: "getClass".into(),
                     descriptor: "()Ljava/lang/Class;".into(),
                 },
-                &Value::Ref(Some("demo/Model#3".into())),
+                &jar_object::handle("demo/Model#3".into()),
                 &[],
             )
             .unwrap();
