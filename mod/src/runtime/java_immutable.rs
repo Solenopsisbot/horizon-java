@@ -117,10 +117,7 @@ impl StdHost {
 
     /// The elements a collection argument holds, parsed.
     fn elements(&self, value: &Value) -> Result<Vec<Value>, NativeError> {
-        crate::runtime::host_collection_values(self, value)?
-            .iter()
-            .map(|item| crate::runtime::parse_collection_value(item))
-            .collect()
+        crate::runtime::host_collection_values(self, value)
     }
 
     /// The unmodifiable factories, or `None` for any other static call.
@@ -246,7 +243,7 @@ impl StdHost {
     }
 
     /// The elements a view reads: its source's current ones.
-    pub(crate) fn view_values(&self, marker: &str) -> Option<Vec<String>> {
+    pub(crate) fn view_values(&self, marker: &str) -> Option<Vec<Value>> {
         let source = self.unmodifiable_collections.get(marker)?.as_ref()?;
         let source = crate::runtime::jar_object::stored_value(source);
         self.mutable_values(&source)

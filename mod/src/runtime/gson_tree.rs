@@ -887,20 +887,16 @@ impl<H: Host> Runtime<'_, H> {
                     "JsonObject members hold an odd value count".into(),
                 ));
             };
-            let key = parse_collection_value(key)?;
-            let key = expect_ref(&key).cloned().ok_or_else(|| {
+            let key = expect_ref(key).cloned().ok_or_else(|| {
                 NativeError::Metadata("JsonObject member name is not a string".into())
             })?;
-            pairs.push((key, parse_collection_value(value)?));
+            pairs.push((key, value.clone()));
         }
         Ok(pairs)
     }
 
     fn element_values(&self, elements: &Value) -> Result<Vec<Value>, NativeError> {
-        runtime_collection_values(self.host, elements)?
-            .iter()
-            .map(|value| parse_collection_value(value))
-            .collect()
+        runtime_collection_values(self.host, elements)
     }
 
     fn map_put(&mut self, members: &Value, key: &str, value: Value) -> Result<Value, NativeError> {

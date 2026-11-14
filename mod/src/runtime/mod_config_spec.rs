@@ -334,13 +334,21 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// The path a `define*`/`push` argument names: `split` of a string, or the
-    /// elements of a list. `None` for a null or unreadable argument, which
-    /// stays a counted call.
+    /// elements of a list, each a `String` (main read the elements' encoded
+    /// items, `ra`, as the names). `None` for a null or unreadable argument, or
+    /// a list holding anything but strings, which stays a counted call.
     fn mcs_path_arg(&self, value: &Value) -> Option<Vec<String>> {
         if is_null(value) {
             return None;
         }
-        runtime_collection_values(&*self.host, value).ok()
+        runtime_collection_values(&*self.host, value)
+            .ok()?
+            .into_iter()
+            .map(|element| match element {
+                Value::Ref(Some(name)) => Some(name),
+                _ => None,
+            })
+            .collect()
     }
 
     /// `BuilderContext.ensureEmpty`, in NeoForge's order.

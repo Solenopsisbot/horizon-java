@@ -441,8 +441,8 @@ impl NativeJar {
                 .map(|package| format!("{package}."))
                 .unwrap_or_default();
             for name in names {
-                match parse_value_marker(&name) {
-                    Ok(Value::Ref(Some(name))) => session
+                match name {
+                    Value::Ref(Some(name)) => session
                         .report
                         .companions
                         .push(format!("{prefix}{name}").replace('.', "/")),

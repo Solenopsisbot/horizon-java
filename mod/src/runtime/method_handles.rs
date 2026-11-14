@@ -774,9 +774,6 @@ impl<H: Host> Runtime<'_, H> {
                     Some(value) if self.owned_array(value).is_some() => self.array(value)?.clone(),
                     Some(value @ Value::Ref(Some(_))) => {
                         runtime_collection_values(self.host, value)?
-                            .iter()
-                            .map(|item| parse_collection_value(item))
-                            .collect::<Result<_, _>>()?
                     }
                     // A shared empty array: what the unmodelled call returned.
                     None | Some(Value::Host(_)) => return Ok(None),

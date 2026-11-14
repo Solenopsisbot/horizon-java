@@ -870,10 +870,7 @@ impl<H: Host> Runtime<'_, H> {
     /// A host collection's elements (a map's keys and values interleaved),
     /// in the order the host keeps them.
     pub(crate) fn collection_elements(&self, value: &Value) -> Result<Vec<Value>, NativeError> {
-        runtime_collection_values(self.host, value)?
-            .iter()
-            .map(|item| parse_collection_value(item))
-            .collect()
+        runtime_collection_values(self.host, value)
     }
 }
 

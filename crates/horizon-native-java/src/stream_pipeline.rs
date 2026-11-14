@@ -314,7 +314,7 @@ struct Origin {
 struct ViewOrigin {
     map: Value,
     stamp: crate::mod_count::ModStamp,
-    entries: Vec<String>,
+    entries: Vec<Value>,
 }
 
 /// The JDK collections whose spliterators bind late and check `modCount`.
@@ -727,8 +727,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         }
     }
 
-    /// The host collection's elements now, as its encoded items.
-    fn origin_items(&self, origin: &Origin) -> Result<Vec<String>, NativeError> {
+    /// The host collection's elements now.
+    fn origin_items(&self, origin: &Origin) -> Result<Vec<Value>, NativeError> {
         crate::runtime_collection_values(self.host, &origin.collection)
     }
 
@@ -738,11 +738,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         match self.chain(stream)?.0 {
             Source::Values(marker) => {
                 if let Some(origin) = self.pipelines.origins.get(&marker).cloned() {
-                    let values = self
-                        .origin_items(&origin)?
-                        .iter()
-                        .map(|item| crate::parse_collection_value(item))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let values = self.origin_items(&origin)?;
                     self.streams.insert(marker, values);
                 }
                 Ok(())
@@ -1495,7 +1491,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             return Ok(());
         };
         let entries = crate::runtime_collection_values(self.host, &origin.map)?;
-        if self.capture_mod_count(&origin.map) != origin.stamp || entries != origin.entries {
+        if self.capture_mod_count(&origin.map) != origin.stamp
+            || !crate::same_items(&entries, &origin.entries)
+        {
             let map = expect_ref(&origin.map).map_or("", String::as_str);
             let class = crate::jar_object::marker_class_or_text(map);
             self.host.unknown_operand_call(&MethodRef {
@@ -1536,10 +1534,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         // its ends, which depends on the array's layout. Any change is
         // counted.
         let tracked = self.has_mod_count(&origin.collection);
-        let verdict_now = |this: &mut Self, now: &[String]| {
+        let verdict_now = |this: &mut Self, now: &[Value]| {
             if tracked {
                 this.capture_mod_count(&origin.collection).verdict(expected)
-            } else if now == bound.as_slice() {
+            } else if crate::same_items(now, &bound) {
                 ModVerdict::Same
             } else {
                 ModVerdict::Unknown
@@ -1557,7 +1555,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             // (`elementData[i]`, a node's `item`), so a `set` made during the
             // traversal is seen, as long as nothing structural happened.
             let value = match self.origin_items(origin)?.get(index) {
-                Some(item) if list && !structural => crate::parse_collection_value(item)?,
+                Some(item) if list && !structural => item.clone(),
                 _ => bound_value,
             };
             self.accept(id, 0, value)?;
