@@ -175,7 +175,9 @@ public final class Duck {
     );
     let jar = NativeJar::from_path(&jar_path).unwrap();
     let mut host = StdHost::new();
-    let entity = Value::Ref(Some("net/minecraft/world/entity/Entity#1".into()));
+    // A game object the host hands a jar (`game_hooks.rs`), whose class the
+    // runtime does not hold.
+    let entity = Value::Ref(Some("game/entity/1".into()));
     let value = jar
         .invoke_method_with_args(
             "demo.Duck",

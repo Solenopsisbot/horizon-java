@@ -94,7 +94,9 @@ use crate::runtime::{NativeError, Value};
 #[derive(Clone)]
 pub struct HostRef {
     kind: HostKind,
-    key: Arc<str>,
+    /// A `String` (not `str`) so that a jar object's key reads back as the
+    /// `&String` the text readers take (`expect_ref`, [`Self::key_text`]).
+    key: Arc<String>,
     origin: u64,
 }
 
@@ -372,6 +374,9 @@ pub enum HostKind {
     FabricPayloadTypes,
     /// A `ResourceLoader`: key its `PackType`.
     FabricResourceLoader,
+    /// An object `new` (or a model) allocated: key `class#n`
+    /// (`jar_object.rs`), one key per allocation.
+    JarObject,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1475,6 +1480,14 @@ const KINDS: &[KindInfo] = &[
         canonical: always_canonical,
         methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
     },
+    KindInfo {
+        kind: HostKind::JarObject,
+        tag: "obj",
+        class: ClassRule::FromKey(crate::runtime::jar_object::class_of_key),
+        // `Runtime::new_object` numbers every allocation once.
+        canonical: always_canonical,
+        methods: &crate::runtime::jar_object::JAR_OBJECT,
+    },
 ];
 
 impl HostKind {
@@ -1561,10 +1574,10 @@ impl HostKind {
 impl HostRef {
     /// A handle with `key` as it is (a number, a name). A key that holds
     /// values is built with [`Self::of_values`].
-    pub(crate) fn new(kind: HostKind, key: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn new(kind: HostKind, key: impl Into<String>) -> Self {
         Self {
             kind,
-            key: key.into(),
+            key: Arc::new(key.into()),
             origin: NEXT_ORIGIN.fetch_add(1, AtomicOrdering::Relaxed),
         }
     }
@@ -1598,6 +1611,11 @@ impl HostRef {
     }
 
     pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// [`Self::key`] as the `&String` a text reader takes.
+    pub(crate) fn key_text(&self) -> &String {
         &self.key
     }
 

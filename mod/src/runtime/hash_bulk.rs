@@ -128,7 +128,7 @@ impl<H: Host> Runtime<'_, H> {
         let sorted_source = self
             .host
             .unmodifiable_view_source(&marker)
-            .map(|source| Value::Ref(Some(source)))
+            .map(|source| crate::runtime::jar_object::stored_value(&source))
             .and_then(|source| self.host_collection_class(&source))
             .is_some_and(|class| {
                 class != "java/util/HashSet" && class != "java/util/LinkedHashSet"

@@ -502,7 +502,7 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         let builder = builder.to_owned();
-        let this = Value::Ref(Some(builder.clone()));
+        let this = crate::runtime::jar_object::stored_value(&builder);
         match (r.name.as_str(), r.descriptor.as_str()) {
             (
                 "comment",
@@ -625,7 +625,7 @@ impl<H: Host> Runtime<'_, H> {
         self.mcs_ensure_empty(builder)?;
         let spec = self.new_object(SPEC);
         let marker = expect_ref(&spec).cloned().unwrap_or_default();
-        self.mcs_set(&marker, S_BUILDER, Value::Ref(Some(builder.to_owned())));
+        self.mcs_set(&marker, S_BUILDER, crate::runtime::jar_object::stored_value(builder));
         // `values.forEach(value -> value.spec = spec)`: every value defined so
         // far now reads through this spec.
         let defined = self.mcs_int(builder, B_DEFINED);
@@ -797,7 +797,7 @@ impl<H: Host> Runtime<'_, H> {
             .to_owned();
         let value = self.new_object(&class);
         let marker = expect_ref(&value).cloned().unwrap_or_default();
-        self.mcs_set(&marker, V_BUILDER, Value::Ref(Some(builder.to_owned())));
+        self.mcs_set(&marker, V_BUILDER, crate::runtime::jar_object::stored_value(builder));
         self.mcs_set(&marker, V_INDEX, Value::Int(index));
         if let Some(constant) = constant {
             self.mcs_set(&marker, V_CONSTANT, constant);
@@ -855,7 +855,7 @@ impl<H: Host> Runtime<'_, H> {
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("getDefault", "()Ljava/lang/Object;") => self.mcs_default(value),
             ("next", "()Lnet/neoforged/neoforge/common/ModConfigSpec$Builder;") => {
-                Ok(Some(Value::Ref(Some(builder))))
+                Ok(Some(crate::runtime::jar_object::stored_value(&builder)))
             }
             ("get" | "getRaw", "()Ljava/lang/Object;")
             | ("getAsBoolean" | "isTrue" | "isFalse", "()Z")

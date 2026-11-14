@@ -199,15 +199,21 @@ fn state_marker<H: Host>(
 ) -> Result<Option<String>, NativeError> {
     match receiver {
         None | Some(Value::Ref(None)) => Err(native_npe()),
-        // Only an object `new` built keeps its state under its text: a jar's
+        // Only an object `new` built keeps its state under its key: a jar's
         // own (`AbstractExecutorService` subclass) or a JDK executor a jar
-        // constructs (`new ThreadPoolExecutor(..)`). A `String` spelled like
-        // a pool's marker (`"executor#0"`) is no executor, so its call goes
-        // on to be counted, never reaching a real pool's state. (Allocation
-        // markers are still text until #156 P12b.)
-        Some(Value::Ref(Some(marker))) => Ok(crate::jar_object::key_class(marker)
-            .is_some_and(|class| rt.class(class).is_some() || JDK_EXECUTORS.contains(&class))
-            .then(|| marker.clone())),
+        // constructs (`new ThreadPoolExecutor(..)`), a handle either way
+        // (#156 P12b). A `String` spelled like one's key
+        // (`"java/util/concurrent/ThreadPoolExecutor#0"`) is no executor, so
+        // its call goes on to be counted, never reaching a real pool's state.
+        Some(value) if crate::jar_object::is_object(value) => {
+            Ok(crate::jar_object::object_class(value)
+                .is_some_and(|class| rt.class(class).is_some() || JDK_EXECUTORS.contains(&class))
+                .then(|| {
+                    crate::jar_object::object_key(value)
+                        .unwrap_or_default()
+                        .to_owned()
+                }))
+        }
         Some(value) => Ok(host_executors::allocation(value, kind).map(str::to_owned)),
     }
 }

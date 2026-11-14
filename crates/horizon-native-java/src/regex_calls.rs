@@ -39,7 +39,7 @@ impl<H: Host> Runtime<'_, H> {
     /// the marker.
     fn char_sequence(&self, value: &Value) -> Option<String> {
         let marker = expect_ref(value)?;
-        if let Some(text) = self.string_builders.get(marker) {
+        if let Some(text) = self.builder_text(value) {
             return Some(text.clone());
         }
         crate::value_class::is_plain_string(marker).then(|| marker.clone())
