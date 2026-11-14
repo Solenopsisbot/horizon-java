@@ -567,6 +567,11 @@ fn marker(text: impl Into<String>) -> Value {
     crate::game_object::client_value(text.into())
 }
 
+/// A `String` answer: the text itself, never a client object it might spell.
+fn text(text: impl Into<String>) -> Value {
+    Value::Ref(Some(text.into()))
+}
+
 fn flag(value: bool) -> Value {
     Value::Int(i32::from(value))
 }
@@ -1208,6 +1213,14 @@ impl StdHost {
             });
         }
         let text = crate::game_object::text(receiver)?.clone();
+        // Every `client/…` and `key-category/…` object is a handle now (#156 P16d), so a `String`
+        // spelling one is just that `String`: its own members answer, never the object's (#232's
+        // review: `new KeyMapping("client/minecraft", ..).getName().equals(..)` in a firing).
+        if !matches!(receiver, Value::Host(_))
+            && (text.starts_with("client/") || text.starts_with(CATEGORY))
+        {
+            return None;
+        }
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
         // `NonNullList` is a `List`: the inventory's lists answer as one.
         if r.owner == "net/minecraft/core/NonNullList" && text.starts_with("list") {
@@ -1426,7 +1439,9 @@ impl StdHost {
                 }
                 Value::Void
             }
-            ("getName", "()Ljava/lang/String;") => marker(init.name),
+            // The jar's own `String`, never parsed into an object whatever it spells
+            // (#232's review: `new KeyMapping("client/minecraft", ..)`).
+            ("getName", "()Ljava/lang/String;") => text(init.name),
             ("getCategory", _) => marker(format!(
                 "{CATEGORY}{}",
                 init.category.as_deref().unwrap_or("minecraft:misc")
@@ -1491,7 +1506,7 @@ impl StdHost {
         if let Some(mapping) = object.strip_prefix(VANILLA_KEY) {
             return match (name, returns) {
                 ("isDown", "Z") => Some(flag(frame.vanilla_keys_down.iter().any(|k| k == mapping))),
-                ("getName", _) => Some(marker(mapping)),
+                ("getName", _) => Some(text(mapping)),
                 _ => None,
             };
         }
@@ -1621,9 +1636,9 @@ impl StdHost {
                     ("isAlive", "Z") => Some(flag(p.health > 0.0)),
                     ("getId", "I") => int(p.entity_id),
                     ("getName" | "getDisplayName", _) => Some(component_value("literal", &p.name)),
-                    ("getScoreboardName" | "getPlainTextName", _) => Some(marker(p.name.clone())),
+                    ("getScoreboardName" | "getPlainTextName", _) => Some(text(p.name.clone())),
                     ("getUUID", _) => uuid_value(&uuid_text(p.uuid)).ok(),
-                    ("getStringUUID", _) => Some(marker(uuid_text(p.uuid))),
+                    ("getStringUUID", _) => Some(text(uuid_text(p.uuid))),
                     ("level" | "clientLevel", _) if frame.level.is_some() => Some(marker(LEVEL)),
                     _ => None,
                 }
