@@ -714,7 +714,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let rules = expect_ref(&rules).unwrap().clone();
+        let rules = crate::runtime::game_object::text(&rules).unwrap().clone();
         let rule = |name: &str| {
             static_field(&call(
                 GAME_RULES_CLASS,
@@ -797,7 +797,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let access = expect_ref(&access).unwrap().clone();
+        let access = crate::runtime::game_object::text(&access).unwrap().clone();
         let lookup = call(
             "net/minecraft/core/RegistryAccess$Frozen",
             "lookupOrThrow",
@@ -810,7 +810,7 @@ mod tests {
             &[crate::runtime::host_ids::registry_key_of("minecraft:block")],
         )
         .unwrap();
-        let blocks = expect_ref(&blocks).unwrap().clone();
+        let blocks = crate::runtime::game_object::text(&blocks).unwrap().clone();
         let registry =
             |name: &str, descriptor: &str| call("net/minecraft/core/Registry", name, descriptor);
         assert_eq!(

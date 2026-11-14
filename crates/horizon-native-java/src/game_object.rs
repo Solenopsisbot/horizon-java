@@ -156,28 +156,52 @@ pub(crate) fn server_value(marker: String) -> Value {
     Value::Ref(Some(marker))
 }
 
-/// A player's key: `game/player/<uuid>/<session>.<life>`.
+/// A player's key: `game/player/<uuid>/<session>.<life>[/<id>]`.
 ///
 /// One `ServerPlayer` is one object from login to respawn: `PlayerList.respawn`
 /// builds a new one and gives it the old id (`setId(serverPlayer.getId())`),
 /// a relog builds a new one with a new id, and a dimension change keeps the
 /// same object (`ServerPlayer.teleport` returns `this`). The game's bridge
 /// counts the sessions (logins) and lives (respawns, the clone moment) of each
-/// player (`events::FacadePlayer`), so one key is one object, and `Entity`'s
-/// `equals` (by id) is "same UUID and same session".
-fn player_key(uuid: u128, session: u32, life: u32) -> String {
-    format!("game/player/{uuid:032x}/{session}.{life}")
+/// player (`events::FacadePlayer`), so one key is one object. The entity id,
+/// when the façade knows it, ends the key: `Entity.equals`/`hashCode` go by it.
+/// It is the same for every life of one session, so it splits no object.
+fn player_key(uuid: u128, player: Option<&crate::events::FacadePlayer>, life: u32) -> String {
+    let session = player.map_or(0, |player| player.session);
+    match player.and_then(|player| player.entity_id) {
+        Some(id) => format!("game/player/{uuid:032x}/{session}.{life}/{id}"),
+        None => format!("game/player/{uuid:032x}/{session}.{life}"),
+    }
 }
 
-/// The player `uuid` as the firing's façade knows them (session and life;
+/// The façade's player `uuid`, if it lists them.
+fn facade_player(
+    facade: &crate::events::EventFacade,
+    uuid: u128,
+) -> Option<&crate::events::FacadePlayer> {
+    facade.players.iter().find(|player| player.uuid == uuid)
+}
+
+/// The player `uuid` as the firing's façade knows them (session, life and id;
 /// `0.0` for a player the façade does not list).
 pub(crate) fn player_value(facade: &crate::events::EventFacade, uuid: u128) -> Value {
-    let (session, life) = facade
-        .players
-        .iter()
-        .find(|player| player.uuid == uuid)
-        .map_or((0, 0), |player| (player.session, player.life));
-    server_value(player_key(uuid, session, life))
+    let player = facade_player(facade, uuid);
+    server_value(player_key(
+        uuid,
+        player,
+        player.map_or(0, |player| player.life),
+    ))
+}
+
+/// The player `uuid` before their last respawn (`AFTER_RESPAWN`'s `oldPlayer`):
+/// their previous life's object, `None` when the façade counts no respawn.
+pub(crate) fn previous_player_value(
+    facade: &crate::events::EventFacade,
+    uuid: u128,
+) -> Option<Value> {
+    let player = facade_player(facade, uuid)?;
+    let life = player.life.checked_sub(1)?;
+    Some(server_value(player_key(uuid, Some(player), life)))
 }
 
 /// The entity with id `id`: the player of that id when the façade lists one
@@ -194,7 +218,7 @@ pub(crate) fn entity_value(facade: &crate::events::EventFacade, id: i32) -> Valu
     }
 }
 
-/// The UUID of a player marker (`game/player/<uuid>[/<session>.<life>]`).
+/// The UUID of a player marker (`game/player/<uuid>[/<session>.<life>[/<id>]]`).
 pub(crate) fn player_uuid(marker: &str) -> Option<u128> {
     player_parts(marker).map(|(uuid, _)| uuid)
 }
@@ -202,42 +226,43 @@ pub(crate) fn player_uuid(marker: &str) -> Option<u128> {
 /// A player marker's UUID and session (`None` for the session of the old
 /// key without one).
 fn player_parts(marker: &str) -> Option<(u128, Option<u32>)> {
-    let rest = marker.strip_prefix("game/player/")?;
-    let (hex, life) = rest
-        .split_once('/')
-        .map_or((rest, None), |(hex, life)| (hex, Some(life)));
+    let mut parts = marker.strip_prefix("game/player/")?.split('/');
+    let hex = parts.next()?;
     let uuid = (hex.len() == 32).then(|| u128::from_str_radix(hex, 16).ok())??;
-    let session = match life {
+    let session = match parts.next() {
         Some(life) => Some(life.split_once('.')?.0.parse().ok()?),
         None => None,
     };
     Some((uuid, session))
 }
 
-/// The id of a `game/entity/<id>` marker.
+/// The entity id an entity key carries: `game/entity/<id>`, or a player's
+/// trailing `/<id>`.
 fn entity_id(marker: &str) -> Option<i32> {
-    marker.strip_prefix("game/entity/")?.parse().ok()
+    if let Some(id) = marker.strip_prefix("game/entity/") {
+        return id.parse().ok();
+    }
+    let rest = marker.strip_prefix("game/player/")?;
+    let mut parts = rest.split('/');
+    parts.nth(2)?.parse().ok()
 }
 
 /// `Entity.equals` (vanilla 26.3: `obj instanceof Entity e && e.getId() ==
-/// getId()`) between two entity keys: one key is one object; two players are
-/// equal when their UUID and session match (a respawn keeps the id, a relog
-/// takes a new one); two entities by id. A player against an entity the
-/// façade did not resolve, or a clone's original against a player, is not
+/// getId()`) between two entity keys: one key is one object; two keys with
+/// ids by id; two players without one equal when their UUID and session
+/// match (a respawn keeps the id, a relog takes a new one). A player without
+/// an id against an entity, or a clone's original against a player, is not
 /// known here: `None`, counted by the caller.
 fn entity_equals(a: &str, b: &str) -> Option<bool> {
     if a == b {
         return Some(true);
     }
-    if let (Some((u1, s1)), Some((u2, s2))) = (player_parts(a), player_parts(b)) {
-        return match (s1, s2) {
-            _ if u1 != u2 => Some(false),
-            (Some(s1), Some(s2)) => Some(s1 == s2),
-            _ => None,
-        };
+    if let (Some(x), Some(y)) = (entity_id(a), entity_id(b)) {
+        return Some(x == y);
     }
-    match (entity_id(a), entity_id(b)) {
-        (Some(x), Some(y)) => Some(x == y),
+    match (player_parts(a), player_parts(b)) {
+        (Some((u1, _)), Some((u2, _))) if u1 != u2 => Some(false),
+        (Some((_, Some(s1))), Some((_, Some(s2)))) => Some(s1 == s2),
         _ => None,
     }
 }
@@ -313,8 +338,8 @@ pub(crate) const IDENTITY_METHODS: Methods = Methods {
 
 /// An entity (`Entity.equals`/`hashCode` are by `getId()`, vanilla 26.3):
 /// `equals` by [`entity_equals`]; `hashCode` is the id where the key carries
-/// it (`game/entity/<id>`), counted for a player (their id is the façade's,
-/// not the key's). `toString` needs the position: counted.
+/// it, counted where it does not (a player the façade gives no id).
+/// `toString` needs the position: counted.
 pub(crate) const ENTITY_METHODS: Methods = Methods {
     hash_code: |handle, _| Ok(entity_id(handle.key())),
     equals: |handle, other, _| {

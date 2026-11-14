@@ -2382,14 +2382,19 @@ fn fabric_arguments(shape: Shape, firing: &EventFiring) -> Result<Vec<Value>, Na
             Value::Int(i32::from(context.flag)),
         ],
         // `COPY_FROM(oldPlayer, newPlayer, alive)`: the old player is the clone's original. Without
-        // one (`AFTER_RESPAWN`, whose hook names no old player) both are the one marker Horizon
-        // keeps across a respawn.
+        // one (`AFTER_RESPAWN`, whose hook names no old player) it is the player's previous life,
+        // the object the respawn replaced (#156 P16b), when the façade counts the respawn; else
+        // the one value both have always been.
         Shape::PlayerPair => {
             let player = player();
-            let old = context
-                .original
-                .as_ref()
-                .map_or_else(|| player.clone(), |original| original_marker(original.uuid));
+            let previous = context
+                .player
+                .and_then(|uuid| crate::game_object::previous_player_value(&firing.facade, uuid));
+            let old = match (&context.original, previous) {
+                (Some(original), _) => original_marker(original.uuid),
+                (None, Some(previous)) => previous,
+                (None, None) => player.clone(),
+            };
             vec![old, player, Value::Int(i32::from(context.flag))]
         }
         Shape::ChangeLevel => vec![
@@ -2686,7 +2691,7 @@ mod tests {
                     "registryAccess",
                     "()Lnet/minecraft/core/RegistryAccess;",
                 ),
-                &player_marker(alex),
+                &player_marker(&EventFacade::default(), alex),
                 &[],
             ),
             Some(Err(NativeError::UnknownHostCall(_)))
@@ -2700,7 +2705,7 @@ mod tests {
             host.game_event_invoke(
                 &can_send,
                 &[
-                    player_marker(alex),
+                    player_marker(&EventFacade::default(), alex),
                     crate::host_ids::identifier_of_text(channel),
                 ],
             )
@@ -2886,7 +2891,7 @@ mod tests {
                 ..EventContext::default()
             },
         )));
-        let player = player_marker(alex);
+        let player = player_marker(&EventFacade::default(), alex);
         let uuid = host
             .game_event_call(
                 &call(
@@ -2937,7 +2942,7 @@ mod tests {
         };
         let without = fabric_arguments(Shape::BlockBreak, &firing(Some(false))).unwrap();
         assert_eq!(without[0], level_marker("minecraft:the_nether"));
-        assert_eq!(without[1], player_marker(7));
+        assert_eq!(without[1], player_marker(&EventFacade::default(), 7));
         assert_eq!(without[3], block_state_marker("minecraft:chest"));
         assert_eq!(without[4], Value::Ref(None));
 
@@ -3073,10 +3078,10 @@ mod tests {
             args[0],
             marker("game/original-player/0123456789abcdef0011223344556677".into())
         );
-        assert_eq!(args[1], player_marker(alex));
+        assert_eq!(args[1], player_marker(&EventFacade::default(), alex));
         assert_eq!(args[2], Value::Int(1));
         let args = fabric_arguments(Shape::PlayerPair, &firing(None)).unwrap();
-        assert_eq!(args[0], player_marker(alex));
+        assert_eq!(args[0], player_marker(&EventFacade::default(), alex));
     }
 
     /// A click's or an attack's entity argument is the target, not the acting player: vanilla's
@@ -3099,7 +3104,7 @@ mod tests {
             },
         );
         let args = fabric_arguments(Shape::AttackEntity, &firing).unwrap();
-        assert_eq!(args[0], player_marker(alex));
+        assert_eq!(args[0], player_marker(&EventFacade::default(), alex));
         assert_eq!(
             args[2],
             marker("enum/net/minecraft/world/InteractionHand/OFF_HAND".into())

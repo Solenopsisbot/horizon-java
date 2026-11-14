@@ -1471,9 +1471,17 @@ impl HorizonJava {
     fn next_life(&self, uuid: u128, session: bool) {
         let mut state = self.lock();
         let entry = state.lives.entry(uuid).or_insert((0, 0));
-        *entry = if session { (entry.0 + 1, 0) } else { (entry.0, entry.1 + 1) };
+        *entry = if session {
+            (entry.0 + 1, 0)
+        } else {
+            (entry.0, entry.1 + 1)
+        };
         let (session, life) = *entry;
-        for player in state.players.iter_mut().filter(|player| player.uuid == uuid) {
+        for player in state
+            .players
+            .iter_mut()
+            .filter(|player| player.uuid == uuid)
+        {
             player.session = session;
             player.life = life;
         }
