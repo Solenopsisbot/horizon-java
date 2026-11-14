@@ -1150,6 +1150,25 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         if !matches!(terminal, Terminal::Count(_)) {
             self.consume(stream)?;
         }
+        // `ReferencePipeline.Head.forEach`/`forEachOrdered` of a sequential
+        // stream with no stage: `sourceStageSpliterator().forEachRemaining(
+        // action)`. A jar spliterator gets the caller's own `Consumer`, and
+        // no sink asks its size first.
+        if let Terminal::Each(action, _) = &terminal
+            && !self.pipelines.parallel.contains(&self.root(stream))
+            && let Ok((Source::Spliterator(spliterator), stages)) = self.chain(stream)
+            && stages.is_empty()
+        {
+            self.call_virtual(
+                crate::jdk_call::Site::Interface,
+                "java/util/Spliterator",
+                "forEachRemaining",
+                "(Ljava/util/function/Consumer;)V",
+                &spliterator,
+                std::slice::from_ref(action),
+            )?;
+            return Ok(Some(Value::Void));
+        }
         self.count_parallel(stream)?;
         let result = match self.drive(stream, terminal, None)? {
             Terminal::Each(..) => Value::Void,
@@ -1274,6 +1293,12 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 Stage::Distinct if sorted_here => State::Adjacent(false, None),
                 // `DistinctOps`' sink makes its `HashSet` in `begin`.
                 Stage::Distinct => State::Seen(self.new_distinct_set()?, Vec::new()),
+                // `SortedOps.OfRef.opWrapSink`: a natural `sorted()` on a
+                // pipeline already known `SORTED` is the downstream sink
+                // itself (`sorted(Comparator.naturalOrder())` still sorts).
+                Stage::Sorted(comparator) if *comparator == Value::Ref(None) && sorted_here => {
+                    State::None
+                }
                 Stage::Sorted(_) => State::Buffer(Vec::new()),
                 _ => State::None,
             });
@@ -1590,14 +1615,16 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         }
     }
 
-    /// Whether a source's spliterator reports `SORTED`: a `TreeSet`'s.
+    /// Whether a source's spliterator reports `SORTED` as the stream's flag:
+    /// a `TreeSet`'s in natural order (`StreamOpFlag.fromCharacteristics`
+    /// drops `SORTED` when `getComparator()` is not null).
     fn source_sorted(&self, source: &Source) -> bool {
         match source {
-            Source::Values(marker) => self
-                .pipelines
-                .origins
-                .get(marker)
-                .is_some_and(|origin| origin.class == "java/util/TreeSet"),
+            Source::Values(marker) => self.pipelines.origins.get(marker).is_some_and(|origin| {
+                origin.class == "java/util/TreeSet"
+                    && expect_ref(&origin.collection)
+                        .is_some_and(|set| self.host.collection_comparator(set).is_none())
+            }),
             Source::Concat(..) => false,
             Source::Spliterator(spliterator) => {
                 self.spliterator_flags(spliterator) & crate::jdk_spliterators::SORTED != 0
@@ -1625,7 +1652,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 (Stage::Limit(_), State::Left(0)) => return true,
                 // `SortedOps`' sinks never cancel upstream: they need every
                 // element before they can push one.
-                (Stage::Sorted(_), _) => return false,
+                (Stage::Sorted(_), State::Buffer(_)) => return false,
                 _ => {}
             }
         }
@@ -1758,8 +1785,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             Stage::Sorted(_) => {
                 if let Some(State::Buffer(buffer)) = self.state(id, at) {
                     buffer.push(value);
+                    return Ok(());
                 }
-                Ok(())
+                // A no-op `sorted()` (`State::None`): pass it on.
+                self.accept(id, next, value)
             }
             Stage::Pass => self.accept(id, next, value),
             Stage::Widen(kind) => {
@@ -1787,13 +1816,28 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         else {
             return Ok(());
         };
+        // The next `sorted` that buffers (a no-op one passed its elements on).
+        let buffering: Vec<bool> = self
+            .pipelines
+            .drives
+            .get(&id)
+            .map(|drive| {
+                drive
+                    .states
+                    .iter()
+                    .map(|state| matches!(state, State::Buffer(_)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let Some((index, comparator)) =
             stages
                 .iter()
                 .enumerate()
                 .skip(at)
                 .find_map(|(index, stage)| match stage {
-                    Stage::Sorted(comparator) => Some((index, comparator.clone())),
+                    Stage::Sorted(comparator) if buffering.get(index) == Some(&true) => {
+                        Some((index, comparator.clone()))
+                    }
                     _ => None,
                 })
         else {
@@ -2059,6 +2103,17 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         let Some((id, at)) = sink_key(callback) else {
             return Ok(None);
         };
+        // A sink kept past its push (a jar spliterator that stored the
+        // action): in Java it still runs its stages into a terminal whose
+        // result is already returned. Not modelled: counted.
+        if !self.pipelines.drives.contains_key(&id) {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/util/stream/Sink".into(),
+                name: "accept".into(),
+                descriptor: "(Ljava/lang/Object;)V".into(),
+            })?;
+            return Ok(Some(Value::Void));
+        }
         let value = args.first().cloned().unwrap_or(Value::Ref(None));
         self.accept(id, at, value)?;
         Ok(Some(Value::Void))

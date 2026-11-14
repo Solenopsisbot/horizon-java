@@ -541,6 +541,12 @@ impl<H: Host> Runtime<'_, H> {
         if fence >= 0 {
             return Ok((index, fence));
         }
+        // `getFence()` binds late: `expectedModCount = alist.modCount`, then
+        // `fence = list.size()`, at the first use (JDK 25).
+        let mod_count = match mod_count {
+            Some(_) => self.abstract_list_mod_count(&list)?,
+            None => None,
+        };
         let size =
             self.call_virtual(Site::Interface, "java/util/List", "size", "()I", &list, &[])?;
         let fence = int_value(&size);
