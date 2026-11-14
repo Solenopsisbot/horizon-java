@@ -1475,12 +1475,8 @@ impl StdHost {
                 ("getY", "()I") => Ok(Value::Int(y)),
                 ("getZ", "()I") => Ok(Value::Int(z)),
                 ("asLong", "()J") => Ok(Value::Long(block_pos_long(x, y, z))),
-                ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(i32::from(
-                    args.first()
-                        .and_then(crate::runtime::game_object::text)
-                        .is_some_and(|o| o == text),
-                ))),
-                ("hashCode", "()I") => Ok(Value::Int(stable_hash(text))),
+                // `equals`, `hashCode`, `toString`, `compareTo`: the handle's
+                // kind (`server_values.rs`), answered before here.
                 _ => Err(NativeError::UnknownHostCall(r.clone())),
             });
         }
@@ -1499,27 +1495,13 @@ impl StdHost {
                     Ok(Value::Int(i32::from(other == Some(block))))
                 }
                 ("isAir", "()Z") => Ok(Value::Int(i32::from(block == "minecraft:air"))),
-                ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(i32::from(
-                    args.first()
-                        .and_then(crate::runtime::game_object::text)
-                        .is_some_and(|o| o == text),
-                ))),
-                ("hashCode", "()I") => Ok(Value::Int(stable_hash(text))),
                 _ => Err(NativeError::UnknownHostCall(r.clone())),
             });
         }
-        // A `Block` value.
-        if let Some(block) = text.strip_prefix("game/block/") {
-            return Some(match (r.name.as_str(), r.descriptor.as_str()) {
-                ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(block.to_owned()))),
-                ("equals", "(Ljava/lang/Object;)Z") => Ok(Value::Int(i32::from(
-                    args.first()
-                        .and_then(crate::runtime::game_object::text)
-                        .is_some_and(|o| o == text),
-                ))),
-                ("hashCode", "()I") => Ok(Value::Int(stable_hash(text))),
-                _ => Err(NativeError::UnknownHostCall(r.clone())),
-            });
+        // A `Block` value: its `toString`, `equals` and `hashCode` are the
+        // kind's (`server_values.rs`); no other member is modelled.
+        if text.starts_with("game/block/") {
+            return Some(Err(NativeError::UnknownHostCall(r.clone())));
         }
         // The clone's old player, keyed as its previous life: the original's facts.
         let kind = match facade(text)? {

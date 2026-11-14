@@ -291,7 +291,7 @@ mod tests {
             ),
             Some(Value::Int(1))
         );
-        let pos = Value::Ref(Some("block-pos/31,64,11".into()));
+        let pos = crate::game_object::value("block-pos/31,64,11").unwrap();
         assert_eq!(
             border(
                 bounds,

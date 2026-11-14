@@ -48,6 +48,10 @@ const RETIRED_PREFIXES: &[&str] = &[
     // `client_values.rs`, `game_object::client_value`).
     "client/",
     "key-category/",
+    // `BlockPos`, `LevelResource` and `GameRule` (#156 P16c, `server_values.rs`).
+    "block-pos/",
+    "level-resource/",
+    "game-rule/",
 ];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`

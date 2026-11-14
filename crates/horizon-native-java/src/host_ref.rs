@@ -1865,9 +1865,10 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::game_object::declared_types,
         },
-        // One object per registry entry.
-        canonical: always_canonical,
-        methods: &crate::game_object::IDENTITY_METHODS,
+        // One object per registry entry; a block state whose key names no
+        // properties may be any state of its block (P16c).
+        canonical: crate::server_values::registry_canonical,
+        methods: &crate::game_object::REGISTRY_METHODS,
     },
     KindInfo {
         kind: HostKind::GameValue,

@@ -131,8 +131,8 @@ const LEVEL_RESOURCES: &[(&str, &str)] = &[
     ("ROOT", "."),
 ];
 
-/// A façade value: a `game/…` marker's handle (`game_object.rs`, #156
-/// P16b); `level-resource/` and `game-rule/` text until P16c.
+/// A façade value: a `game/…`, `level-resource/` or `game-rule/` marker's
+/// handle (`game_object.rs`, #156 P16b, P16c).
 fn marker(text: impl Into<String>) -> Value {
     crate::game_object::server_value(text.into())
 }
@@ -325,7 +325,8 @@ pub(crate) fn answer(
     }
     if let Some(id) = text.strip_prefix(LEVEL_RESOURCE) {
         return match (r.name.as_str(), descriptor) {
-            ("id" | "toString", "()Ljava/lang/String;") => Ok(marker(id)),
+            // `toString` (`/<id>`) is the handle kind's (`server_values.rs`).
+            ("id", "()Ljava/lang/String;") => Ok(Value::Ref(Some(id.to_owned()))),
             _ => refuse(r),
         };
     }
