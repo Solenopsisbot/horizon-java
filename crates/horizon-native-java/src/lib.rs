@@ -2572,10 +2572,13 @@ pub trait Host {
     /// no declaration table ignores it.
     fn note_content_builder(&mut self, _event: ContentBuilderEvent) {}
 
-    /// The runtime constructed `instance`, the entrypoint object of `class`
-    /// (internal name), and runs its method on it: the object a loader's own
-    /// `getEntrypoints` answers for that entry (`host_fabric_runtime.rs`).
-    fn note_entrypoint_constructed(&mut self, _class: &str, _instance: &Value) {}
+    /// The runtime constructed `instance`, the object of the entrypoint
+    /// `kind` (`main`, `client`...) whose class is `class` (internal name),
+    /// and runs its method on it: the object a loader's own `getEntrypoints`
+    /// answers for that entry (`host_fabric_runtime.rs`). Fabric makes one
+    /// object per entrypoint key, so a class that is both `main` and `client`
+    /// has two.
+    fn note_entrypoint_constructed(&mut self, _kind: &str, _class: &str, _instance: &Value) {}
 
     /// Sibling-jar classes this host lets the executing jar link against.
     ///
@@ -2917,7 +2920,7 @@ pub struct StdHost {
     /// The entrypoint classes (internal names) the runtime constructed: their
     /// instances are the run's own entrypoint objects.
     /// The entrypoint objects the runtime built, by class (internal name).
-    constructed_entrypoints: BTreeMap<String, Value>,
+    constructed_entrypoints: BTreeMap<(String, String), Value>,
     /// Identifiers retained by `CustomPacketPayload.Type` values created by
     /// the bounded networking façade.
     packet_types: BTreeMap<String, String>,
@@ -3307,7 +3310,12 @@ impl StdHost {
         if requested != host_fabric_runtime::invocation_type(kind) {
             return None;
         }
-        self.constructed_entrypoints.get(&internal).cloned()
+        // One object per entrypoint key (Fabric Loader 0.19.5's
+        // `EntrypointStorage.add`: a new `NewEntry`, with its own instance
+        // map, per key).
+        self.constructed_entrypoints
+            .get(&(kind.to_owned(), internal))
+            .cloned()
     }
 
     fn empty_collection(&mut self, kind: &str) -> Value {
@@ -4588,9 +4596,9 @@ impl Host for StdHost {
         self.get_static(r)
     }
 
-    fn note_entrypoint_constructed(&mut self, class: &str, instance: &Value) {
+    fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
         self.constructed_entrypoints
-            .insert(class.to_owned(), instance.clone());
+            .insert((kind.to_owned(), class.to_owned()), instance.clone());
     }
 
     fn note_content_builder(&mut self, event: ContentBuilderEvent) {
@@ -16764,7 +16772,7 @@ impl NativeJar {
                 constructed?;
                 runtime
                     .host
-                    .note_entrypoint_constructed(&class_name, &instance);
+                    .note_entrypoint_constructed(kind, &class_name, &instance);
             }
             if method != "<init>" {
                 // The loader constructs the entrypoint instance and then calls
@@ -42041,7 +42049,7 @@ mandatory = true
         // Once it did, the loader's own `ModInitializer` instance is that
         // object; another type is a fresh instance (or a mismatch): counted.
         let instance = jar_object::handle("demo/Main#0".into());
-        host.note_entrypoint_constructed("demo/Main", &instance);
+        host.note_entrypoint_constructed("main", "demo/Main", &instance);
         let main = host
             .invoke_instance(
                 &entries,

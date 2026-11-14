@@ -1026,8 +1026,9 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.send_feedback(r, component, broadcast)
     }
 
-    fn note_entrypoint_constructed(&mut self, class: &str, instance: &Value) {
-        self.inner.note_entrypoint_constructed(class, instance);
+    fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
+        self.inner
+            .note_entrypoint_constructed(kind, class, instance);
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
