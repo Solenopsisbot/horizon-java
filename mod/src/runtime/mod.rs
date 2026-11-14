@@ -71,6 +71,7 @@ mod hook_shapes;
 mod host_array;
 mod host_attachment;
 mod host_brigadier;
+mod host_class;
 mod host_codec;
 mod host_component;
 mod host_config;
@@ -99,7 +100,6 @@ mod immutable_collections;
 mod iteration_guard;
 mod jar_compare;
 mod jar_object;
-mod host_class;
 mod jar_operands;
 mod jar_text;
 mod jar_throwables;
@@ -20942,8 +20942,7 @@ impl<H: Host> Runtime<'_, H> {
             ("newInstance", "(Ljava/lang/Class;I)Ljava/lang/Object;") => {
                 let length = expect_int(r, StdHost::argument(r, args, 1)?)?;
                 let length = array_length(length)?;
-                let Some(component) = host_class::class_name(StdHost::argument(r, args, 0)?)
-                else {
+                let Some(component) = host_class::class_name(StdHost::argument(r, args, 0)?) else {
                     return Ok(None);
                 };
                 let class = value_class::array_class_marker(&component.replace('.', "/"));
@@ -21173,17 +21172,16 @@ impl<H: Host> Runtime<'_, H> {
                 // (text until P13): counted, never `true` from the text.
                 if r.name == "equals"
                     && r.descriptor == "(Ljava/lang/Object;)Z"
-                    && let Some(receiver) = receiver
-                        .filter(|receiver| host_class::is_class(receiver, self.classes, &self.linked))
+                    && let Some(receiver) = receiver.filter(|receiver| {
+                        host_class::is_class(receiver, self.classes, &self.linked)
+                    })
                     && let Some(marker) = marker
                 {
                     let other = args.first().unwrap_or(&Value::Ref(None));
                     return Ok(match other {
                         other if host_class::is_class(other, self.classes, &self.linked) => {
-                            let both_handles = matches!(
-                                (receiver, other),
-                                (Value::Host(_), Value::Host(_))
-                            );
+                            let both_handles =
+                                matches!((receiver, other), (Value::Host(_), Value::Host(_)));
                             match host_class::class_name(other) {
                                 Some(name) if name != marker => Some(Value::Int(0)),
                                 // Two `Class` handles of one name: one object.
@@ -24996,11 +24994,7 @@ impl<H: Host> Runtime<'_, H> {
                                     || self.host.host_instance_of(marker, &wanted)
                                     || jdk_model::platform_instance_of(marker, &wanted)
                                     || (wanted == "java/lang/Class"
-                                        && host_class::is_class(
-                                            &value,
-                                            self.classes,
-                                            &self.linked,
-                                        ))
+                                        && host_class::is_class(&value, self.classes, &self.linked))
                             });
                     // A `false` no model can stand behind is counted
                     // (`checkcast.rs`), and the host's answer is the result.

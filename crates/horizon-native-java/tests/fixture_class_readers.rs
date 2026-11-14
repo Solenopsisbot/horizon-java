@@ -20,7 +20,10 @@ const PROBE: &str = include_str!("fixtures/class_readers/Probe.java");
 fn class_readers_answer_as_java_25() {
     let fixture = Fixture::build("class-readers", &[("demo/Probe.java", PROBE)]);
     for (method, java) in [
-        ("members", "java.lang.String,Tagged,demo,[I,truefalse,truefalse,true"),
+        (
+            "members",
+            "java.lang.String,Tagged,demo,[I,truefalse,truefalse,true",
+        ),
         (
             "arguments",
             "GREEN,2,truetrue,true,(String)String,abab,(String)int",

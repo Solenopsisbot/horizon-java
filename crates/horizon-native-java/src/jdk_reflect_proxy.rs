@@ -375,7 +375,9 @@ impl<H: Host> Runtime<'_, H> {
                         "Cannot invoke \"java.lang.Class.isPrimitive()\" because \"targetClass\" is null",
                     )));
                 }
-                let Some(class) = crate::host_class::class_name(target).map(|class| class.replace('.', "/")) else {
+                let Some(class) =
+                    crate::host_class::class_name(target).map(|class| class.replace('.', "/"))
+                else {
                     return self.host.unknown_operand_call(r).map(Some);
                 };
                 let illegal = |message: String| NativeError::UncaughtException {
@@ -460,7 +462,10 @@ impl<H: Host> Runtime<'_, H> {
                 "findStatic" | "findVirtual",
                 "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;",
             ) => {
-                let class = args.first().and_then(crate::host_class::class_name).map(str::to_owned);
+                let class = args
+                    .first()
+                    .and_then(crate::host_class::class_name)
+                    .map(str::to_owned);
                 let name = args.get(1).and_then(expect_ref).cloned();
                 let (Some(class), Some(name)) = (class, name) else {
                     return Err(npe(None));

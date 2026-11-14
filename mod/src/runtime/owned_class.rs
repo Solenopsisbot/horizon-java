@@ -106,7 +106,8 @@ impl<H: Host> Runtime<'_, H> {
         &mut self,
         value: &Value,
     ) -> Result<Option<String>, NativeError> {
-        let Some(class) = crate::runtime::host_class::class_name(value).map(|name| name.replace('.', "/")) else {
+        let Some(class) = crate::runtime::host_class::class_name(value).map(|name| name.replace('.', "/"))
+        else {
             return Ok(None);
         };
         if self.owned_class_side(&class).is_none() {

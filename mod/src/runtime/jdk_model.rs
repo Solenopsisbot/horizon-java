@@ -81,7 +81,9 @@ fn is_logger_owner(owner: &str) -> bool {
 fn logger_name(r: &MethodRef, args: &[Value]) -> String {
     match args.first() {
         Some(class) if r.descriptor.starts_with("(Ljava/lang/Class;") => {
-            crate::runtime::host_class::class_name(class).unwrap_or_default().replace('/', ".")
+            crate::runtime::host_class::class_name(class)
+                .unwrap_or_default()
+                .replace('/', ".")
         }
         Some(Value::Ref(Some(text))) => text.clone(),
         _ => String::new(),
@@ -1429,7 +1431,9 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             (Some("Ljava/lang/String;"), Some(Value::Ref(Some(name)))) => {
                 return Ok(Some(logger_value(api, name)));
             }
-            (Some("Ljava/lang/Class;"), Some(class)) if crate::runtime::host_class::class_name(class).is_some() => {
+            (Some("Ljava/lang/Class;"), Some(class))
+                if crate::runtime::host_class::class_name(class).is_some() =>
+            {
                 crate::runtime::host_class::class_name(class).map(|class| class.replace('.', "/"))
             }
             (Some("Ljava/lang/Object;"), Some(value)) => {
