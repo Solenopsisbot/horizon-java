@@ -2909,7 +2909,8 @@ mod tests {
 
         let mut loaded = load(Some("26.3"));
         let version = loaded.host.invoke(&detected, &[]).unwrap();
-        assert!(matches!(version, Value::Ref(Some(_))), "{version:?}");
+        // A `WorldVersion` object (a host handle since #156 P6b), not `null`.
+        assert_ne!(version, Value::Ref(None));
         assert_eq!(
             loaded.host.invoke_instance(&name, &version, &[]).unwrap(),
             Value::Ref(Some("26.3".to_owned()))
