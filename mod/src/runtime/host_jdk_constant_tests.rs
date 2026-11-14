@@ -94,7 +94,7 @@ fn jdk_constants_answer_as_java_25_or_count() {
         (
             "spelled",
             Exact(
-                "falsefalsetime-unit/SECONDS17true,falsefalsecoding-error-action/REPORT26true,falsefalseunicode-block/BASIC_LATIN25true,falsefalselocale/US9true,falsefalseregex-pattern/a+16true,-1",
+                "falsefalsetime-unit/SECONDS17,falsefalsecoding-error-action/REPORT26,falsefalseunicode-block/BASIC_LATIN25,falsefalselocale/US9,falsefalseregex-pattern/a+16,-1",
             ),
         ),
         // One object per constant, their text, `Enum.compareTo` (ordinals' difference).
