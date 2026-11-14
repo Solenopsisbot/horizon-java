@@ -3191,7 +3191,7 @@ impl StdHost {
         let internal = class.replace('.', "/");
         (requested == host_fabric_runtime::invocation_type(kind)
             && self.constructed_entrypoints.contains(&internal))
-        .then(|| Value::Ref(Some(internal)))
+        .then_some(Value::Ref(Some(internal)))
     }
 
     fn empty_collection(&mut self, kind: &str) -> Value {
