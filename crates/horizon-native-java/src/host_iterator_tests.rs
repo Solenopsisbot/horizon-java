@@ -163,3 +163,16 @@ fn iterators_answer_as_java_25_or_count() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A host that keeps no enumerations makes none: `Collections.enumeration` is then counted, never
+/// answered with a shared placeholder that two calls would see as one object (#225).
+#[test]
+fn a_host_without_enumerations_makes_none() {
+    use crate::Host;
+    let over = crate::host_iterator::EnumerationOver::Iterator(Value::Ref(None));
+    assert_eq!(crate::NullHost.new_enumeration(over.clone()), None);
+    let mut host = StdHost::new();
+    let made = host.new_enumeration(over.clone());
+    assert!(made.is_some());
+    assert_ne!(made, host.new_enumeration(over));
+}
