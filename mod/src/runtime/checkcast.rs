@@ -245,8 +245,28 @@ impl<H: Host> Runtime<'_, H> {
             };
         }
         let Some(target_file) = self.class(target) else {
-            // A JDK or game target: the runtime models those values by marker
-            // and keeps its previous behaviour.
+            // A plain `String` (`"hcoll:java/util/ArrayList#neutral0"`) cast
+            // to a JDK type: `String` is final and its supertypes are known,
+            // so Java's answer is exact (#208 review). A game target, and any
+            // text that may be a host marker, keep the previous behaviour.
+            if let Value::Ref(Some(text)) = value
+                && crate::runtime::jdk_closure::in_jdk_package(target)
+                && crate::runtime::value_class::is_plain_string(text)
+                // A `Class` is still its name's text (#156 P13): a
+                // primitive's (`int`) or a package-less held class's name
+                // looks plain and may be one.
+                && !matches!(
+                    text.as_str(),
+                    "boolean" | "byte" | "char" | "double" | "float" | "int" | "long" | "short" | "void"
+                )
+                && !self.classes.contains_key(text.as_str())
+                && !self.linked.contains_key(text.as_str())
+            {
+                if crate::runtime::value_class::string_instance_of(text, target) {
+                    return Ok(());
+                }
+                return Err(class_cast_exception("java/lang/String", target));
+            }
             return Ok(());
         };
         let target_is_interface =
