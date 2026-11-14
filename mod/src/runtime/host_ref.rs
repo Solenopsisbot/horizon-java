@@ -372,6 +372,12 @@ pub enum HostKind {
     FabricPayloadTypes,
     /// A `ResourceLoader`: key its `PackType`.
     FabricResourceLoader,
+    /// A `java.lang.reflect.Type` that is no class (`ParameterizedType`,
+    /// `TypeVariable`, `WildcardType`, `GenericArrayType`): key the node
+    /// (`host_reflect_type.rs`).
+    ReflectType,
+    /// An `AnnotatedType`: key the type it annotates.
+    AnnotatedType,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1474,6 +1480,26 @@ const KINDS: &[KindInfo] = &[
         // One per `PackType` (`IMPL_MAP`).
         canonical: always_canonical,
         methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ReflectType,
+        tag: "rtyp",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_reflect_type::type_types,
+        },
+        // Built afresh by every reflective call.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_reflect_type::TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::AnnotatedType,
+        tag: "rann",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_reflect_type::annotated_types,
+        },
+        // Built afresh by every reflective call.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_reflect_type::ANNOTATED_METHODS,
     },
 ];
 

@@ -826,9 +826,6 @@ fn platform_supertypes(class: &str) -> &'static [&'static str] {
 /// `marker instanceof wanted` for a boxed value or a JDK collection object
 /// (`java/util/ArrayList#3`, `java/util/LinkedHashMap#neutral0`).
 pub(crate) fn platform_instance_of(marker: &str, wanted: &str) -> bool {
-    if crate::runtime::reflect_generic::annotated_type_instance_of(marker, wanted) {
-        return true;
-    }
     let Some((class, _)) = marker.split_once('#') else {
         return false;
     };

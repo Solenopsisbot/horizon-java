@@ -20913,9 +20913,13 @@ impl<H: Host> Runtime<'_, H> {
         }
         // `Field.getGenericType` reads the field's `Signature` attribute; a
         // field without one answers the erased class, exactly as the JVM does.
+        // `getAnnotatedType` is that type's `AnnotatedType` (type-use
+        // annotations are not read: none, as for a type nobody annotated).
+        let annotated =
+            r.name == "getAnnotatedType" && r.descriptor == "()Ljava/lang/reflect/AnnotatedType;";
         if r.owner == "java/lang/reflect/Field"
-            && r.name == "getGenericType"
-            && r.descriptor == "()Ljava/lang/reflect/Type;"
+            && (annotated
+                || r.name == "getGenericType" && r.descriptor == "()Ljava/lang/reflect/Type;")
         {
             let field = receiver.and_then(host_reflect::field_of).ok_or_else(|| {
                 NativeError::Metadata("malformed java/lang/reflect/Field handle".into())
@@ -20946,7 +20950,11 @@ impl<H: Host> Runtime<'_, H> {
                     },
                     |value| generic_type_value(&value),
                 );
-            return Ok(Some(value));
+            return Ok(Some(if annotated {
+                host_reflect_type::annotated(value)
+            } else {
+                value
+            }));
         }
         if matches!(
             r.owner.as_str(),
@@ -20964,6 +20972,26 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(marker
                         .filter(|marker| !marker.is_empty())
                         .map(|marker| Value::Ref(Some(class_type_display(marker)))));
+                }
+                // `Class.equals` is identity, and one class has one marker
+                // (#156 P13 makes it a handle): another class's marker, a type
+                // handle (no `Class`) or `null` is another object.
+                if r.name == "equals"
+                    && r.descriptor == "(Ljava/lang/Object;)Z"
+                    && let Some(marker) = marker
+                        .filter(|marker| class_marker_like(marker, self.classes, &self.linked))
+                {
+                    let other = args.first().unwrap_or(&Value::Ref(None));
+                    return Ok(match other {
+                        Value::Ref(Some(other))
+                            if class_marker_like(other, self.classes, &self.linked) =>
+                        {
+                            Some(Value::Int(i32::from(other == marker)))
+                        }
+                        Value::Ref(None) | Value::Host(_) => Some(Value::Int(0)),
+                        // A string or a jar object: no class marker.
+                        _ => None,
+                    });
                 }
                 return Ok(None);
             };

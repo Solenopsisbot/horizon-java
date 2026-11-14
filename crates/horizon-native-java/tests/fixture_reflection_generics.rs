@@ -264,7 +264,9 @@ fn a_parameterized_nested_type_reports_its_owner() {
     let fixture = Fixture::build("owner");
     assert_eq!(
         fixture.text("ownerFacts"),
-        "inner|outer|1|Integer|demo.Generics$Outer$Inner<java.lang.Integer>"
+        // Java 25 (Temurin 25.0.5) on this source: `ParameterizedTypeImpl`
+        // prints a parameterized owner's text, `$`, then the inner class.
+        "inner|outer|1|Integer|demo.Generics$Outer<java.lang.String>$Inner<java.lang.Integer>"
     );
 }
 

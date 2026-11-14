@@ -423,10 +423,32 @@ fn annotated_instance_of(handle: &HostRef, wanted: &str, _: &dyn ClassHierarchy)
     Some(wanted == OBJECT || ANNOTATED.contains(&wanted) || annotated_shape(&node) == Some(wanted))
 }
 
+/// Whether a node names a nested class anywhere (an `AnnotatedType` prints a
+/// nested class through its annotated owner, `Map.Entry`, not as the type
+/// does).
+fn names_nested_class(node: &GenericType) -> bool {
+    match node {
+        GenericType::Class(name) => name.contains('$'),
+        GenericType::Parameterized { raw, owner, args } => {
+            raw.contains('$') || owner.is_some() || args.iter().any(names_nested_class)
+        }
+        GenericType::Variable { .. } => false,
+        GenericType::Wildcard { upper, lower } => upper.iter().chain(lower).any(names_nested_class),
+        GenericType::Array(component) => names_nested_class(component),
+    }
+}
+
+/// `AnnotatedType.toString` of a type nobody annotated: the type's name
+/// (Java 25, the fixture's `annotated` line); a nested class is counted.
+fn annotated_text(handle: &HostRef, _: &mut dyn Nested) -> Result<Option<String>, NativeError> {
+    Ok(annotated_inner(&Value::Host(handle.clone()))
+        .and_then(|inner| type_node(&inner))
+        .filter(|node| !names_nested_class(node))
+        .map(|node| crate::generic_type_display(&node)))
+}
+
 pub(crate) const ANNOTATED_METHODS: Methods = Methods {
-    // Type-use annotations print before each part: counted, except through
-    // the reflection model (`reflect_generic.rs`).
-    to_string: |_, _| Ok(None),
+    to_string: annotated_text,
     hash_code: |_, _| Ok(None),
     // `AnnotatedTypeBaseImpl.equals` compares types, annotations and owners.
     equals: |handle, other, _| {
