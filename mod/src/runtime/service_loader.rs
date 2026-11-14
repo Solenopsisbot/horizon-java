@@ -128,7 +128,7 @@ impl<H: Host> Runtime<'_, H> {
                 match (name, descriptor) {
                     ("type", "()Ljava/lang/Class;") => {
                         self.lookup(&service, &provider)?;
-                        Ok(Some(Value::Ref(Some(provider))))
+                        Ok(Some(crate::runtime::host_class::class_value(&provider)))
                     }
                     ("get", "()Ljava/lang/Object;") => {
                         self.provider_instance(&service, &provider).map(Some)

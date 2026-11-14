@@ -260,7 +260,7 @@ impl<H: Host> Runtime<'_, H> {
                     r.owner.clone()
                 }
                 None if r.owner == "java/lang/Object" && r.name == "getClass" => {
-                    return Ok(Value::Ref(Some(PROXY_CLASS.into())));
+                    return Ok(crate::host_class::class_value(PROXY_CLASS));
                 }
                 None => {
                     return Err(NativeError::MissingMethod(format!(

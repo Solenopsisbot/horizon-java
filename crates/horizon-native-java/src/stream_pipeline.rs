@@ -684,7 +684,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             self.host.unknown_operand_call(r)?;
             return Ok(Some(Value::Ref(None)));
         }
-        Ok(Some(Value::Ref(Some("java/lang/String".into()))))
+        Ok(Some(crate::host_class::class_value("java/lang/String")))
     }
 
     /// Mark a new stream parallel (`Collection.parallelStream()`).

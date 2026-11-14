@@ -511,10 +511,12 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
             // `runtimeType`: the very `Type` the token was made from.
             ("getType", "()Ljava/lang/reflect/Type;") => inner.clone(),
-            ("getRawType", "()Ljava/lang/Class;") => Value::Ref(Some(Self::raw_class(&node))),
+            ("getRawType", "()Ljava/lang/Class;") => {
+                crate::runtime::host_class::class_value(&Self::raw_class(&node))
+            }
             ("wrap", "()Lcom/google/common/reflect/TypeToken;") => {
                 match class.and_then(boxed_class) {
-                    Some(boxed) => Self::token_value(&Value::Ref(Some(boxed.to_owned()))),
+                    Some(boxed) => Self::token_value(&crate::runtime::host_class::class_value(boxed)),
                     None => receiver.cloned().unwrap_or(Value::Ref(None)),
                 }
             }
@@ -525,7 +527,9 @@ impl<H: Host> Runtime<'_, H> {
                 .into_iter()
                 .find(|primitive| class.is_some() && boxed_class(primitive) == class);
                 match primitive {
-                    Some(primitive) => Self::token_value(&Value::Ref(Some(primitive.to_owned()))),
+                    Some(primitive) => {
+                        Self::token_value(&crate::runtime::host_class::class_value(primitive))
+                    }
                     None => receiver.cloned().unwrap_or(Value::Ref(None)),
                 }
             }
@@ -536,9 +540,9 @@ impl<H: Host> Runtime<'_, H> {
             )),
             ("getComponentType", "()Lcom/google/common/reflect/TypeToken;") => match &node {
                 GenericType::Class(name) => match name.strip_prefix('[') {
-                    Some(element) => {
-                        Self::token_value(&Value::Ref(Some(erased_field_type(element))))
-                    }
+                    Some(element) => Self::token_value(&crate::runtime::host_class::class_value(
+                        &erased_field_type(element),
+                    )),
                     None => Value::Ref(None),
                 },
                 GenericType::Array(component) => Self::token_value(&generic_type_value(component)),

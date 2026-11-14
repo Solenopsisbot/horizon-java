@@ -337,6 +337,18 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Ok(true);
         }
+        // A `Class` handle against class-marker text of its name, until
+        // #156 P13c (`host_class.rs`): the same class from a producer not yet
+        // moved, or a `String` spelled like it. Counted; the old answer (two
+        // equal markers) stands.
+        if crate::runtime::host_class::handle_against_same_text(lhs, rhs) {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/lang/Object".into(),
+                name: "if_acmp".into(),
+                descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Z".into(),
+            })?;
+            return Ok(true);
+        }
         let boxed = match (box_key(lhs), box_key(rhs)) {
             (Some(a), Some(b)) if a.same_box(&b) => Some(a),
             // Two boxes of different values or classes are different objects.

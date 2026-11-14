@@ -191,10 +191,18 @@ impl<H: Host> Runtime<'_, H> {
                     if host_array::is_shared_empty(key) {
                         return self.host.unknown_operand_call(r).map(Some);
                     }
-                    Some(Value::Ref(Some(host_array::class_of_key(key).to_owned())))
+                    Some(crate::host_class::class_value(host_array::class_of_key(
+                        key,
+                    )))
                 }
+                // The element class's own `Class` object; `null` for a class
+                // that is no array.
                 ("java/lang/Class", "getComponentType", "()Ljava/lang/Class;") => {
-                    expect_ref(receiver).map(|class| Value::Ref(component_of_array_class(class)))
+                    crate::host_class::class_name(receiver).map(|class| {
+                        component_of_array_class(class).map_or(Value::Ref(None), |component| {
+                            crate::host_class::class_value(&component)
+                        })
+                    })
                 }
                 _ => None,
             },

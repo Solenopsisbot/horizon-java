@@ -107,24 +107,23 @@ impl<H: Host> Runtime<'_, H> {
                 self.new_array_value(descriptor, values)
             }
             (AnnotationValue::String(class), "Ljava/lang/Class;") => {
-                // `V` is `void.class`; a primitive keeps its name, as the
-                // wrapper `TYPE` markers do.
-                Value::Ref(Some(match class.as_str() {
-                    "V" => "void".to_owned(),
-                    "Z" => "boolean".to_owned(),
-                    "B" => "byte".to_owned(),
-                    "C" => "char".to_owned(),
-                    "S" => "short".to_owned(),
-                    "I" => "int".to_owned(),
-                    "J" => "long".to_owned(),
-                    "F" => "float".to_owned(),
-                    "D" => "double".to_owned(),
+                // The class's `Class` object (#156 P13b1). `V` is `void.class`;
+                // a primitive is keyed by its name, as the wrapper `TYPE`s are.
+                crate::runtime::host_class::class_value(match class.as_str() {
+                    "V" => "void",
+                    "Z" => "boolean",
+                    "B" => "byte",
+                    "C" => "char",
+                    "S" => "short",
+                    "I" => "int",
+                    "J" => "long",
+                    "F" => "float",
+                    "D" => "double",
                     other => other
                         .strip_prefix('L')
                         .and_then(|name| name.strip_suffix(';'))
-                        .unwrap_or(other)
-                        .to_owned(),
-                }))
+                        .unwrap_or(other),
+                })
             }
             (AnnotationValue::String(text), "Ljava/lang/String;") => Value::Ref(Some(text.clone())),
             // Any other reference type holding a string is an enum constant,
