@@ -108,6 +108,9 @@ const MAX_MESSAGES: usize = 256;
 const MAX_EXCEPTION_TYPES: usize = 1024;
 /// How deep a `CommandNode.addChild` merge may recurse.
 const MAX_MERGE_DEPTH: usize = 64;
+/// How many finished runs a kept context or source still answers for; an
+/// older one is counted.
+const MAX_KEPT_RUNS: usize = 32;
 
 /// What an argument node parses, as the jar asked for it.
 #[derive(Clone, Debug, PartialEq)]
@@ -212,6 +215,9 @@ pub struct TreeNode {
     /// A `fork` or a redirect with a modifier: the source changes on the way,
     /// which the game does not model.
     pub modifier: bool,
+    /// `CommandNode.isFork`: a `fork`, or a `forward` with `fork` true (a
+    /// `redirect` with a modifier is `forward(target, modifier, false)`).
+    pub fork: bool,
     /// A custom `SuggestionProvider` (`suggests`).
     pub suggests: Option<Value>,
 }
@@ -225,6 +231,7 @@ impl TreeNode {
             requirement: None,
             redirect: None,
             modifier: false,
+            fork: false,
             suggests: None,
         }
     }
@@ -281,6 +288,33 @@ pub struct BrigadierState {
     /// earlier run is never the running one's.
     next_run: usize,
     exec: Option<Box<Execution>>,
+    /// What the last [`MAX_KEPT_RUNS`] runs named (their invocation and
+    /// sources), so a context or source a jar kept answers for its own run,
+    /// as the Java object does.
+    kept: std::collections::VecDeque<KeptRun>,
+}
+
+/// What one finished run named.
+#[derive(Clone, Debug)]
+struct KeptRun {
+    run: usize,
+    invocation: Option<CommandInvocation>,
+    sources: Vec<CommandSource>,
+}
+
+/// One command dispatch: the requirement checks and the run of one command
+/// for one source. Brigadier checks `requires` while parsing with the very
+/// `CommandSourceStack` it then runs the command with, so every check and the
+/// run of one dispatch see one source object
+/// ([`NativeJar::check_requirement_in`], [`NativeJar::run_command_in`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandDispatch(usize);
+
+impl StdHost {
+    /// A new command dispatch on this host.
+    pub fn command_dispatch(&mut self) -> CommandDispatch {
+        CommandDispatch(self.brigadier.new_run())
+    }
 }
 
 /// The source a command runs as (`CommandSourceStack`).
@@ -800,17 +834,55 @@ impl BrigadierState {
         run
     }
 
-    /// The running command's source a handle names; `None` for a source of
-    /// another run.
-    fn source(&self, value: &Value) -> Option<&CommandSource> {
-        let (run, at) = handles::source_of(value)?;
-        let exec = self.exec().filter(|exec| exec.run == run)?;
-        exec.sources.get(at)
+    /// What run `run` named: the running one, or a kept one.
+    fn run_record(&self, run: usize) -> Option<(Option<&CommandInvocation>, &[CommandSource])> {
+        if let Some(exec) = self.exec().filter(|exec| exec.run == run) {
+            return Some((exec.invocation.as_ref(), &exec.sources));
+        }
+        self.kept
+            .iter()
+            .rev()
+            .find(|kept| kept.run == run)
+            .map(|kept| (kept.invocation.as_ref(), kept.sources.as_slice()))
     }
 
-    /// Whether a context handle is the running command's.
-    fn is_running_context(&self, value: &Value) -> bool {
-        handles::context_run(value).is_some_and(|run| self.exec().is_some_and(|e| e.run == run))
+    /// Keep what a finished execution named (one record per run: a dispatch's
+    /// requirement checks, its run and its suppliers share it).
+    fn keep(&mut self, exec: &Execution) {
+        if let Some(kept) = self.kept.iter_mut().find(|kept| kept.run == exec.run) {
+            if exec.invocation.is_some() {
+                kept.invocation.clone_from(&exec.invocation);
+            }
+            return;
+        }
+        if self.kept.len() >= MAX_KEPT_RUNS {
+            self.kept.pop_front();
+        }
+        self.kept.push_back(KeptRun {
+            run: exec.run,
+            invocation: exec.invocation.clone(),
+            sources: exec.sources.clone(),
+        });
+    }
+
+    /// The source a handle names, of the running command or a kept run;
+    /// `None` for an older one.
+    fn source(&self, value: &Value) -> Option<&CommandSource> {
+        let (run, at) = handles::source_of(value)?;
+        self.run_record(run)?.1.get(at)
+    }
+
+    /// Whether a source handle is the running command's (the only one whose
+    /// messages reach a player now).
+    fn is_running_source(&self, value: &Value) -> bool {
+        handles::source_of(value)
+            .is_some_and(|(run, _)| self.exec().is_some_and(|exec| exec.run == run))
+    }
+
+    /// A context handle's run and that run's invocation, while it is kept.
+    fn context_record(&self, value: &Value) -> Option<(usize, Option<&CommandInvocation>)> {
+        let run = handles::context_run(value)?;
+        Some((run, self.run_record(run)?.0))
     }
 
     fn queue(&mut self, pending: Pending) -> Result<(), NativeError> {
@@ -1066,25 +1138,58 @@ impl StdHost {
         })
     }
 
-    /// The running command's argument `name`.
-    fn command_argument(&self, args: &[Value], at: usize) -> Result<&CommandArgument, NativeError> {
-        let name = args.get(at).map(expect_string).unwrap_or_default();
-        let invocation = self
-            .brigadier
-            .exec()
-            .and_then(|exec| exec.invocation.as_ref())
-            .ok_or_else(|| NativeError::Metadata("brigadier: no command is running".into()))?;
-        invocation
-            .arguments
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, value)| value)
-            .ok_or_else(|| NativeError::UncaughtException {
-                class: "java/lang/IllegalArgumentException".into(),
-                message: Some(format!("No such argument '{name}' exists on this command")),
-                frame: None,
-            })
+    /// Argument `name` of the run `context` (a context handle) belongs to.
+    /// `None` when the context is not one the host can read (an older run's,
+    /// a requirement check's): the caller counts the call.
+    fn command_argument(
+        &self,
+        context: &Value,
+        name: &str,
+    ) -> Option<Result<CommandArgument, NativeError>> {
+        let (_, invocation) = self.brigadier.context_record(context)?;
+        Some(
+            invocation?
+                .arguments
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| value.clone())
+                .ok_or_else(|| NativeError::UncaughtException {
+                    class: "java/lang/IllegalArgumentException".into(),
+                    message: Some(format!("No such argument '{name}' exists on this command")),
+                    frame: None,
+                }),
+        )
+    }
+
+    /// Whether `value`, handed where a `CommandContext` (or a source) is
+    /// declared, is a plain string: Java's cast throws for it.
+    fn forged(value: &Value) -> bool {
+        matches!(value, Value::Ref(Some(text)) if crate::value_class::is_plain_string(text))
+    }
+
+    /// Argument `name` of the context a getter or `getArgument` was handed
+    /// (`args[0]` for a static getter): its own run's, never the running
+    /// one's. `Err` with the answer to give when it cannot be read: a
+    /// `ClassCastException` for a String (Java's cast), a counted call
+    /// otherwise.
+    fn context_value(
+        &mut self,
+        r: &MethodRef,
+        context: &Value,
+        name: &str,
+    ) -> Result<CommandArgument, Result<Value, NativeError>> {
+        if !handles::is(context, HostKind::CommandContext) && Self::forged(context) {
+            return Err(Err(crate::checkcast::class_cast_exception(
+                "java/lang/String",
+                "com/mojang/brigadier/context/CommandContext",
+            )));
+        }
+        match self.command_argument(context, name) {
+            Some(Ok(value)) => Ok(value),
+            Some(Err(error)) => Err(Err(error)),
+            None => Err(self.unknown_host_call(r)),
+        }
     }
 
     /// `IntegerArgumentType.getInteger(context, name)` and its siblings.
@@ -1097,9 +1202,14 @@ impl StdHost {
         let name_at = crate::descriptor_arguments(&r.descriptor)
             .len()
             .checked_sub(1)?;
-        let value = match self.command_argument(args, name_at) {
-            Ok(value) => value.clone(),
-            Err(error) => return Some(Err(error)),
+        let name = args
+            .get(name_at)
+            .map(expect_string)
+            .unwrap_or_default()
+            .to_owned();
+        let value = match self.context_value(r, args.first()?, &name) {
+            Ok(value) => value,
+            Err(answer) => return Some(answer),
         };
         let mismatch = || {
             Some(Err(NativeError::UncaughtException {
@@ -1204,9 +1314,85 @@ impl StdHost {
         }
     }
 
-    /// `context.getArgument(name, Class)`: the boxed value.
-    fn context_argument(&mut self, args: &[Value]) -> Result<Value, NativeError> {
-        Ok(match self.command_argument(args, 0)?.clone() {
+    /// `context.getArgument(name, clazz)` on `context`'s own run: the boxed
+    /// value when it is a `clazz` (a primitive class reads as its wrapper),
+    /// else brigadier's `IllegalArgumentException` (`CommandContext`,
+    /// 1.3.11): `Argument 'n' is defined as Integer, not class
+    /// java.lang.String`. A class whose kind the runtime cannot tell (a jar's
+    /// or the game's, for a JDK value) is counted.
+    fn context_argument(
+        &mut self,
+        r: &MethodRef,
+        context: &Value,
+        args: &[Value],
+    ) -> Result<Value, NativeError> {
+        let name = args
+            .first()
+            .map(expect_string)
+            .unwrap_or_default()
+            .to_owned();
+        let argument = match self.context_value(r, context, &name) {
+            Ok(argument) => argument,
+            Err(answer) => return answer,
+        };
+        let class = match &argument {
+            CommandArgument::Bool(_) => "java/lang/Boolean",
+            CommandArgument::Int(_) => "java/lang/Integer",
+            CommandArgument::Long(_) => "java/lang/Long",
+            CommandArgument::Float(_) => "java/lang/Float",
+            CommandArgument::Double(_) => "java/lang/Double",
+            CommandArgument::Str(_) => "java/lang/String",
+            CommandArgument::Uuid(_) => "java/util/UUID",
+            CommandArgument::Identifier(_) => "net/minecraft/resources/Identifier",
+            // An `EntitySelector`, `Coordinates` or `ResourceKey` is resolved
+            // by the type's own getter; the raw object is not modelled.
+            _ => return self.unknown_host_call(r),
+        };
+        let Some(wanted) = args.get(1).and_then(expect_ref).map(String::as_str) else {
+            return self.unknown_host_call(r);
+        };
+        let wrapper = match wanted {
+            "boolean" => "java/lang/Boolean",
+            "int" => "java/lang/Integer",
+            "long" => "java/lang/Long",
+            "float" => "java/lang/Float",
+            "double" => "java/lang/Double",
+            other => other,
+        };
+        let fits = wrapper == class
+            || wrapper == "java/lang/Object"
+            || crate::jdk_closure::class(class)
+                .is_some_and(|row| row.supertypes.contains(&wrapper));
+        if !fits {
+            // The JDK's value classes are final with known supertypes; the
+            // message prints `clazz.toString()`, which needs its kind.
+            let shown = match wanted {
+                "boolean" | "byte" | "char" | "short" | "int" | "long" | "float" | "double" => {
+                    wanted.to_owned()
+                }
+                _ => match crate::jdk_closure::class(wanted) {
+                    Some(row) if crate::jdk_closure::class(class).is_some() => format!(
+                        "{} {}",
+                        if row.is_interface {
+                            "interface"
+                        } else {
+                            "class"
+                        },
+                        wanted.replace('/', ".")
+                    ),
+                    _ => return self.unknown_host_call(r),
+                },
+            };
+            let simple = class.rsplit('/').next().unwrap_or(class);
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/IllegalArgumentException".into(),
+                message: Some(format!(
+                    "Argument '{name}' is defined as {simple}, not {shown}"
+                )),
+                frame: None,
+            });
+        }
+        Ok(match argument {
             CommandArgument::Bool(v) => boolean_value(v),
             CommandArgument::Int(v) => Value::Int(v),
             CommandArgument::Long(v) => Value::Long(v),
@@ -1217,13 +1403,7 @@ impl StdHost {
                 identifier_value(namespace, path)
             }
             CommandArgument::Uuid(uuid) => uuid_value(&uuid_text(uuid))?,
-            // An `EntitySelector`, `Coordinates` or `ResourceKey` is resolved
-            // by the type's own getter; the raw object is not modelled.
-            other => {
-                return Err(NativeError::Metadata(format!(
-                    "brigadier: getArgument of a {other:?} argument is not modelled"
-                )));
-            }
+            _ => return self.unknown_host_call(r),
         })
     }
 
@@ -1348,18 +1528,18 @@ impl StdHost {
             return Some(self.node_call(r, id, args));
         }
         if handles::is(receiver, HostKind::CommandContext) {
-            if !self.brigadier.is_running_context(receiver) {
+            // The context's own run (a kept one too), never the running one's.
+            let Some((run, invocation)) = self.brigadier.context_record(receiver) else {
                 return Some(Err(NativeError::UnknownHostCall(r.clone())));
-            }
-            let run = self.brigadier.exec().map_or(0, |exec| exec.run);
+            };
+            let input = invocation.map(|i| i.input.clone());
             return Some(match r.name.as_str() {
                 "getSource" => Ok(handles::source(run, 0)),
-                "getArgument" => self.context_argument(args),
-                "getInput" => Ok(self
-                    .brigadier
-                    .exec()
-                    .and_then(|e| e.invocation.as_ref())
-                    .map_or(Value::Ref(None), |i| marker(i.input.clone()))),
+                "getArgument" => self.context_argument(r, receiver, args),
+                "getInput" => match input {
+                    Some(input) => Ok(marker(input)),
+                    None => Err(NativeError::UnknownHostCall(r.clone())),
+                },
                 _ => Err(NativeError::UnknownHostCall(r.clone())),
             });
         }
@@ -1446,9 +1626,21 @@ impl StdHost {
         }
         if what.as_deref() == Some(REQUIRES) {
             return match name {
+                // `PermissionProviderCheck.test(T)` casts its argument to a
+                // `PermissionSetSupplier`: a String throws, an object the host
+                // cannot read is counted.
                 "test" => {
-                    let level = self.subject_level(args.first()?).unwrap_or(0);
-                    flag(level >= own)
+                    let subject = args.first()?;
+                    match self.subject_level(subject) {
+                        Some(level) => flag(level >= own),
+                        None if Self::forged(subject) => {
+                            Some(Err(crate::checkcast::class_cast_exception(
+                                "java/lang/String",
+                                "net/minecraft/server/permissions/PermissionSetSupplier",
+                            )))
+                        }
+                        None => Some(Err(NativeError::UnknownHostCall(r.clone()))),
+                    }
                 }
                 _ => Some(Err(NativeError::UnknownHostCall(r.clone()))),
             };
@@ -1541,6 +1733,8 @@ impl StdHost {
                     }
                     _ => None,
                 };
+                let fork = r.name == "fork"
+                    || (r.name == "forward" && args.get(2) == Some(&Value::Int(1)));
                 let modifier = match r.name.as_str() {
                     "fork" => true,
                     "redirect" | "forward" => {
@@ -1558,6 +1752,7 @@ impl StdHost {
                     _ => {
                         template.redirect = target;
                         template.modifier = modifier;
+                        template.fork = fork;
                     }
                 }
                 Ok(receiver.clone())
@@ -1622,7 +1817,7 @@ impl StdHost {
             "getRedirect" => Ok(node
                 .redirect
                 .map_or(Value::Ref(None), |id| self.brigadier.node_value(id))),
-            "isFork" => Ok(Value::Int(i32::from(node.modifier))),
+            "isFork" => Ok(Value::Int(i32::from(node.fork))),
             "addChild" => {
                 let child = self
                     .brigadier
@@ -1712,6 +1907,12 @@ impl StdHost {
                 let list = "java/util/ArrayList#brigadier-online-players".to_owned();
                 self.mutable_collections.insert(list.clone(), names);
                 Ok(marker(list))
+            }
+            // Messages reach a player only from the running command's source.
+            ("sendSuccess" | "sendFailure" | "sendSystemMessage", _)
+                if !self.brigadier.is_running_source(receiver) =>
+            {
+                Err(unknown())
             }
             ("sendSuccess", _) => {
                 let supplier = first.cloned().ok_or_else(unknown)?;
@@ -1932,16 +2133,36 @@ impl NativeJar {
         }));
         let out = f(self, host);
         let exec = std::mem::replace(&mut host.brigadier.exec, outer);
+        if let Some(exec) = &exec {
+            host.brigadier.keep(exec);
+        }
         host.game_event = outer_event;
         host.strict_unknown_host_calls = strict;
         host.brigadier_truncate_log(marks);
         (out, exec.map(|e| e.pending).unwrap_or_default())
     }
 
-    /// Whether `requirement` lets `source` use a node. A level compares;
-    /// a jar predicate runs (`Predicate.test(source)`), strictly.
+    /// Whether `requirement` lets `source` use a node, as a dispatch of its
+    /// own ([`Self::check_requirement_in`]).
     pub fn check_requirement(
         &self,
+        requirement: &Requirement,
+        source: &CommandSource,
+        facade: Arc<EventFacade>,
+        host: &mut StdHost,
+        budget: &ExecutionBudget,
+    ) -> Result<bool, NativeError> {
+        let dispatch = host.command_dispatch();
+        self.check_requirement_in(dispatch, requirement, source, facade, host, budget)
+    }
+
+    /// Whether `requirement` lets `source` use a node in `dispatch`. A level
+    /// compares; a jar predicate runs (`Predicate.test(source)`), strictly,
+    /// with the dispatch's source object: the one every other check and the
+    /// run of `dispatch` see.
+    pub fn check_requirement_in(
+        &self,
+        CommandDispatch(run): CommandDispatch,
         requirement: &Requirement,
         source: &CommandSource,
         facade: Arc<EventFacade>,
@@ -1952,7 +2173,6 @@ impl NativeJar {
             Requirement::Level(level) => return Ok(source.level >= *level),
             Requirement::Predicate(predicate) => predicate.clone(),
         };
-        let run = host.brigadier.new_run();
         let sources = vec![source.clone()];
         let (result, _) =
             self.with_command_execution(host, facade, run, None, sources, |jar, host| {
@@ -2022,10 +2242,24 @@ impl NativeJar {
         host: &mut StdHost,
         budget: &ExecutionBudget,
     ) -> CommandRun {
+        let dispatch = host.command_dispatch();
+        self.run_command_in(dispatch, command, invocation, facade, host, budget)
+    }
+
+    /// [`Self::run_command`] in `dispatch`: the command's source is the
+    /// object the dispatch's requirement checks saw.
+    pub fn run_command_in(
+        &self,
+        CommandDispatch(run): CommandDispatch,
+        command: &Value,
+        invocation: &CommandInvocation,
+        facade: Arc<EventFacade>,
+        host: &mut StdHost,
+        budget: &ExecutionBudget,
+    ) -> CommandRun {
         let sources = vec![invocation.source.clone()];
         // The suppliers run as part of the same run: a lambda that kept the
         // context or the source still names them.
-        let run = host.brigadier.new_run();
         let (result, pending) = self.with_command_execution(
             host,
             Arc::clone(&facade),

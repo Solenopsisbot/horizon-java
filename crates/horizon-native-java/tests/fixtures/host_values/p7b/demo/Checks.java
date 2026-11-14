@@ -29,6 +29,11 @@ public final class Checks {
   static String ran = "not run";
   static CommandContext<CommandSourceStack> keptContext;
   static CommandSourceStack keptSource;
+  static CommandContext<CommandSourceStack> keptArg;
+  static String forged = "not run";
+  static String required = "not run";
+  static Object requireSaw;
+  static int requireCount;
 
   static LiteralArgumentBuilder<CommandSourceStack> literal(String name) {
     return LiteralArgumentBuilder.literal(name);
@@ -36,8 +41,9 @@ public final class Checks {
 
   /** Every check, in the order the runs take them. */
   public static final String[] NAMES = {"ran", "nodes", "builders", "argumentTypes", "permissions", "spelled",
-      "identities", "generic", "builderAsOther", "argumentTypeAsOther", "hashed", "used", "nodeTwins", "nodeHash",
-      "argumentNodeText", "nodeClass", "argumentTypeState", "permissionTwice", "sourceClass", "keptSourceName"};
+      "identities", "generic", "builderAsOther", "argumentTypeAsOther", "hashed", "required", "forged", "argClass",
+      "forks", "keptSourceName", "used", "nodeTwins", "nodeHash", "argumentNodeText", "nodeClass", "argumentTypeState",
+      "permissionTwice", "sourceClass"};
   static int step;
 
   /**
@@ -56,6 +62,52 @@ public final class Checks {
   static void registered(CommandDispatcher<CommandSourceStack> d) {
     dispatcher = d;
     d.register(literal("probe").executes(ctx -> inCommand(ctx)));
+    // `/rvarg <n>` keeps its context; `/rvforge <n>` hands getters other contexts.
+    d.register(literal("rvarg").then(RequiredArgumentBuilder.<CommandSourceStack, Integer>argument("n",
+        IntegerArgumentType.integer(0, 100)).executes(ctx -> {
+          keptArg = ctx;
+          return 1;
+        })));
+    d.register(literal("rvforge").then(RequiredArgumentBuilder.<CommandSourceStack, Integer>argument("n",
+        IntegerArgumentType.integer(0, 100)).executes(ctx -> {
+          forged = forge(ctx);
+          return 1;
+        })));
+    // `/rvreq`: Brigadier checks `requires` with the source it then runs the command with.
+    d.register(literal("rvreq").requires(source -> {
+      requireSaw = source;
+      requireCount++;
+      return true;
+    }).executes(ctx -> {
+      Object source = ctx.getSource();
+      required = "" + (source == requireSaw) + source.equals(requireSaw) + requireCount;
+      return 1;
+    }));
+  }
+
+  /** A getter reads the context it is handed: a String is no context, a kept one is its own run's. */
+  @SuppressWarnings("unchecked")
+  static String forge(CommandContext<CommandSourceStack> ctx) {
+    StringBuilder out = new StringBuilder();
+    try {
+      out.append(IntegerArgumentType.getInteger((CommandContext<CommandSourceStack>) (Object) "brigadier/context", "n"));
+    } catch (ClassCastException e) {
+      out.append("cce");
+    }
+    out.append(',');
+    try {
+      out.append(IntegerArgumentType.getInteger((CommandContext<CommandSourceStack>) (Object) "plain", "n"));
+    } catch (ClassCastException e) {
+      out.append("cce");
+    }
+    out.append(',').append(IntegerArgumentType.getInteger(keptArg, "n")).append(',');
+    try {
+      out.append(Commands.<CommandSourceStack>hasPermission(Commands.LEVEL_ALL)
+          .test((CommandSourceStack) (Object) "brigadier/source/0"));
+    } catch (ClassCastException e) {
+      out.append("cce");
+    }
+    return out.append(',').append(IntegerArgumentType.getInteger(ctx, "n")).toString();
   }
 
   static String check(String name) {
@@ -70,6 +122,10 @@ public final class Checks {
       case "identities": return identities();
       case "generic": return generic();
       case "hashed": return hashed();
+      case "required": return required;
+      case "forged": return forged;
+      case "argClass": return argClass();
+      case "forks": return forks();
       case "nodeTwins": return nodeTwins();
       case "nodeHash": return nodeHash();
       case "argumentNodeText": return argumentNodeText();
@@ -146,13 +202,42 @@ public final class Checks {
     return out.toString();
   }
 
+  /** `getArgument` on a kept context: the value as its class, brigadier's exception for another class. */
+  public static String argClass() {
+    StringBuilder out = new StringBuilder();
+    out.append(keptArg.getArgument("n", Integer.class)).append(keptArg.getArgument("n", int.class)).append(',')
+        .append(keptArg.getArgument("n", Number.class)).append(',');
+    try {
+      out.append(keptArg.getArgument("n", String.class));
+    } catch (IllegalArgumentException e) {
+      out.append("iae:").append(e.getMessage());
+    }
+    out.append(',');
+    try {
+      out.append(keptArg.getArgument("zz", Integer.class));
+    } catch (IllegalArgumentException e) {
+      out.append("iae:").append(e.getMessage());
+    }
+    return out.append(',').append(keptArg.getInput()).toString();
+  }
+
+  /** `isFork`: a `fork`, not a `redirect` with a modifier. */
+  public static String forks() {
+    LiteralCommandNode<CommandSourceStack> target = dispatcher.register(literal("ftarget"));
+    boolean redirected = literal("rm").redirect(target, c -> c.getSource()).build().isFork();
+    boolean forked = literal("fk").fork(target, c -> Collections.singleton(c.getSource())).build().isFork();
+    boolean plain = literal("rd").redirect(target).build().isFork();
+    return "" + redirected + forked + plain;
+  }
+
   /** Argument types: their class and interface, `equals` against themselves and text. */
   public static String argumentTypes() {
     IntegerArgumentType i = IntegerArgumentType.integer(1, 9);
     Object o = i;
     StringBuilder out = new StringBuilder();
     out.append(o instanceof IntegerArgumentType).append(o instanceof ArgumentType).append(i.equals(i))
-        .append(i.equals("integer(1, 9)")).append(i.equals(null)).append(o instanceof String);
+        .append(i.equals("integer(1, 9)")).append(i.equals(null)).append(o instanceof String)
+        .append(StringArgumentType.word().equals(StringArgumentType.word()));
     return out.toString();
   }
 

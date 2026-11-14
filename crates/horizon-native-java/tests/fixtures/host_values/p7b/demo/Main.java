@@ -25,6 +25,9 @@ public final class Main {
     CommandSourceStack source = new CommandSourceStack(CommandSource.NULL, Vec3.ZERO, Vec2.ZERO, null,
         LevelBasedPermissionSet.GAMEMASTER, Component.literal("Server"), null);
     System.out.println("result=" + d.execute("probe", source));
+    d.execute("rvarg 5", source);
+    d.execute("rvforge 7", source);
+    d.execute("rvreq", source);
     for (int i = 0; i < Checks.NAMES.length; i++) Checks.fired(d);
   }
 }

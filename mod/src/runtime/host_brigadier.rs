@@ -478,7 +478,30 @@ pub(crate) const CONTEXT_METHODS: Methods = Methods {
     ..STATE_METHODS
 };
 
+/// An argument type's `equals`: brigadier 1.3.11's `IntegerArgumentType`,
+/// `LongArgumentType`, `FloatArgumentType` and `DoubleArgumentType` compare
+/// their bounds (another one is counted); `StringArgumentType` and
+/// `BoolArgumentType` keep `Object`'s identity (`javap`); any other factory's
+/// class is treated as comparing its state.
+fn argument_type_equals(
+    handle: &HostRef,
+    other: &Value,
+    nested: &mut dyn Nested,
+) -> Result<Option<bool>, NativeError> {
+    let class = handle
+        .values()
+        .and_then(|values| text_at(&values, 1).map(str::to_owned));
+    match class.as_deref() {
+        Some(
+            "com/mojang/brigadier/arguments/StringArgumentType"
+            | "com/mojang/brigadier/arguments/BoolArgumentType",
+        ) => identity_equals(handle, other, nested),
+        _ => state_equals(handle, other, nested),
+    }
+}
+
 pub(crate) const ARGUMENT_TYPE_METHODS: Methods = Methods {
+    equals: argument_type_equals,
     instance_of: argument_type_instance_of,
     ..STATE_METHODS
 };
