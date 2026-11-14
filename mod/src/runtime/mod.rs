@@ -6406,11 +6406,11 @@ impl Host for StdHost {
             }
         }
         if r.owner == "java/lang/Thread" {
-            // A jar may construct its own thread for a shutdown hook; that
-            // object keeps its `java/lang/Thread#<n>` identity, and the main
-            // thread is the handle `currentThread` answers (`host_jdk.rs`).
-            // `main` names it in the parked-thread table, whose other keys
-            // are `java/lang/Thread#<n>` markers.
+            // A jar may construct its own thread (a shutdown hook, a worker),
+            // or an object of its own `Thread` subclass (#194), keyed by its
+            // allocation (`java/lang/Thread#<n>`, `demo/Worker#<n>`); the
+            // main thread is the handle `currentThread` answers
+            // (`host_jdk.rs`), `main` in the parked-thread table.
             let marker = match receiver {
                 receiver if host_jdk::is_main_thread(receiver) => "main".to_owned(),
                 // A thread a jar constructed (`jar_object.rs`).
@@ -6424,11 +6424,11 @@ impl Host for StdHost {
                 }
             };
             let marker = &marker;
-            let is_thread = marker == "main" || marker.starts_with("java/lang/Thread#");
-            if !is_thread {
-                return Err(NativeError::Metadata(
-                    "unsupported java/lang/Thread marker".into(),
-                ));
+            if marker != "main"
+                && r.name != "<init>"
+                && let Some(answer) = self.constructed_thread_call(r, marker, args)
+            {
+                return answer;
             }
             return match (r.name.as_str(), r.descriptor.as_str()) {
                 ("<init>", descriptor) => {
@@ -6436,9 +6436,13 @@ impl Host for StdHost {
                     self.note_thread_made(&marker, descriptor, args);
                     Ok(Value::Void)
                 }
-                ("getName", "()Ljava/lang/String;") => Ok(Value::Ref(Some("main".into()))),
-                ("isDaemon", "()Z") => Ok(Value::Int(0)),
-                ("setDaemon", "(Z)V") => Ok(Value::Void),
+                // The current thread's; a constructed thread's are its own
+                // (`parked_threads.rs`), counted where not known.
+                ("getName", "()Ljava/lang/String;") if marker == "main" => {
+                    Ok(Value::Ref(Some("main".into())))
+                }
+                ("isDaemon", "()Z") if marker == "main" => Ok(Value::Int(0)),
+                ("setDaemon", "(Z)V") if marker == "main" => Ok(Value::Void),
                 // The bounded runtime has one thread and `<init>` keeps no
                 // `Runnable`, so a started thread's body never runs. That is
                 // not a success to report: the call is counted (and refused
@@ -6448,6 +6452,7 @@ impl Host for StdHost {
                 // `parked_threads.rs` names what never ran in the report.
                 ("start", "()V") => {
                     let marker = marker.clone();
+                    self.mark_thread_started(&marker);
                     self.note_thread_parked(&marker);
                     self.unknown_host_call(r)
                 }
@@ -25464,6 +25469,12 @@ impl<H: Host> Runtime<'_, H> {
                         concurrent_sync::invoke(self, &r, receiver.as_ref(), &args)
                     ) {
                         // `CountDownLatch`, `new ThreadPoolExecutor` (`concurrent_sync.rs`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        executors::invoke_thread(self, &r, receiver.as_ref(), &args)
+                    ) {
+                        // A constructed thread's target (`executors.rs`, #194).
                         value
                     } else if let Some(value) =
                         executors::invoke_thread_factory(self, &r, receiver.as_ref(), &args)

@@ -25,7 +25,23 @@
 //!
 //! A thread made without a name gets `Thread-<n>` from a JVM-wide counter,
 //! which depends on every unnamed thread the whole game made, so its name is
-//! reported as unknown (`None`) rather than invented.
+//! reported as unknown (`None`) rather than invented, and `getName()` on it is
+//! counted.
+//!
+//! A jar class extending `Thread` (#194) is a thread like any other: its
+//! `super(..)` runs `Thread`'s constructor here, and a subclass given no
+//! `Runnable` is named by its own class (its `run()` is what would have run).
+//!
+//! **State.** Each constructed thread keeps what Java 25's `Thread` keeps and
+//! the jar can read back ([`ThreadState`]): its name, daemon flag and
+//! priority, and whether it was started. A new thread inherits the daemon flag
+//! and priority of the thread that made it, the game's thread a mod's code
+//! runs on: not a daemon (neither the client's render thread nor the server
+//! thread is one), but its priority is not known (the server thread's is 8 on a
+//! machine with more than four processors, 5 otherwise), so a priority the jar
+//! never set is counted when read. `setDaemon` on a started thread and a second
+//! `start()` throw `IllegalThreadStateException`; `setPriority` outside 1..10
+//! throws `IllegalArgumentException`, as Java 25 does.
 
 use super::*;
 
@@ -38,10 +54,22 @@ pub struct ParkedThread {
     pub runnable: String,
 }
 
+/// What a constructed thread keeps (see the module docs).
+#[derive(Debug, Clone, Default)]
+struct ThreadState {
+    /// `None`: the JVM's `Thread-<n>`, not known here.
+    name: Option<String>,
+    daemon: bool,
+    /// `None`: the creating thread's, not known here.
+    priority: Option<i32>,
+    started: bool,
+}
+
 /// The `Runnable` and name each constructed `Thread` marker was given.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ThreadTable {
     made: BTreeMap<String, ParkedThread>,
+    state: BTreeMap<String, ThreadState>,
     parked: Vec<ParkedThread>,
     /// How many of `parked` [`StdHost::take_new_parked_threads`] handed out.
     reported: usize,
@@ -83,11 +111,88 @@ impl StdHost {
                 .position(|parameter| parameter == wanted)
                 .and_then(|index| args.get(index))
         };
-        let runnable = at("Ljava/lang/Runnable;").map_or_else(|| "null".into(), runnable_name);
+        // A jar subclass given no `Runnable` runs its own `run()`: name it.
+        let class = crate::jar_object::key_class(marker).unwrap_or("java/lang/Thread");
+        let runnable = match at("Ljava/lang/Runnable;") {
+            Some(runnable) => runnable_name(runnable),
+            None if class != "java/lang/Thread" => class.to_owned(),
+            None => "null".into(),
+        };
         let name = at("Ljava/lang/String;").and_then(expect_ref).cloned();
+        self.threads.state.insert(
+            marker.to_owned(),
+            ThreadState {
+                name: name.clone(),
+                ..ThreadState::default()
+            },
+        );
         self.threads
             .made
             .insert(marker.to_owned(), ParkedThread { name, runnable });
+    }
+
+    /// A member of a thread the jar constructed (`marker` its key). `None`
+    /// leaves the call to be counted.
+    pub(crate) fn constructed_thread_call(
+        &mut self,
+        r: &MethodRef,
+        marker: &str,
+        args: &[Value],
+    ) -> Option<Result<Value, NativeError>> {
+        let state = self.threads.state.get_mut(marker)?;
+        let illegal_state = || {
+            Err(NativeError::UncaughtException {
+                class: "java/lang/IllegalThreadStateException".into(),
+                message: None,
+                frame: None,
+            })
+        };
+        Some(match (r.name.as_str(), r.descriptor.as_str()) {
+            ("getName", "()Ljava/lang/String;") => Ok(Value::Ref(Some(state.name.clone()?))),
+            ("setName", "(Ljava/lang/String;)V") => {
+                let Some(name) = args.first().and_then(expect_ref).cloned() else {
+                    return Some(Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: Some("name cannot be null".into()),
+                        frame: None,
+                    }));
+                };
+                state.name = Some(name.clone());
+                if let Some(made) = self.threads.made.get_mut(marker) {
+                    made.name = Some(name);
+                }
+                Ok(Value::Void)
+            }
+            ("isDaemon", "()Z") => Ok(Value::Int(i32::from(state.daemon))),
+            ("setDaemon", "(Z)V") if state.started => illegal_state(),
+            ("setDaemon", "(Z)V") => {
+                state.daemon = matches!(args.first(), Some(Value::Int(flag)) if *flag != 0);
+                Ok(Value::Void)
+            }
+            ("getPriority", "()I") => Ok(Value::Int(state.priority?)),
+            ("setPriority", "(I)V") => match args.first() {
+                Some(Value::Int(priority)) if (1..=10).contains(priority) => {
+                    state.priority = Some(*priority);
+                    Ok(Value::Void)
+                }
+                Some(Value::Int(_)) => Err(NativeError::UncaughtException {
+                    class: "java/lang/IllegalArgumentException".into(),
+                    message: None,
+                    frame: None,
+                }),
+                _ => return None,
+            },
+            ("start", "()V") if state.started => illegal_state(),
+            _ => return None,
+        })
+    }
+
+    /// `start()` on a thread the jar constructed: mark it started (its body
+    /// never runs; the caller counts the call and parks it).
+    pub(crate) fn mark_thread_started(&mut self, marker: &str) {
+        if let Some(state) = self.threads.state.get_mut(marker) {
+            state.started = true;
+        }
     }
 
     /// `thread.start()`: the body never runs, so name it in the report. The
