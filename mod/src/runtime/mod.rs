@@ -2715,8 +2715,13 @@ const MAX_SEEDED_SERVICE_PROVIDERS: usize = 256;
 /// Resident Java class state is bounded per native mod instance. Static
 /// fields and initialized-class markers are retained across callbacks, but a
 /// jar cannot grow an unbounded heap through repeated event dispatch.
-const MAX_PERSISTENT_CLASS_FIELDS: usize = 1024;
-const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1024;
+/// The host's bound on a jar's persistent statics and initialized classes:
+/// far above any real jar (the largest census jar keeps a few thousand). A
+/// `ConstantValue` static is never stored (`class_init.rs`), so constants do
+/// not count; a store over the bound is refused and counted, never an error
+/// in place of the call's result (`Runtime::persist_class_state`).
+const MAX_PERSISTENT_CLASS_FIELDS: usize = 1 << 20;
+const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1 << 20;
 
 /// Deterministic, game-independent mappings for the small standard-library
 /// surface commonly reached during mod bootstrap.
@@ -19233,11 +19238,26 @@ impl<H: Host> Runtime<'_, H> {
     /// Commit jar-owned class state to the resident host after an invocation.
     /// The host applies its own bounded retention policy; a failed commit is
     /// surfaced instead of silently dropping static fields or initialization.
+    ///
+    /// A store the host refuses (over its bound) leaves this run's statics
+    /// unkept: that is counted, and never turns a call that succeeded into an
+    /// error.
     fn persist_class_state(&mut self) -> Result<(), NativeError> {
-        self.host.store_persistent_class_state(
-            self.static_fields.clone(),
-            self.initialized_classes.clone(),
-        )
+        if self
+            .host
+            .store_persistent_class_state(
+                self.static_fields.clone(),
+                self.initialized_classes.clone(),
+            )
+            .is_err()
+        {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/lang/Class".into(),
+                name: "<persistent-statics>".into(),
+                descriptor: "()V".into(),
+            })?;
+        }
+        Ok(())
     }
 
     /// Open one `CallbackInfo` object for a host hook callback.
@@ -19942,9 +19962,7 @@ impl<H: Host> Runtime<'_, H> {
         match plan.kind {
             MixinAccessorKind::Getter => {
                 let value = if plan.static_target {
-                    self.static_fields
-                        .get(&Self::static_field_key(&target))
-                        .cloned()
+                    self.stored_static(&target)?
                 } else {
                     receiver
                         .and_then(|receiver| instance_field_key(receiver, &target))
@@ -21442,13 +21460,20 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("get", "(Ljava/lang/Object;)Ljava/lang/Object;") => {
                     // An unset field answers its type's default, exactly as a
-                    // JVM field does before the constructor assigns it.
-                    let value = self
+                    // JVM field does before the constructor assigns it; an
+                    // unset static its `ConstantValue` (never stored).
+                    let stored = self
                         .fields
                         .get(&key)
                         .or_else(|| self.static_fields.get(&key))
-                        .cloned()
-                        .unwrap_or_else(|| Value::default_for(&descriptor));
+                        .cloned();
+                    let value = match stored {
+                        Some(value) => value,
+                        None if access & 8 != 0 => self
+                            .static_constant(class, name, &descriptor)?
+                            .unwrap_or_else(|| Value::default_for(&descriptor)),
+                        None => Value::default_for(&descriptor),
+                    };
                     declared_value(&descriptor, value)
                 }
                 ("set", "(Ljava/lang/Object;Ljava/lang/Object;)V") => {
@@ -24789,6 +24814,8 @@ impl<H: Host> Runtime<'_, H> {
                                 // static of a class the jar does not declare
                                 // is the host's to answer (a strict host would
                                 // refuse the read otherwise).
+                                // A `ConstantValue` static is its constant
+                                // (never stored, `class_init.rs`).
                                 None if self.class(&field.owner).is_some_and(|file| {
                                     file.fields.iter().any(|declared| {
                                         declared.name == field.name
@@ -24796,7 +24823,12 @@ impl<H: Host> Runtime<'_, H> {
                                     })
                                 }) =>
                                 {
-                                    Value::default_for(&field.descriptor)
+                                    self.static_constant(
+                                        &field.owner,
+                                        &field.name,
+                                        &field.descriptor,
+                                    )?
+                                    .unwrap_or_else(|| Value::default_for(&field.descriptor))
                                 }
                                 None => self.host.get_static(&field)?,
                             }

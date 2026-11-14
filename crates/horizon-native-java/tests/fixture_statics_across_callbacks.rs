@@ -13,7 +13,7 @@
 #[path = "support/javac_fixture.rs"]
 mod javac_fixture;
 
-use horizon_native_java::{MethodRef, StdHost, Value};
+use horizon_native_java::{Host, MethodRef, StdHost, Value};
 use javac_fixture::Fixture;
 
 const SOURCES: &[(&str, &str)] = &[
@@ -137,4 +137,76 @@ fn statics_carry_across_callbacks_entrypoints_and_calls_as_jdk_25_does() {
         .filter(|(call, _)| !call.starts_with("log/Probe#"))
         .collect();
     assert_eq!(unknown, []);
+}
+
+/// Generated classes: 5000 `ConstantValue` statics, and 2000 mutable statics
+/// set in `<clinit>`.
+fn wide_sources() -> Vec<(&'static str, String)> {
+    let mut consts = String::from("package demo;\n\npublic final class Consts {\n");
+    for i in 0..5000 {
+        consts.push_str(&format!("  public static final int C{i} = {i};\n"));
+    }
+    consts.push_str(
+        "  public static int get() { return 1; }\n  public static int reflect() throws Exception { return Consts.class.getField(\"C4999\").getInt(null) + Consts.class.getField(\"C7\").getInt(null); }\n}\n",
+    );
+    let mut many = String::from("package demo;\n\npublic final class Many {\n");
+    for i in 0..2000 {
+        many.push_str(&format!("  public static int M{i} = {i};\n"));
+    }
+    many.push_str("  public static int bump() { M0++; M1999++; return M0 + M1999; }\n}\n");
+    vec![("demo/Consts.java", consts), ("demo/Many.java", many)]
+}
+
+fn call_int(fixture: &Fixture, host: &mut StdHost, class: &str, method: &str) -> Value {
+    fixture
+        .jar
+        .invoke_method_with_args(class, method, "()I", None, &[], host)
+        .unwrap_or_else(|error| panic!("{class}.{method}: {error}"))
+}
+
+/// #195 review: a class with many compile-time constants, or many mutable
+/// statics, still runs and keeps its state. A `ConstantValue` static is
+/// never stored (preparation's constant answers a read), so constants do not
+/// count toward the host's bound, and the bound is far above any real jar.
+/// OpenJDK 25.0.5 for the same classes: `1,1,5006` and `2001,2003`.
+#[test]
+fn many_constants_and_many_statics_keep_running_as_jdk_25_does() {
+    let generated = wide_sources();
+    let sources: Vec<(&str, &str)> = generated
+        .iter()
+        .map(|(path, text)| (*path, text.as_str()))
+        .collect();
+    let fixture = Fixture::build("statics-wide", &sources);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    assert_eq!(
+        call_int(&fixture, &mut host, "demo/Consts", "get"),
+        Value::Int(1)
+    );
+    assert_eq!(
+        call_int(&fixture, &mut host, "demo/Consts", "get"),
+        Value::Int(1)
+    );
+    assert_eq!(
+        call_int(&fixture, &mut host, "demo/Consts", "reflect"),
+        Value::Int(5006)
+    );
+    assert_eq!(
+        call_int(&fixture, &mut host, "demo/Many", "bump"),
+        Value::Int(2001)
+    );
+    assert_eq!(
+        call_int(&fixture, &mut host, "demo/Many", "bump"),
+        Value::Int(2003)
+    );
+    // No constant was stored as persistent state; the 2000 statics were.
+    let (statics, _) = host.persistent_class_state();
+    assert!(!statics.keys().any(|key| key.starts_with("demo/Consts#C")));
+    assert_eq!(
+        statics
+            .keys()
+            .filter(|key| key.starts_with("demo/Many#M"))
+            .count(),
+        2000
+    );
+    assert_eq!(host.unknown_host_calls(), []);
 }
