@@ -371,6 +371,16 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `a.equals(b)` for a non-null `a`, as the JVM runs it.
     pub(crate) fn java_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
+        // A `Class` against class-marker text of its name, until #156 P13c
+        // (`host_class.rs`): counted, the old answer (equal markers) kept.
+        if crate::runtime::host_class::handle_against_same_text(a, b) {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/lang/Object".into(),
+                name: "equals".into(),
+                descriptor: EQUALS.into(),
+            })?;
+            return Ok(true);
+        }
         match self.equality_of(a) {
             Equality::Null => Err(NativeError::UncaughtException {
                 class: "java/lang/NullPointerException".into(),
@@ -918,6 +928,11 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
     }
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        // A `Class`'s row asks here (`host_class.rs`): the runtime holds the
+        // class file that says whether it is an interface.
+        if let Some(name) = crate::runtime::host_class::handle_name(value) {
+            return Ok(self.runtime.class_object_text(name));
+        }
         if let Value::Host(handle) = value
             && !crate::runtime::jar_object::is_object_handle(handle)
         {

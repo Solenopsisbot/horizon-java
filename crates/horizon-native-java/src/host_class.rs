@@ -114,9 +114,7 @@ pub(crate) fn handle_name(value: &Value) -> Option<&str> {
 /// spelled like the name. Until P13c no reader can tell which, so `==` and
 /// `equals` between them are counted, never a silent `false`.
 pub(crate) fn handle_against_same_text(a: &Value, b: &Value) -> bool {
-    let same = |handle: &Value, text: &Value| {
-        matches!((handle_name(handle), text), (Some(name), Value::Ref(Some(text))) if name == text)
-    };
+    let same = |handle: &Value, text: &Value| matches!((handle_name(handle), text), (Some(name), Value::Ref(Some(text))) if name == text);
     same(a, b) || same(b, a)
 }
 
@@ -186,7 +184,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// [`table_is_interface`]. `None` when neither knows the class.
     pub(crate) fn class_is_interface(&self, name: &str) -> Option<bool> {
         match self.class(name) {
-            Some(file) => crate::jdk_model::class_access_flags(file).map(|flags| flags & 0x0200 != 0),
+            Some(file) => {
+                crate::jdk_model::class_access_flags(file).map(|flags| flags & 0x0200 != 0)
+            }
             None => table_is_interface(name),
         }
     }

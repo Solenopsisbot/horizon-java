@@ -397,9 +397,10 @@ version = "1.0"
     assert_eq!(payloads[0].codec, Value::Ref(Some("catalog:codec".into())));
     assert!(matches!(payloads[0].handler, Value::Ref(Some(_))));
     assert_eq!(payloads[1].direction, "playToClient");
-    assert_eq!(
-        payloads[1].payload_type,
-        Value::Ref(Some("java/lang/Object".into()))
+    assert!(
+        is_class(&payloads[1].payload_type, "java/lang/Object"),
+        "{:?}",
+        payloads[1].payload_type
     );
     assert_eq!(
         payloads[1].codec,

@@ -4914,19 +4914,17 @@ impl Host for StdHost {
                 | "java/lang/Void",
                 "TYPE",
                 "Ljava/lang/Class;",
-            ) => Ok(host_class::class_value(
-                match r.owner.as_str() {
-                    "java/lang/Boolean" => "boolean",
-                    "java/lang/Byte" => "byte",
-                    "java/lang/Character" => "char",
-                    "java/lang/Short" => "short",
-                    "java/lang/Integer" => "int",
-                    "java/lang/Long" => "long",
-                    "java/lang/Float" => "float",
-                    "java/lang/Double" => "double",
-                    _ => "void",
-                },
-            )),
+            ) => Ok(host_class::class_value(match r.owner.as_str() {
+                "java/lang/Boolean" => "boolean",
+                "java/lang/Byte" => "byte",
+                "java/lang/Character" => "char",
+                "java/lang/Short" => "short",
+                "java/lang/Integer" => "int",
+                "java/lang/Long" => "long",
+                "java/lang/Float" => "float",
+                "java/lang/Double" => "double",
+                _ => "void",
+            })),
             // The standard streams. They are real `PrintStream`s over the
             // process's stdout/stderr; the bounded host has no console, so the
             // text lands in the same in-memory sink a modelled writer uses.
@@ -21168,6 +21166,12 @@ impl<H: Host> Runtime<'_, H> {
         {
             let receiver = receiver.unwrap_or(&Value::Ref(None));
             let other = StdHost::argument(r, args, 0)?;
+            // A `Class` against class-marker text of its name, until #156
+            // P13c (`host_class.rs`): counted, the old answer kept.
+            if host_class::handle_against_same_text(receiver, other) {
+                self.host.unknown_operand_call(r)?;
+                return Ok(Some(Value::Int(1)));
+            }
             return Ok(Some(Value::Int(
                 (value_marker(receiver) == value_marker(other)) as i32,
             )));
@@ -21430,7 +21434,10 @@ impl<H: Host> Runtime<'_, H> {
             // outside it is counted, never a made-up `Object`.
             if self.class(&class).is_none() {
                 if let Some(row) = crate::jdk_closure::class(&class) {
-                    return Ok(Some(row.superclass.map_or(Value::Ref(None), host_class::class_value)));
+                    return Ok(Some(
+                        row.superclass
+                            .map_or(Value::Ref(None), host_class::class_value),
+                    ));
                 }
                 if crate::jdk_closure::in_jdk_package(&class) {
                     return self.host.unknown_operand_call(r).map(Some);

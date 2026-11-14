@@ -375,8 +375,13 @@ impl<H: Host> Runtime<'_, H> {
         ) {
             return Some(PUBLIC | ABSTRACT | FINAL);
         }
+        // A nested class's are its own `InnerClasses` row's (`static` lives
+        // only there), as JDK 25's `Class.getModifiers` reads them.
         if let Some(file) = self.class(class) {
-            return class_access_flags(file).map(|flags| i32::from(flags) & !0x0020);
+            return file
+                .nested_access_flags()
+                .or_else(|| class_access_flags(file))
+                .map(|flags| i32::from(flags) & !0x0020);
         }
         Some(match class {
             "java/lang/String"

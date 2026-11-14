@@ -114,10 +114,7 @@ fn every_producer_answers_one_object_per_class() {
 fn primitive_classes_are_their_own_objects() {
     assert_eq!(
         run("primitives"),
-        (
-            "111111111,int,void,int,long,double".to_owned(),
-            Vec::new()
-        )
+        ("111111111,int,void,int,long,double".to_owned(), Vec::new())
     );
 }
 
@@ -166,7 +163,10 @@ fn a_jars_own_copy_of_a_loader_class_is_the_class() {
     let fixture = Fixture::build_every_package(
         "class-objects-copy",
         &[
-            ("demo/Probe.java", COPY.replace("class Copy", "class Probe").as_str()),
+            (
+                "demo/Probe.java",
+                COPY.replace("class Copy", "class Probe").as_str(),
+            ),
             ("net/neoforged/fml/config/ConfigTracker.java", TRACKER_COPY),
         ],
     );

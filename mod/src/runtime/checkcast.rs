@@ -692,7 +692,7 @@ impl<H: Host> Runtime<'_, H> {
     /// or a mixin class that implements it (a "duck" interface), naming
     /// `class` among its targets. The class file of `class` does not list
     /// that interface, so the plain walk cannot see it.
-    fn mixin_adds_interface(&self, class: &str, target: &str) -> bool {
+    pub(crate) fn mixin_adds_interface(&self, class: &str, target: &str) -> bool {
         self.mixins_targeting(class)
             .iter()
             .filter_map(|name| self.classes.get(name))
@@ -702,6 +702,32 @@ impl<H: Host> Runtime<'_, H> {
                         interface == target || self.interface_extends(interface, target)
                     })
             })
+    }
+
+    /// The interfaces the jar's `@Mixin`s add to `class`, in the order Mixin
+    /// appends them after the class's own (`Class.getInterfaces()` of the
+    /// woven class): an accessor interface that is itself the mixin, or the
+    /// interfaces a mixin class implements.
+    pub(crate) fn mixin_added_interfaces(&self, class: &str) -> Vec<String> {
+        let mut added = Vec::new();
+        for mixin in self
+            .mixins_targeting(class)
+            .iter()
+            .filter_map(|name| self.classes.get(name))
+        {
+            let accessor = class_access(mixin).is_some_and(|access| access & ACC_INTERFACE != 0);
+            let interfaces = if accessor {
+                vec![mixin.name.clone()]
+            } else {
+                mixin.interface_names()
+            };
+            for interface in interfaces {
+                if !added.contains(&interface) {
+                    added.push(interface);
+                }
+            }
+        }
+        added
     }
 
     /// The jar's `@Mixin` classes that name `class` among their targets, from
