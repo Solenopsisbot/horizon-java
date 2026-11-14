@@ -245,8 +245,28 @@ impl<H: Host> Runtime<'_, H> {
             };
         }
         let Some(target_file) = self.class(target) else {
-            // A JDK or game target: the runtime models those values by marker
-            // and keeps its previous behaviour.
+            // A plain `String` (`"hcoll:java/util/ArrayList#neutral0"`) cast
+            // to a JDK type: `String` is final and its supertypes are known,
+            // so Java's answer is exact (#208 review). A game target, and any
+            // text that may be a host marker, keep the previous behaviour.
+            if let Value::Ref(Some(text)) = value
+                && crate::jdk_closure::in_jdk_package(target)
+                && crate::value_class::is_plain_string(text)
+                // A `Class` is still its name's text (#156 P13): a
+                // primitive's (`int`) or a package-less held class's name
+                // looks plain and may be one.
+                && !matches!(
+                    text.as_str(),
+                    "boolean" | "byte" | "char" | "double" | "float" | "int" | "long" | "short" | "void"
+                )
+                && !self.classes.contains_key(text.as_str())
+                && !self.linked.contains_key(text.as_str())
+            {
+                if crate::value_class::string_instance_of(text, target) {
+                    return Ok(());
+                }
+                return Err(class_cast_exception("java/lang/String", target));
+            }
             return Ok(());
         };
         let target_is_interface =
@@ -365,9 +385,18 @@ impl<H: Host> Runtime<'_, H> {
 
     /// The exact class of a value that is no handle, where the runtime knows
     /// it: a string, a box, a jar object, a JDK object a jar constructed
-    /// (`java/util/ArrayList#3`). Not a host model's collection or entry,
-    /// whose JDK class (`List12` or `ListN`, `KeyValueHolder`) is not kept.
+    /// (`java/util/ArrayList#3`), an unmodifiable collection the host made as
+    /// Java's class (`List12`, `Collections$EmptyList`, #156 P14c). Not a
+    /// host model's other collections (an unmodelled call's answer, a
+    /// `subList`: `#neutral`, whose class is the host's stand-in) or entries.
     pub(super) fn exact_class(&self, value: &Value) -> Option<String> {
+        if let Value::Host(handle) = value
+            && handle.kind() == crate::host_ref::HostKind::Collection
+        {
+            return crate::jar_object::collection_key(handle.key())
+                .filter(|_| handle.key().contains("#immutable"))
+                .map(|(class, _)| class.to_owned());
+        }
         let marker = match value {
             Value::Host(handle) if crate::jar_object::is_object_handle(handle) => handle.key(),
             Value::Ref(Some(marker)) => marker,

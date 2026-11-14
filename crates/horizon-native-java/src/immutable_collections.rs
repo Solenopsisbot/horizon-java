@@ -32,16 +32,26 @@
 use super::*;
 use object_methods::Equality;
 
-const SET_N: &str = "java/util/ImmutableCollections$SetN";
-const MAP_N: &str = "java/util/ImmutableCollections$MapN";
+// The classes `Set.of`/`Map.of` make (`java_immutable.rs`): one or two
+// elements (one entry) are a `Set12` (`Map1`), which compares in order, any
+// other count a probed `SetN` (`MapN`).
+const SETS: &[&str] = &[
+    "java/util/ImmutableCollections$SetN",
+    "java/util/ImmutableCollections$Set12",
+];
+const MAPS: &[&str] = &[
+    "java/util/ImmutableCollections$MapN",
+    "java/util/ImmutableCollections$Map1",
+];
 const IDENTITY_MAP: &str = "java/util/IdentityHashMap";
 
-/// A `SetN`/`MapN` probe table: each bucket's element (a map's key), by its
-/// item marker. `unknown`: an element with an identity hash sits at a slot
-/// no run can name.
+/// A `SetN`/`MapN` probe table: each bucket's element (a map's key), the
+/// value itself, so a handle keeps the origin that says which object it is
+/// (`Set.of(h, h)` throws). `unknown`: an element with an identity hash sits
+/// at a slot no run can name.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ProbeTable {
-    slots: Vec<Option<String>>,
+    slots: Vec<Option<Value>>,
     unknown: bool,
 }
 
@@ -84,13 +94,30 @@ impl<H: Host> Runtime<'_, H> {
                 Equality::Identity | Equality::Platform
             );
             if !pure && !identity {
+                // A handle: its row's `equals` against every slot. Equal
+                // handles hash alike, so Java's probe from the key's slot
+                // meets the equal one before an empty slot, and the same
+                // object (its origin, kept in the slot) is proved equal. A
+                // chat component is not: it changes in place, and its slot
+                // keeps the hash it had when the set was made (#193).
+                if let Value::Host(handle) = key
+                    && handle.kind() != crate::host_ref::HostKind::Component
+                {
+                    for (slot, stored) in table.slots.iter().enumerate() {
+                        let Some(stored) = stored else { continue };
+                        if handle.equals(stored, &mut object_methods::RuntimeNested::new(self))?
+                            == Some(true)
+                        {
+                            return Ok(Probe::Found(slot));
+                        }
+                    }
+                }
                 return Ok(Probe::Unknown);
             }
             for (slot, stored) in table.slots.iter().enumerate() {
                 let Some(stored) = stored else { continue };
-                let stored = parse_collection_value(stored)?;
-                if object_methods::identical(&stored, key)
-                    || (pure && self.java_equals(key, &stored)?)
+                if object_methods::identical(stored, key)
+                    || (pure && self.java_equals(key, stored)?)
                 {
                     return Ok(Probe::Found(slot));
                 }
@@ -105,8 +132,7 @@ impl<H: Host> Runtime<'_, H> {
             let Some(stored) = &table.slots[index] else {
                 return Ok(Probe::Empty(index));
             };
-            let stored = parse_collection_value(stored)?;
-            if self.java_equals(key, &stored)? {
+            if self.java_equals(key, stored)? {
                 return Ok(Probe::Found(index));
             }
             index = (index + 1) % buckets;
@@ -132,7 +158,7 @@ impl<H: Host> Runtime<'_, H> {
                         Some(format!("duplicate {what}: {text}")),
                     ));
                 }
-                Probe::Empty(slot) => table.slots[slot] = Some(collection_item_marker(key)),
+                Probe::Empty(slot) => table.slots[slot] = Some(key.clone()),
                 Probe::Unknown => {
                     // An identity-hashed element: kept, at a slot no run can
                     // name. A handle is a duplicate of a stored handle its
@@ -142,12 +168,8 @@ impl<H: Host> Runtime<'_, H> {
                     // component). An unknown answer is counted, never merged
                     // by key.
                     if let Value::Host(handle) = key {
-                        let stored_handles: Vec<Value> = table
-                            .slots
-                            .iter()
-                            .flatten()
-                            .map(|stored| parse_collection_value(stored))
-                            .collect::<Result<_, _>>()?;
+                        let stored_handles: Vec<Value> =
+                            table.slots.iter().flatten().cloned().collect();
                         for other in stored_handles {
                             if !matches!(other, Value::Host(_)) {
                                 continue;
@@ -176,7 +198,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     table.unknown = true;
                     if let Some(free) = table.slots.iter().position(Option::is_none) {
-                        table.slots[free] = Some(collection_item_marker(key));
+                        table.slots[free] = Some(key.clone());
                     }
                 }
             }
@@ -353,9 +375,10 @@ impl<H: Host> Runtime<'_, H> {
     /// The class of a `Set.of`/`Map.of` this module laid out.
     fn probed_kind(&mut self, value: &Value) -> Option<(bool, ProbeTable)> {
         let marker = expect_ref(value)?;
-        let map = if marker.starts_with(&format!("{SET_N}#")) {
+        let class = marker.split_once('#').map(|(class, _)| class)?;
+        let map = if SETS.contains(&class) {
             false
-        } else if marker.starts_with(&format!("{MAP_N}#")) {
+        } else if MAPS.contains(&class) {
             true
         } else {
             return None;
@@ -463,7 +486,7 @@ impl<H: Host> Runtime<'_, H> {
                 if !table.slots.is_empty() {
                     return Ok(match runtime.probe(table, key)? {
                         Probe::Found(slot) => match &table.slots[slot] {
-                            Some(marker) => Some(Some(parse_collection_value(marker)?)),
+                            Some(stored) => Some(Some(stored.clone())),
                             None => Some(None),
                         },
                         Probe::Empty(_) => Some(None),
@@ -522,12 +545,7 @@ impl<H: Host> Runtime<'_, H> {
                         .cloned()
                         .collect()
                 } else {
-                    table
-                        .slots
-                        .iter()
-                        .flatten()
-                        .map(|marker| parse_collection_value(marker))
-                        .collect::<Result<_, _>>()?
+                    table.slots.iter().flatten().cloned().collect()
                 };
                 if table.unknown && keys.iter().any(|key| !self.pure_equality(key)) {
                     return self.host.unknown_operand_call(r).map(|_| None);
@@ -611,12 +629,7 @@ impl<H: Host> Runtime<'_, H> {
                     if table.unknown && !self.pure_equality(wanted) {
                         return self.host.unknown_operand_call(r).map(|_| None);
                     }
-                    table
-                        .slots
-                        .iter()
-                        .flatten()
-                        .map(|marker| parse_collection_value(marker))
-                        .collect::<Result<_, _>>()?
+                    table.slots.iter().flatten().cloned().collect()
                 };
                 for key in &keys {
                     let stored = value_at(&entries, key);
@@ -626,7 +639,9 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 Ok(boolean(false))
             }
-            (_, "size" | "isEmpty", _, []) => Ok(None),
+            // `getClass()` names the class, never the order (a `SetN` is an
+            // object now, #156 P14c, so its `getClass` arrives here).
+            (_, "size" | "isEmpty" | "getClass", _, []) => Ok(None),
             // Anything else may show the order: random for two or more.
             _ if size >= 2 => self.host.unknown_operand_call(r).map(|_| None),
             _ => Ok(None),

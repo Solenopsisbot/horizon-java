@@ -61,10 +61,6 @@ use super::*;
 /// The synthetic field key a builder/Gson marker keeps its [`GsonStyle`]
 /// under. It is not a jar field name, so no reflective read sees it.
 pub(super) const STYLE_FIELD: &str = "#gsonStyle";
-/// The marker prefix a `FormattingStyle` value carries.
-const FORMATTING_PREFIX: &str = "formatting-style/";
-/// The marker prefix the whole builder option set is stored under.
-const STYLE_PREFIX: &str = "gson-style/";
 const NAMING_OWNER: &str = "com/google/gson/FieldNamingPolicy";
 const LONG_POLICY_OWNER: &str = "com/google/gson/LongSerializationPolicy";
 /// Gson's `Excluder()` default: `Modifier.STATIC | Modifier.TRANSIENT`.
@@ -204,31 +200,26 @@ impl Formatting {
         }
     }
 
-    fn marker(&self) -> String {
-        format!(
-            "{FORMATTING_PREFIX}{}/{}/{}",
-            hex(&self.newline),
-            hex(&self.indent),
-            u8::from(self.space_after_separators)
+    /// This style as a new `FormattingStyle` object, or the class's
+    /// constant `constant` (`host_gson.rs`).
+    fn value(&self, constant: Option<&str>) -> Value {
+        crate::host_gson::formatting_style(
+            &crate::host_gson::Style {
+                newline: self.newline.clone(),
+                indent: self.indent.clone(),
+                space_after_separators: self.space_after_separators,
+            },
+            constant,
         )
     }
 
-    fn from_marker(marker: &str) -> Option<Self> {
-        let mut parts = marker.strip_prefix(FORMATTING_PREFIX)?.split('/');
-        let newline = unhex(parts.next()?)?;
-        let indent = unhex(parts.next()?)?;
-        let space_after_separators = match parts.next()? {
-            "1" => true,
-            "0" => false,
-            _ => return None,
-        };
-        if parts.next().is_some() {
-            return None;
-        }
+    /// The style a `FormattingStyle` handle holds; `None` for any other value.
+    fn of_value(value: &Value) -> Option<Self> {
+        let style = crate::host_gson::style_of(value)?;
         Some(Self {
-            newline,
-            indent,
-            space_after_separators,
+            newline: style.newline,
+            indent: style.indent,
+            space_after_separators: style.space_after_separators,
         })
     }
 }
@@ -268,10 +259,11 @@ impl Default for GsonStyle {
 }
 
 impl GsonStyle {
-    /// The marker this style is stored and passed around as.
-    fn marker(&self) -> String {
+    /// The key this option set is kept under (`host_gson.rs`): the
+    /// runtime's own encoding, hex text and digits.
+    fn key(&self) -> String {
         format!(
-            "{STYLE_PREFIX}newline={};indent={};space={};html={};nulls={};\
+            "newline={};indent={};space={};html={};nulls={};\
              naming={};mods={};nonexec={};special={};longs={};counted={}",
             hex(&self.formatting.newline),
             hex(&self.formatting.indent),
@@ -287,8 +279,7 @@ impl GsonStyle {
         )
     }
 
-    fn from_marker(marker: &str) -> Option<Self> {
-        let rest = marker.strip_prefix(STYLE_PREFIX)?;
+    fn from_key(rest: &str) -> Option<Self> {
         let mut style = Self::default();
         for entry in rest.split(';') {
             let (key, value) = entry.split_once('=')?;
@@ -438,7 +429,7 @@ pub(super) fn static_field(r: &MethodRef) -> Option<Value> {
                 "PRETTY" => Formatting::pretty(),
                 _ => return None,
             };
-            Some(Value::Ref(Some(style.marker())))
+            Some(style.value(Some(&r.name)))
         }
         NAMING_OWNER => Naming::from_name(&r.name)
             .map(|_| Value::Ref(Some(format!("enum/{NAMING_OWNER}/{}", r.name)))),
@@ -456,15 +447,9 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let receiver = receiver
-            .and_then(expect_ref)
-            .map(|marker| marker.to_owned());
         match r.owner.as_str() {
             "com/google/gson/FormattingStyle" => {
-                let Some(marker) = receiver else {
-                    return Ok(None);
-                };
-                let Some(style) = Formatting::from_marker(&marker) else {
+                let Some(style) = receiver.and_then(Formatting::of_value) else {
                     return Ok(None);
                 };
                 Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
@@ -476,43 +461,51 @@ impl<H: Host> Runtime<'_, H> {
                         Value::Int(i32::from(style.space_after_separators))
                     }
                     ("withNewline", "(Ljava/lang/String;)Lcom/google/gson/FormattingStyle;") => {
+                        // `FormattingStyle`'s constructor checks (gson 2.14.0).
                         let Some(newline) = args.first().and_then(expect_ref) else {
-                            return Err(npe());
+                            return Err(npe_with("newline == null"));
                         };
-                        Value::Ref(Some(
-                            Formatting {
-                                newline: newline.clone(),
-                                ..style
-                            }
-                            .marker(),
-                        ))
+                        if !newline.chars().all(|c| matches!(c, '\r' | '\n')) {
+                            return Err(illegal_argument(
+                                "Only combinations of \\n and \\r are allowed in newline.",
+                            ));
+                        }
+                        Formatting {
+                            newline: newline.clone(),
+                            ..style
+                        }
+                        .value(None)
                     }
                     ("withIndent", "(Ljava/lang/String;)Lcom/google/gson/FormattingStyle;") => {
                         let Some(indent) = args.first().and_then(expect_ref) else {
-                            return Err(npe());
+                            return Err(npe_with("indent == null"));
                         };
-                        Value::Ref(Some(
-                            Formatting {
-                                indent: indent.clone(),
-                                ..style
-                            }
-                            .marker(),
-                        ))
+                        if !indent.chars().all(|c| matches!(c, ' ' | '\t')) {
+                            return Err(illegal_argument(
+                                "Only combinations of spaces and tabs are allowed in indent.",
+                            ));
+                        }
+                        Formatting {
+                            indent: indent.clone(),
+                            ..style
+                        }
+                        .value(None)
                     }
                     ("withSpaceAfterSeparators", "(Z)Lcom/google/gson/FormattingStyle;") => {
                         let space = matches!(args.first(), Some(Value::Int(flag)) if *flag != 0);
-                        Value::Ref(Some(
-                            Formatting {
-                                space_after_separators: space,
-                                ..style
-                            }
-                            .marker(),
-                        ))
+                        Formatting {
+                            space_after_separators: space,
+                            ..style
+                        }
+                        .value(None)
                     }
                     _ => return Ok(None),
                 }))
             }
-            "com/google/gson/GsonBuilder" => self.invoke_gson_builder_call(r, receiver, args),
+            "com/google/gson/GsonBuilder" => {
+                let receiver = receiver.and_then(expect_ref).cloned();
+                self.invoke_gson_builder_call(r, receiver, args)
+            }
             _ => Ok(None),
         }
     }
@@ -560,12 +553,9 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 match r.name.as_str() {
                     "setFormattingStyle" => {
-                        let Some(formatting) = args
-                            .first()
-                            .and_then(expect_ref)
-                            .and_then(|style| Formatting::from_marker(style))
-                        else {
-                            return Err(npe());
+                        // Only a `FormattingStyle` the model made is a style.
+                        let Some(formatting) = args.first().and_then(Formatting::of_value) else {
+                            return Ok(None);
                         };
                         let mut style = self.gson_style(&marker);
                         style.formatting = formatting;
@@ -763,8 +753,8 @@ impl<H: Host> Runtime<'_, H> {
     fn gson_style(&self, marker: &str) -> GsonStyle {
         self.fields
             .get(&format!("{marker}|{STYLE_FIELD}"))
-            .and_then(expect_ref)
-            .and_then(|marker| GsonStyle::from_marker(marker))
+            .and_then(crate::host_gson::options_key)
+            .and_then(GsonStyle::from_key)
             .unwrap_or_default()
     }
 
@@ -778,7 +768,7 @@ impl<H: Host> Runtime<'_, H> {
     pub(super) fn set_gson_style(&mut self, marker: &str, style: GsonStyle) {
         self.fields.insert(
             format!("{marker}|{STYLE_FIELD}"),
-            Value::Ref(Some(style.marker())),
+            crate::host_gson::options(style.key()),
         );
     }
 
@@ -1023,6 +1013,22 @@ impl<H: Host> Runtime<'_, H> {
 
 /// `java.lang.NullPointerException`, as Gson's `Objects.requireNonNull` raises
 /// it for a null builder argument.
+fn npe_with(message: &str) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/NullPointerException".into(),
+        message: Some(message.into()),
+        frame: None,
+    }
+}
+
+fn illegal_argument(message: &str) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/IllegalArgumentException".into(),
+        message: Some(message.into()),
+        frame: None,
+    }
+}
+
 fn npe() -> NativeError {
     NativeError::UncaughtException {
         class: "java/lang/NullPointerException".into(),
@@ -1055,7 +1061,7 @@ pub(super) fn non_executable_prefix(style: &GsonStyle) -> Option<&'static str> {
 /// name whose list/set/map family decides how its pairs or elements serialize.
 fn gson_marker_kind<H: Host>(host: &H, value: &Value) -> Option<&'static str> {
     let marker = expect_ref(value)?;
-    if host.mutable_collection_values(value).is_some() {
+    if host.holds_collection(value) {
         let class = marker
             .split_once('#')
             .map_or(marker.as_str(), |(class, _)| class);

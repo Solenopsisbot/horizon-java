@@ -265,10 +265,10 @@ impl<H: Host> Runtime<'_, H> {
             Lookup::Found(stored) => Some(stored.clone()),
             _ => None,
         };
-        let entries = self.collection_elements(receiver)?;
-        let old = stored.as_ref().map_or(Value::Ref(None), |stored| {
-            Self::stored_value(&entries, stored)
-        });
+        let old = match &stored {
+            Some(stored) => self.value_of(receiver, &table, stored)?,
+            None => Value::Ref(None),
+        };
         // Which call the function gets, if any.
         let call: Option<Vec<Value>> = match name {
             "computeIfAbsent" if old != Value::Ref(None) => {
@@ -290,7 +290,8 @@ impl<H: Host> Runtime<'_, H> {
         };
         let value = match call {
             Some(call) => {
-                let keys = table.order();
+                // The table's structure, as `HashMap.modCount` sees it.
+                let version = table.version;
                 // `int mc = modCount;`, then `if (mc != modCount) throw`.
                 let mc = self.mod_stamp(marker);
                 self.host.store_hash_table(marker, table);
@@ -301,7 +302,7 @@ impl<H: Host> Runtime<'_, H> {
                 if verdict == mod_count::ModVerdict::Unknown {
                     self.host.unknown_operand_call(r)?;
                 }
-                if verdict == mod_count::ModVerdict::Changed || table.order() != keys {
+                if verdict == mod_count::ModVerdict::Changed || table.version != version {
                     self.host.store_hash_table(marker, table);
                     return Err(NativeError::UncaughtException {
                         class: "java/util/ConcurrentModificationException".into(),
@@ -394,10 +395,18 @@ impl<H: Host> Runtime<'_, H> {
                 self.host_collection_kind(receiver) == Some(object_methods::CollectionKind::Map)
                     && self
                         .host_collection_class(receiver)
-                        // `tree_map.rs` runs `TreeMap.replaceAll`.
+                        // `tree_map.rs` runs `TreeMap.replaceAll`;
+                        // `java_immutable.rs` the unmodifiable maps that own
+                        // their entries (`Map.of`'s, `Collections.emptyMap()`,
+                        // `singletonMap`).
                         .is_some_and(|class| {
                             !class.starts_with("java/util/ImmutableCollections")
-                                && class != "java/util/TreeMap"
+                                && !matches!(
+                                    class.as_str(),
+                                    "java/util/TreeMap"
+                                        | "java/util/Collections$EmptyMap"
+                                        | "java/util/Collections$SingletonMap"
+                                )
                         })
             })
     }
@@ -416,6 +425,76 @@ impl<H: Host> Runtime<'_, H> {
         value: &Value,
         name: &str,
     ) -> Result<(), NativeError> {
+        // In place at the key's rank while the table mirrors the list (#203).
+        let marker = expect_ref(receiver).cloned();
+        let synced = marker
+            .as_deref()
+            .is_some_and(|marker| self.is_synced(marker, table));
+        if synced && let Some(marker) = marker {
+            match stored {
+                Some(stored) if *value != Value::Ref(None) => {
+                    match self.synced_position(&marker, table, &stored, 2) {
+                        Some(position) => {
+                            if let Some(list) = self.host.collection_vec_mut(&marker) {
+                                list[position + 1] = value.clone();
+                            }
+                            self.keep_synced(&marker, table, true);
+                        }
+                        None => {
+                            self.set_stored_value(receiver, &stored, value.clone())?;
+                        }
+                    }
+                    return Ok(());
+                }
+                Some(_) => {
+                    let hash = if name == "computeIfPresent" {
+                        self.java_hash(key)?
+                    } else {
+                        hash
+                    };
+                    if let Lookup::Found(node) = self.table_lookup(table, key, hash)? {
+                        match self.synced_position(&marker, table, &node, 2) {
+                            Some(position) => {
+                                if let Some(list) = self.host.collection_vec_mut(&marker) {
+                                    list.drain(position..position + 2);
+                                }
+                                table.remove(&collection_item_marker(&node));
+                                table.positions = None;
+                                self.keep_synced(&marker, table, true);
+                            }
+                            None => {
+                                let mut entries = self.collection_elements(receiver)?;
+                                let item = collection_item_marker(&node);
+                                if let Some(index) = entries
+                                    .chunks(2)
+                                    .position(|pair| collection_item_marker(&pair[0]) == item)
+                                {
+                                    entries.drain(index * 2..index * 2 + 2);
+                                    self.host.replace_mutable_collection(receiver, entries);
+                                }
+                                table.remove(&item);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                None if *value != Value::Ref(None) && name != "computeIfPresent" => {
+                    let capacity = table.capacity();
+                    table.insert_at_head(key, hash);
+                    let mirrors = self.place_new_entry(
+                        &marker,
+                        table,
+                        key,
+                        vec![key.clone(), value.clone()],
+                        capacity,
+                        true,
+                    )?;
+                    self.keep_synced(&marker, table, mirrors);
+                    return Ok(());
+                }
+                None => return Ok(()),
+            }
+        }
         match stored {
             Some(stored) if *value != Value::Ref(None) => {
                 self.set_stored_value(receiver, &stored, value.clone())?;
@@ -446,7 +525,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut entries = self.collection_elements(receiver)?;
                 entries.extend([key.clone(), value.clone()]);
                 self.host.replace_mutable_collection(receiver, entries);
-                table.insert_at_head(collection_item_marker(key), hash);
+                table.insert_at_head(key, hash);
             }
             None => {}
         }
@@ -808,7 +887,7 @@ impl<H: Host> Runtime<'_, H> {
                 let mut entries = self.collection_elements(map)?;
                 entries.extend([key.clone(), value]);
                 self.host.replace_mutable_collection(map, entries);
-                table.insert_at_head(collection_item_marker(&key), hash);
+                table.insert_at_head(&key, hash);
             }
             Lookup::Found(stored) => {
                 let entries = self.collection_elements(map)?;

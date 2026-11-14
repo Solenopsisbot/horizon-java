@@ -31,6 +31,7 @@ mod class_precedence;
 pub mod client_surface;
 mod collection_base;
 mod collection_callback;
+mod collection_store;
 mod color_collection;
 mod commons_io;
 mod commons_pair;
@@ -60,6 +61,7 @@ mod game_hooks;
 mod game_rules;
 mod gson_model;
 mod gson_tree;
+mod gson_type_token;
 mod guava_model;
 mod guava_text;
 mod hash_bulk;
@@ -81,6 +83,8 @@ mod host_executors;
 mod host_fabric_loader;
 mod host_fabric_runtime;
 mod host_game_event;
+mod host_gson;
+mod host_gson_type;
 mod host_guava;
 mod host_ids;
 mod host_invoke;
@@ -96,6 +100,7 @@ mod host_reflect;
 mod host_reflect_type;
 mod host_registry;
 mod host_services;
+mod host_type_token;
 mod host_watch;
 mod immutable_collections;
 mod iteration_guard;
@@ -2323,6 +2328,19 @@ pub trait Host {
         None
     }
 
+    /// Whether [`Self::mutable_collection_values`] would answer for `value`,
+    /// without copying the values out (#203).
+    fn holds_collection(&self, value: &Value) -> bool {
+        self.mutable_collection_values(value).is_some()
+    }
+
+    /// How many values [`Self::mutable_collection_values`] would answer,
+    /// without copying them out (#203).
+    fn collection_len(&self, value: &Value) -> Option<usize> {
+        self.mutable_collection_values(value)
+            .map(|values| values.len())
+    }
+
     /// The values a mutable collection marker holds as the host keeps them
     /// (`Value`s, not their markers), so a host handle keeps its
     /// construction (`HostRef::same_object`). `None` when the host keeps no
@@ -2351,6 +2369,26 @@ pub trait Host {
     /// Whether the host keeps a collection row for `marker`.
     fn has_mutable_collection(&self, _marker: &str) -> bool {
         false
+    }
+
+    /// The generation of the list the host keeps for `marker`
+    /// (`collection_store.rs`): it moves whenever the list may have changed.
+    /// `None` when the host keeps no list for it directly (a view, another
+    /// host).
+    fn collection_generation(&self, _marker: &str) -> Option<u64> {
+        None
+    }
+
+    /// The list the host keeps for `marker`, borrowed; `None` as for
+    /// [`Self::collection_generation`].
+    fn collection_slice(&self, _marker: &str) -> Option<&[Value]> {
+        None
+    }
+
+    /// The list the host keeps for `marker`, to change in place (its
+    /// generation moves); `None` as for [`Self::collection_generation`].
+    fn collection_vec_mut(&mut self, _marker: &str) -> Option<&mut Vec<Value>> {
+        None
     }
 
     /// The bucket table (`hash_table.rs`) of a hash collection, taken out
@@ -2650,6 +2688,20 @@ pub trait Host {
         None
     }
 
+    /// The unmodifiable `kind` the factory `owner.name` answers for `values`
+    /// (`Collectors.toUnmodifiableList()`, Guava's `toImmutableList()`): its
+    /// class and, when empty, the factory's one shared object
+    /// (`java_immutable.rs`), for a host that models one.
+    fn factory_collection(
+        &mut self,
+        _owner: &str,
+        _name: &str,
+        _kind: &str,
+        _values: Vec<Value>,
+    ) -> Option<Value> {
+        None
+    }
+
     /// How many unknown host calls this host has counted (each answered with
     /// a neutral value), for a model that must not build a verdict on one.
     fn counted_unknown_calls(&self) -> usize {
@@ -2886,7 +2938,9 @@ pub struct StdHost {
     holder_rows: Vec<host_registry::HolderRow>,
     /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
     holder_binding: host_registry::Binding,
-    mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Every mutable collection's list, by marker, each with a generation
+    /// (`collection_store.rs`).
+    mutable_collections: collection_store::CollectionStore,
     /// Chat components changed in place, by marker (`host_component.rs`).
     pub(crate) component_states: host_component::States,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
@@ -2895,6 +2949,11 @@ pub struct StdHost {
     /// `Collections.emptyList()`/`emptySet()`/`emptyMap()` markers, whose
     /// mutators JDK 25 does not all refuse (`java_immutable.rs`).
     empty_collections: std::collections::BTreeSet<String>,
+    /// The JDK's (and Guava's) shared empty collections, by the field each
+    /// is (`ImmutableCollections.EMPTY_LIST` for `List.of()`, `Collections.
+    /// EMPTY_LIST` for `Collections.emptyList()`): its key, made on first use
+    /// (`java_immutable.rs`).
+    shared_empties: BTreeMap<&'static str, String>,
     /// The JDK's own `List.of`/`List.copyOf` lists among the unmodifiable
     /// ones (`java_immutable.rs`); `list_equality.rs` runs their
     /// null-hostile `List12`/`ListN` rules.
@@ -3065,10 +3124,11 @@ impl StdHost {
             holders: BTreeMap::new(),
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
-            mutable_collections: BTreeMap::new(),
+            mutable_collections: collection_store::CollectionStore::default(),
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
+            shared_empties: BTreeMap::new(),
             jdk_list_of: std::collections::BTreeSet::new(),
             charset_decoders: BTreeMap::new(),
             synchronized_views: BTreeMap::new(),
@@ -3248,7 +3308,9 @@ impl StdHost {
         let marker = format!("{class}#neutral{}", self.next_neutral_collection);
         self.next_neutral_collection += 1;
         self.mutable_collections.insert(marker.clone(), Vec::new());
-        Value::Ref(Some(marker))
+        // An object of its own (#156 P14c): `==` tells two apart, and a
+        // `String` spelling its key is no collection.
+        jar_object::collection(marker)
     }
 
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -3553,6 +3615,18 @@ impl StdHost {
     /// The elements a host collection holds, as the `Value`s it stored (a
     /// handle keeps its origin, so identity survives the read), or `None` for
     /// a value the host keeps no elements for.
+    /// The marker of the list the host keeps for `marker` itself, as
+    /// [`Self::mutable_values`] reads it (through a synchronized wrapper),
+    /// or `None` for a view (whose values are another list's) and a marker
+    /// with no list.
+    fn direct_collection<'a>(&'a self, marker: &'a str) -> Option<&'a str> {
+        let marker = self.synchronized_target(marker);
+        (self.view_values(marker).is_none()
+            && self.reversed_view_values(marker).is_none()
+            && self.mutable_collections.contains_key(marker))
+        .then_some(marker)
+    }
+
     fn mutable_values(&self, receiver: &Value) -> Option<Vec<Value>> {
         // A `String` is no collection, whatever it spells (`jar_object.rs`).
         if jar_object::spells_key(receiver) {
@@ -4516,6 +4590,27 @@ impl Host for StdHost {
         self.mutable_values(value)
     }
 
+    fn collection_len(&self, value: &Value) -> Option<usize> {
+        let marker = self.synchronized_target(expect_ref(value)?);
+        if let Some(values) = self.view_values(marker) {
+            return Some(values.len());
+        }
+        if let Some(values) = self.reversed_view_values(marker) {
+            return Some(values.len());
+        }
+        self.mutable_collections.get(marker).map(Vec::len)
+    }
+
+    fn holds_collection(&self, value: &Value) -> bool {
+        let Some(marker) = expect_ref(value) else {
+            return false;
+        };
+        let marker = self.synchronized_target(marker);
+        self.mutable_collections.contains_key(marker)
+            || self.view_values(marker).is_some()
+            || self.reversed_view_values(marker).is_some()
+    }
+
     fn mutable_collection_entries(&self, value: &Value) -> Option<Vec<Value>> {
         if jar_object::spells_key(value) {
             return None;
@@ -4541,6 +4636,21 @@ impl Host for StdHost {
 
     fn has_mutable_collection(&self, marker: &str) -> bool {
         self.mutable_collections.contains_key(marker)
+    }
+
+    fn collection_generation(&self, marker: &str) -> Option<u64> {
+        let marker = self.direct_collection(marker)?;
+        Some(self.mutable_collections.generation(marker))
+    }
+
+    fn collection_slice(&self, marker: &str) -> Option<&[Value]> {
+        let marker = self.direct_collection(marker)?;
+        self.mutable_collections.get(marker).map(Vec::as_slice)
+    }
+
+    fn collection_vec_mut(&mut self, marker: &str) -> Option<&mut Vec<Value>> {
+        let marker = self.direct_collection(marker)?.to_owned();
+        self.mutable_collections.get_mut(&marker)
     }
 
     fn take_hash_table(&mut self, marker: &str) -> Option<hash_table::HashTable> {
@@ -4727,6 +4837,16 @@ impl Host for StdHost {
 
     fn unmodifiable_list(&mut self, values: Vec<Value>) -> Option<Value> {
         Some(self.unmodifiable_values("list", values))
+    }
+
+    fn factory_collection(
+        &mut self,
+        owner: &str,
+        name: &str,
+        kind: &str,
+        values: Vec<Value>,
+    ) -> Option<Value> {
+        Some(self.factory_unmodifiable(owner, name, kind, values))
     }
 
     fn payload_type_id(&self, marker: &str) -> Option<String> {
@@ -5465,18 +5585,19 @@ impl Host for StdHost {
                 "toUnmodifiableSet",
                 "()Ljava/util/stream/Collector;",
             ) => Ok(Value::Ref(Some("collector/unmodifiable-set".into()))),
-            // An unmodifiable list that rejects `null` (`List.of`'s
-            // `ListN`; Guava's `ImmutableList` is the host's same shape).
+            // An unmodifiable list that rejects `null`: `List.of`'s
+            // (`List12`/`ListN`, `List.of()` itself when empty), and Guava's
+            // `ImmutableList` (`java_immutable.rs`).
             (
                 "java/util/stream/Collectors",
                 "toUnmodifiableList",
                 "()Ljava/util/stream/Collector;",
-            )
-            | (
+            ) => Ok(Value::Ref(Some("collector/unmodifiable-list".into()))),
+            (
                 "com/google/common/collect/ImmutableList",
                 "toImmutableList",
                 "()Ljava/util/stream/Collector;",
-            ) => Ok(Value::Ref(Some("collector/unmodifiable-list".into()))),
+            ) => Ok(Value::Ref(Some("collector/immutable-list".into()))),
             (
                 "com/google/common/collect/ImmutableSet",
                 "toImmutableSet",
@@ -7870,12 +7991,23 @@ impl Host for StdHost {
                     .map_or(Value::Ref(None), |(parent, _)| path_value(parent)))
             }
             ("java/lang/Class", "getName", "()Ljava/lang/String;")
-            | ("java/lang/Class", "getTypeName", "()Ljava/lang/String;")
-            | ("java/lang/Class", "getCanonicalName", "()Ljava/lang/String;") => {
+            | ("java/lang/Class", "getTypeName", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some(class_binary_name(receiver))))
+            }
+            // A nested class the host's collections are made as answers its
+            // exact names (`java_immutable::member_class_names`).
+            ("java/lang/Class", "getCanonicalName", "()Ljava/lang/String;") => {
+                let name = class_binary_name(receiver);
+                Ok(Value::Ref(Some(
+                    java_immutable::member_class_names(&name)
+                        .map_or(name, |(_, canonical)| canonical),
+                )))
             }
             ("java/lang/Class", "getSimpleName", "()Ljava/lang/String;") => {
                 let name = class_binary_name(receiver);
+                if let Some((simple, _)) = java_immutable::member_class_names(&name) {
+                    return Ok(Value::Ref(Some(simple)));
+                }
                 Ok(Value::Ref(Some(
                     name.rsplit('.').next().unwrap_or(&name).to_owned(),
                 )))
@@ -9804,8 +9936,9 @@ fn class_of_value(value: &Value) -> Option<String> {
 /// [`class_of_value`] of a reference's text, without building a `Value` (it
 /// runs inside `is_plain_string`, on every array store of a string).
 fn class_of_text(marker: &str) -> Option<String> {
-    // A text spelling an object's key is a `String` (`jar_object.rs`).
-    if jar_object::parse_key(marker).is_some() {
+    // A text spelling an object's key (a host-made collection's included,
+    // P14c) is a `String` (`jar_object.rs`).
+    if jar_object::spells_key_text(marker) {
         return Some("java/lang/String".into());
     }
     if let Some((class, _)) = marker.split_once('#') {
@@ -23054,7 +23187,7 @@ impl<H: Host> Runtime<'_, H> {
     /// that resolves, the token behaves like the same class literal would.
     /// A token the model cannot read answers `Object`, which the JSON shape
     /// still materializes into a map or a list.
-    fn type_token_class(&self, _token: &str) -> String {
+    fn type_token_class(&self, _token: &Value) -> String {
         "java/lang/Object".into()
     }
 
@@ -23434,9 +23567,12 @@ impl<H: Host> Runtime<'_, H> {
                                         "Gson.fromJson Reader {reader} is not a modelled reader"
                                     ))
                                 })?;
-                            let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
-                                NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
-                            })?;
+                            let token = args
+                                .get(1)
+                                .filter(|token| **token != Value::Ref(None))
+                                .ok_or_else(|| {
+                                    NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                                })?;
                             (text, self.type_token_class(token))
                         } else {
                             let text = args
@@ -23444,9 +23580,12 @@ impl<H: Host> Runtime<'_, H> {
                                 .map(expect_string)
                                 .unwrap_or_default()
                                 .to_owned();
-                            let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
-                                NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
-                            })?;
+                            let token = args
+                                .get(1)
+                                .filter(|token| **token != Value::Ref(None))
+                                .ok_or_else(|| {
+                                    NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                                })?;
                             (text, self.type_token_class(token))
                         };
                         Ok(Some(self.gson_from_json(&text, &class, &style)?))
@@ -23931,7 +24070,7 @@ impl<H: Host> Runtime<'_, H> {
                 match collector.as_str() {
                     // `ArrayList::new`, `List::add`: a list of its own.
                     "collector/list" => self.new_array_list(values),
-                    "collector/unmodifiable-list" => {
+                    collector @ ("collector/unmodifiable-list" | "collector/immutable-list") => {
                         if values.contains(&Value::Ref(None)) {
                             return Err(NativeError::UncaughtException {
                                 class: "java/lang/NullPointerException".into(),
@@ -23939,7 +24078,15 @@ impl<H: Host> Runtime<'_, H> {
                                 frame: None,
                             });
                         }
-                        self.unmodifiable_list(values)
+                        let (owner, name) = if collector == "collector/unmodifiable-list" {
+                            ("java/util/stream/Collectors", "toUnmodifiableList")
+                        } else {
+                            ("com/google/common/collect/ImmutableList", "toImmutableList")
+                        };
+                        let fallback = collection_value("list", &values);
+                        self.host
+                            .factory_collection(owner, name, "list", values)
+                            .unwrap_or(fallback)
                     }
                     // `HashSet::new` (`hash_bulk.rs`).
                     "collector/set" => self.hash_set_collect(&values)?,
@@ -25421,6 +25568,12 @@ impl<H: Host> Runtime<'_, H> {
                         self.invoke_tree_collection(&r, op, receiver.as_ref(), &args)
                     ) {
                         // `TreeMap`/`TreeSet`'s red-black tree (`tree_map.rs`).
+                        value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_gson_types(&r, receiver.as_ref(), &args))
+                    {
+                        // Gson's `TypeToken`, whose `equals`/`hashCode`/`toString`
+                        // a jar's subclass inherits (`gson_type_token.rs`).
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,

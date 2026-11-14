@@ -399,6 +399,29 @@ pub enum HostKind {
     ReflectType,
     /// An `AnnotatedType`: key the type it annotates.
     AnnotatedType,
+    /// Gson's `FormattingStyle`: key `[id, newline, indent, space]`, `id` a
+    /// constant's name or a serial per allocation (`host_gson.rs`).
+    FormattingStyle,
+    /// A `GsonBuilder`'s or `Gson`'s option set, held in its synthetic field:
+    /// key the runtime's encoding (`host_gson.rs`, `gson_model.rs`).
+    GsonOptions,
+    /// Guava `TypeToken.of(..)`'s `SimpleTypeToken`: key `[serial, type]`
+    /// (`host_type_token.rs`).
+    TypeToken,
+    /// Gson's canonical `ParameterizedType`/`GenericArrayType`/`WildcardType`
+    /// (`GsonTypes$…Impl`): key `[id, node]` (`host_gson_type.rs`).
+    GsonType,
+    /// Gson's `TypeToken` from a factory (`get`, `getArray`): key
+    /// `[serial, canonical type]` (`host_gson_type.rs`).
+    GsonTypeToken,
+    /// A collection the host made (an unmodelled call's neutral answer,
+    /// `subList`, `Collections.unmodifiableList`, `List.of`, a reversed
+    /// view, ...): key `<JDK class>#neutral<n>`, `#immutable<n>` or
+    /// `#reversed<n>`, the text it used to be (`jar_object.rs`), one key per
+    /// allocation. An object like a
+    /// jar's `new ArrayList()` (a [`HostKind::JarObject`]), whose row it
+    /// shares.
+    Collection,
     /// `java.util.UUID`: key its canonical text (`host_jdk_value.rs`).
     Uuid,
     /// `java.time.Duration`: key its nanoseconds (`host_jdk_value.rs`).
@@ -466,6 +489,18 @@ pub(crate) trait Nested {
     /// `host_component.rs`); `None` where this context cannot read the
     /// host's table (the caller counts).
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
+    /// The canonical type a jar's `new com.google.gson.reflect.TypeToken<T>() {}` holds
+    /// (`gson_type_token.rs`); `None` where this context cannot read jar objects' fields.
+    fn gson_token_type(&mut self, value: &Value) -> Option<Value> {
+        let _ = value;
+        None
+    }
+    /// The type a jar's `new com.google.common.reflect.TypeToken<T>() {}` captured
+    /// (`guava_model.rs`); `None` where this context cannot read jar objects' fields.
+    fn guava_token_type(&mut self, value: &Value) -> Option<Value> {
         let _ = value;
         None
     }
@@ -580,6 +615,14 @@ pub(crate) type InstanceOfClassFn = fn(&str, &str, &dyn ClassHierarchy) -> Optio
 
 /// The kinds with a [`ClassSide`], in `KINDS` order.
 const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
+    (
+        HostKind::GsonType,
+        &crate::host_gson_type::GSON_TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::GsonTypeToken,
+        &crate::host_gson_type::TOKEN_CLASS_SIDE,
+    ),
     (HostKind::DfuPair, &crate::host_codec::PAIR_CLASS_SIDE),
     (
         HostKind::GameEvent,
@@ -604,6 +647,14 @@ const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
     (
         HostKind::Component,
         &crate::host_component::COMPONENT_CLASS_SIDE,
+    ),
+    (
+        HostKind::FormattingStyle,
+        &crate::host_gson::STYLE_CLASS_SIDE,
+    ),
+    (
+        HostKind::TypeToken,
+        &crate::host_type_token::TOKEN_CLASS_SIDE,
     ),
 ];
 
@@ -1595,6 +1646,58 @@ const KINDS: &[KindInfo] = &[
         // Built afresh by every reflective call.
         canonical: never_canonical,
         methods: &crate::host_reflect_type::ANNOTATED_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FormattingStyle,
+        tag: "gfmt",
+        class: ClassRule::FromKey(crate::host_gson::style_class),
+        // A constant's name or a serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_gson::STYLE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GsonOptions,
+        tag: "gopt",
+        // Not a Java object a jar holds: only `Object` is declared.
+        class: ClassRule::Unknown {
+            declared: crate::host_gson::options_types,
+        },
+        canonical: never_canonical,
+        methods: &crate::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::TypeToken,
+        tag: "ttok",
+        class: ClassRule::FromKey(crate::host_type_token::token_class),
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_type_token::TOKEN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GsonType,
+        tag: "gtyp",
+        class: ClassRule::FromKey(crate::host_gson_type::gson_type_class),
+        // One id per Gson object: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_gson_type::GSON_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GsonTypeToken,
+        tag: "gtok",
+        class: ClassRule::FromKey(crate::host_gson_type::token_class),
+        // A serial per allocation.
+        canonical: always_canonical,
+        methods: &crate::host_gson_type::TOKEN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Collection,
+        tag: "hcoll",
+        class: ClassRule::FromKey(crate::jar_object::collection_class),
+        // The host numbers every collection it makes once.
+        canonical: always_canonical,
+        // An object: the runtime and the host's collection models answer
+        // for it by its key, as for a jar's `new ArrayList()`.
+        methods: &crate::jar_object::JAR_OBJECT,
     },
     KindInfo {
         kind: HostKind::Uuid,
