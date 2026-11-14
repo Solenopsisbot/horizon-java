@@ -35,6 +35,21 @@ public final class Probe {
         return views(new HashMap<>()) + ";" + views(new LinkedHashMap<>()) + ";" + views(new TreeMap<>());
     }
 
+    /** Two empty maps' views are two objects, and each stays as empty as its map (main shared one `set`). */
+    public static String emptyViews() {
+        Map<String, Integer> a = new HashMap<>();
+        Map<String, Integer> b = new HashMap<>();
+        Set<String> keys = a.keySet();
+        Set<Map.Entry<String, Integer>> entries = a.entrySet();
+        b.put("x", 1);
+        int seen = 0;
+        for (Map.Entry<String, Integer> e : entries) {
+            seen += e.getValue();
+        }
+        return b((Object) keys == b.keySet()) + b((Object) entries == b.entrySet()) + b(keys.isEmpty())
+            + seen + b.keySet().size() + b.entrySet().size();
+    }
+
     /** `System.getProperties()` and `System.getenv()`: one object each, the environment's unmodifiable. */
     public static String system() {
         Map<String, String> env = System.getenv();
@@ -51,6 +66,7 @@ public final class Probe {
 
     public static void main(String[] args) {
         System.out.println("mapViews=" + mapViews());
+        System.out.println("emptyViews=" + emptyViews());
         System.out.println("system=" + system());
     }
 }

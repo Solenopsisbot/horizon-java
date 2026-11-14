@@ -30,6 +30,9 @@ fn expected(method: &str) -> &'static str {
 /// - `mapViews`: for a `HashMap`, a `LinkedHashMap` and a `TreeMap`, each
 ///   view is the same object on every call and sees a later `put`; another
 ///   map's equal view is equal but not the same object;
+/// - `emptyViews`: two empty maps' views are two objects, and an empty
+///   map's entry set stays empty after another map is written (main answered
+///   every empty view with one shared `set` literal);
 /// - `system`: `getProperties()` and `getenv()` are one object each;
 ///   `getenv()` is a `Collections$UnmodifiableMap` whose `put` throws.
 #[test]
@@ -37,7 +40,7 @@ fn host_answered_collections_are_objects() {
     let fixture =
         javac_fixture::Fixture::build("host-collections-d1", &[("demo/Probe.java", PROBE)]);
     let mut failures = Vec::new();
-    for method in ["mapViews", "system"] {
+    for method in ["mapViews", "emptyViews", "system"] {
         let mut host = fixture.jar.seed_host(horizon_native_java::StdHost::new());
         let answer = fixture.jar.invoke_method_with_args(
             "demo/Probe",
