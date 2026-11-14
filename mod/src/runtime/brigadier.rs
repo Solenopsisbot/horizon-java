@@ -278,7 +278,9 @@ pub struct BrigadierState {
     /// PermissionCheck.Require(permission)` objects, by object marker.
     permission_objects: BTreeMap<String, u8>,
     /// Messages of `new SimpleCommandExceptionType(message)`, by marker.
-    exception_types: BTreeMap<String, CommandText>,
+    /// A `SimpleCommandExceptionType`'s message object, read when an
+    /// exception is made (Java keeps the `Message` and reads it then).
+    exception_types: BTreeMap<String, Value>,
     /// The text each `CommandSyntaxException` this host raised or created
     /// carries, by its message, so the outcome keeps a translation key.
     exception_texts: BTreeMap<String, CommandText>,
@@ -396,15 +398,30 @@ impl CommandText {
         }
     }
 
-    /// The text of a component marker (`component/literal/...`).
-    fn of(value: &Value) -> Self {
-        let raw = expect_string(value);
-        if let Some(key) = raw.strip_prefix("component/translatable/") {
-            return Self::key(key);
+    /// The text of a component as it is now (`host_component.rs`: its
+    /// state in `states`, read when the message is sent), or a string's own
+    /// text. `None` for a component no read can resolve (past the bound or
+    /// a cycle): the caller counts it rather than sending other text.
+    fn of(value: &Value, states: &crate::runtime::host_component::States) -> Option<Self> {
+        let json = crate::runtime::facade_text::json_now(value, Some(states));
+        if json.is_none() && crate::runtime::host_component::is_component(value) {
+            return None;
         }
-        if raw.starts_with(crate::runtime::facade_text::JSON_PREFIX)
-            && let Some(json) = crate::runtime::facade_text::to_json(value)
-        {
+        Some(Self::resolved(value, json))
+    }
+
+    fn resolved(value: &Value, json: Option<serde_json::Value>) -> Self {
+        if let Some(key) = json.as_ref().and_then(crate::runtime::host_component::bare_key) {
+            return Self::key(&key);
+        }
+        if let Some(text) = json.as_ref().and_then(crate::runtime::host_component::bare_literal) {
+            return Self {
+                text,
+                translate: false,
+                component: None,
+            };
+        }
+        if let Some(json) = json {
             return Self {
                 text: crate::runtime::facade_text::plain(&json),
                 translate: false,
@@ -412,10 +429,7 @@ impl CommandText {
             };
         }
         Self {
-            text: raw
-                .strip_prefix("component/literal/")
-                .unwrap_or(raw)
-                .to_owned(),
+            text: expect_string(value).to_owned(),
             translate: false,
             component: None,
         }
@@ -461,12 +475,10 @@ pub struct CommandRun {
     pub messages: Vec<CommandMessage>,
 }
 
-/// A message as the command queued it: a `sendSuccess` keeps its supplier,
-/// which runs after the command returns (the interpreter cannot call back
-/// into the jar from a host call).
+/// A message as the command queued it, its text read when it was sent (a
+/// `sendSuccess` supplier runs inside the call, `Runtime::invoke_send_success`).
 #[derive(Clone, Debug)]
 enum Pending {
-    Supplier { supplier: Value, broadcast: bool },
     Text(CommandMessage),
 }
 
@@ -956,6 +968,65 @@ impl StdHost {
         }
         out.extend(self.brigadier.permission_objects.keys().map(String::as_str));
         out.extend(self.brigadier.exception_types.keys().map(String::as_str));
+        out.extend(
+            self.brigadier
+                .exception_types
+                .values()
+                .filter_map(|message| match message {
+                    Value::Host(handle) => Some(handle.key()),
+                    Value::Ref(Some(text)) => Some(text.as_str()),
+                    _ => None,
+                }),
+        );
+    }
+
+    /// `CommandSourceStack.sendSuccess(supplier, broadcast)` (26.3 bytecode): vanilla calls
+    /// `supplier.get()` inside the call, and only when `acceptsSuccess() && !silent` (send to
+    /// the source) or `broadcast && shouldInformAdmins() && !silent`. The console accepts
+    /// success; a player does when the `sendCommandFeedback` rule is on. A player's message
+    /// only broadcast to operators (the rule off, `broadcast` set) is not modelled: counted.
+    pub(crate) fn brigadier_feedback_calls_supplier(
+        &self,
+        source: &Value,
+        broadcast: bool,
+    ) -> Option<Option<bool>> {
+        if !self.brigadier.is_running_source(source) {
+            return None;
+        }
+        let source = self.brigadier.source(source)?;
+        if source.player.is_none() {
+            return Some(Some(true));
+        }
+        let rule = self.game_event.as_ref().and_then(|firing| {
+            firing
+                .facade
+                .server
+                .game_rules
+                .get("send_command_feedback")
+                .cloned()
+        });
+        Some(match rule {
+            Some(crate::runtime::game_rules::GameRuleValue::Bool(true)) => Some(true),
+            Some(crate::runtime::game_rules::GameRuleValue::Bool(false)) if !broadcast => Some(false),
+            _ => None,
+        })
+    }
+
+    /// The component a `sendSuccess` supplier gave, sent now as it is.
+    pub(crate) fn brigadier_send_feedback(
+        &mut self,
+        r: &MethodRef,
+        component: &Value,
+        broadcast: bool,
+    ) -> Result<Value, NativeError> {
+        let Some(text) = CommandText::of(component, &self.component_states) else {
+            return self.unknown_host_call(r);
+        };
+        self.brigadier.queue(Pending::Text(CommandMessage {
+            kind: MessageKind::Success { broadcast },
+            text,
+        }))?;
+        Ok(Value::Void)
     }
 
     /// Statics of the command surface: permission levels, checks and sets,
@@ -1431,6 +1502,20 @@ impl StdHost {
                 _ => None,
             };
         }
+        // Styling a command's message with a style object (`withStyle(ChatFormatting)`/
+        // `withColor(int)` are `facade_text.rs`'s).
+        if matches!(
+            r.owner.as_str(),
+            "net/minecraft/network/chat/MutableComponent" | "net/minecraft/network/chat/Component"
+        ) && crate::runtime::host_component::is_component(receiver)
+            && matches!(name, "withStyle" | "withColor" | "setStyle")
+        {
+            // A `Style` or a `UnaryOperator<Style>` is not modelled on the
+            // command surface: answering the receiver unstyled would send
+            // the wrong text, so the call is counted (a running command
+            // refuses it).
+            return Some(self.unknown_host_call(r));
+        }
         if let Value::Host(_) = receiver {
             // What a model does not answer is an unmodelled call: counted
             // (and refused by a strict host, as a running command's is),
@@ -1458,12 +1543,13 @@ impl StdHost {
             .map(|_| text.clone())
             && matches!(name, "create" | "createWithContext")
         {
-            let message = self
-                .brigadier
-                .exception_types
-                .get(&type_marker)
-                .cloned()
-                .unwrap_or_else(|| CommandText::key("command.failed"));
+            let message = match self.brigadier.exception_types.get(&type_marker) {
+                Some(message) => match CommandText::of(message, &self.component_states) {
+                    Some(message) => message,
+                    None => return Some(self.unknown_host_call(r)),
+                },
+                None => CommandText::key("command.failed"),
+            };
             let mut messages = std::mem::take(&mut self.throwable_messages);
             let value = self.brigadier.new_exception(message, &mut messages);
             self.throwable_messages = messages;
@@ -1476,7 +1562,9 @@ impl StdHost {
             && r.descriptor == "(Lnet/minecraft/network/chat/Component;)V"
             && let Ok(uuid) = u128::from_str_radix(player, 16)
         {
-            let text = CommandText::of(args.first()?);
+            let Some(text) = CommandText::of(args.first()?, &self.component_states) else {
+                return Some(self.unknown_host_call(r));
+            };
             return Some(
                 self.brigadier
                     .queue(Pending::Text(CommandMessage {
@@ -1497,16 +1585,6 @@ impl StdHost {
             };
             let value = coords.split(',').nth(at)?.parse().ok()?;
             return Some(Ok(Value::Int(value)));
-        }
-        // Styling a command's message: the text stays, the style is dropped
-        // (component markers carry text only).
-        if matches!(
-            r.owner.as_str(),
-            "net/minecraft/network/chat/MutableComponent" | "net/minecraft/network/chat/Component"
-        ) && text.starts_with("component/")
-            && matches!(name, "withStyle" | "withColor" | "setStyle")
-        {
-            return Some(Ok(receiver.clone()));
         }
         None
     }
@@ -1577,11 +1655,11 @@ impl StdHost {
                 Some(Ok(Value::Void))
             }
             "com/mojang/brigadier/exceptions/SimpleCommandExceptionType" => {
-                let text = CommandText::of(args.first()?);
+                let message = args.first()?.clone();
                 if self.brigadier.exception_types.len() < MAX_EXCEPTION_TYPES {
                     self.brigadier
                         .exception_types
-                        .insert(receiver.to_owned(), text);
+                        .insert(receiver.to_owned(), message);
                 }
                 Some(Ok(Value::Void))
             }
@@ -1917,22 +1995,17 @@ impl StdHost {
             {
                 Err(unknown())
             }
-            ("sendSuccess", _) => {
-                let supplier = first.cloned().ok_or_else(unknown)?;
-                let broadcast = args.get(1) == Some(&Value::Int(1));
-                self.brigadier.queue(Pending::Supplier {
-                    supplier,
-                    broadcast,
-                })?;
-                Ok(Value::Void)
-            }
+            // The supplier runs inside the call: the interpreter answers it
+            // (`Runtime::invoke_send_success`); a host alone cannot run it.
+            ("sendSuccess", _) => Err(unknown()),
             ("sendFailure" | "sendSystemMessage", "(Lnet/minecraft/network/chat/Component;)V") => {
                 let kind = if r.name == "sendFailure" {
                     MessageKind::Failure
                 } else {
                     MessageKind::System
                 };
-                let text = CommandText::of(first.ok_or_else(unknown)?);
+                let text = CommandText::of(first.ok_or_else(unknown)?, &self.component_states)
+                    .ok_or_else(unknown)?;
                 self.brigadier
                     .queue(Pending::Text(CommandMessage { kind, text }))?;
                 Ok(Value::Void)
@@ -2287,41 +2360,11 @@ impl NativeJar {
             },
         );
         let mut messages = Vec::new();
-        let mut refused = None;
+        // Nothing queued runs after the command now; kept for the outcome's shape.
+        let refused: Option<String> = None;
         for item in pending {
             match item {
                 Pending::Text(message) => messages.push(message),
-                Pending::Supplier {
-                    supplier,
-                    broadcast,
-                } => {
-                    let (component, _) = self.with_command_execution(
-                        host,
-                        Arc::clone(&facade),
-                        run,
-                        Some(invocation.clone()),
-                        sources.clone(),
-                        |jar, host| {
-                            jar.invoke_functional(
-                                &supplier,
-                                "get",
-                                "()Ljava/lang/Object;",
-                                Vec::new(),
-                                host,
-                                budget,
-                            )
-                        },
-                    );
-                    match component {
-                        Ok(component) => messages.push(CommandMessage {
-                            kind: MessageKind::Success { broadcast },
-                            text: CommandText::of(&component),
-                        }),
-                        Err(error) => {
-                            refused.get_or_insert_with(|| format!("sendSuccess supplier: {error}"));
-                        }
-                    }
-                }
             }
         }
         let outcome = match (result, refused) {
