@@ -65,6 +65,10 @@ fn handle_type(handle: &HostRef) -> Option<String> {
     }
 }
 
+pub(crate) fn token_class(_: &str) -> &str {
+    SIMPLE_TYPE_TOKEN
+}
+
 /// Whether a type marker is a plain class (no generic structure).
 fn plain_class(inner: &str) -> bool {
     crate::decode_generic_type(inner).is_none()
@@ -114,10 +118,13 @@ fn token_equals(
         Value::Host(_) | Value::Int(_) | Value::Long(_) | Value::Float(_) | Value::Boxed(_) => {
             Some(false)
         }
-        Value::Ref(None) => Some(false),
-        Value::Ref(Some(text)) if crate::value_class::is_plain_string(text) => Some(false),
-        // A jar object may be a `TypeToken` subclass: the runtime answers it.
-        _ => None,
+        Value::Ref(None) | Value::Void => Some(false),
+        // A jar object may be a `TypeToken` subclass (its captured type is the
+        // runtime's to read); any other reference (a string, a host model's
+        // object) is not a `TypeToken`.
+        Value::Ref(Some(_)) => crate::jar_object::object_key(other)
+            .is_none()
+            .then_some(false),
     })
 }
 

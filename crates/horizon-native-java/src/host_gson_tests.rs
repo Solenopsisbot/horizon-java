@@ -99,9 +99,13 @@ fn styles_and_tokens_answer_as_java_25_or_count() {
         (
             "spelled",
             Exact(
-                "falsefalsefalsefalsetrue-313121738formatting-style/0a/2020/1,falsefalsefalsefalsetrue-928762901gson-style/newline=0a;indent=2020;space=1,falsefalsefalsefalsetrue17512469typetoken/java/lang/String,26",
+                "falsefalsefalsefalseformatting-style/0a/2020/126,falsefalsefalsefalsegson-style/newline=0a;indent=2020;space=141,falsefalsefalsefalsetypetoken/java/lang/String26,2-1",
             ),
         ),
+        // `word/rest` text is still not told from a marker before #156 P17 (`instanceof String`,
+        // its hash): counted. Java: `true-313121738falsefalse,true-928762901falsefalse,
+        // true17512469falsefalse,`.
+        ("spelledTypes", Counted),
         // The constants are one object each, every `with*` a new one (identity `equals`); the
         // getters, the class surface, and the style reaching `toJson`.
         (

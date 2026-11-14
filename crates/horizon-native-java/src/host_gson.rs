@@ -91,6 +91,10 @@ pub(crate) fn options_key(value: &Value) -> Option<&str> {
     }
 }
 
+pub(crate) fn style_class(_: &str) -> &str {
+    FORMATTING_STYLE
+}
+
 pub(crate) fn options_types(_: &str) -> &'static [&'static str] {
     &[OBJECT]
 }

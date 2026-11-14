@@ -27,13 +27,21 @@ public final class HostLibraryValues {
     Object style = FormattingStyle.PRETTY;
     Object token = TypeToken.of(String.class);
     StringBuilder out = new StringBuilder();
-    Map<Object, Integer> m = new HashMap<>();
     for (Object t : OLD) {
       out.append(t.equals(style)).append(style.equals(t)).append(t.equals(token)).append(token.equals(t))
-          .append(t instanceof String).append(t.hashCode()).append("" + t).append(',');
-      m.put(t, ((String) t).length());
+          .append("" + t).append(((String) t).length()).append(',');
     }
-    return out.append(m.get(OLD[2])).toString();
+    return out.append(List.of(OLD).indexOf(OLD[2])).append(List.of(token).indexOf(OLD[2])).toString();
+  }
+
+  /** `word/rest` text is not yet told from a marker (#156 P17): these checks are counted. */
+  public static String spelledTypes() {
+    StringBuilder out = new StringBuilder();
+    for (Object t : OLD) {
+      out.append(t instanceof String).append(t.hashCode()).append(t instanceof FormattingStyle)
+          .append(t instanceof TypeToken).append(',');
+    }
+    return out.toString();
   }
 
   /** The constants are one object each; every `with*` makes a new one; getters and output. */

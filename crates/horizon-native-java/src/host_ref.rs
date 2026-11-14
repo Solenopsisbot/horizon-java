@@ -1419,7 +1419,7 @@ const KINDS: &[KindInfo] = &[
     KindInfo {
         kind: HostKind::FormattingStyle,
         tag: "gfmt",
-        class: ClassRule::Fixed(crate::host_gson::FORMATTING_STYLE),
+        class: ClassRule::FromKey(crate::host_gson::style_class),
         // A constant's name or a serial per allocation: one key, one object.
         canonical: always_canonical,
         methods: &crate::host_gson::STYLE_METHODS,
@@ -1437,7 +1437,7 @@ const KINDS: &[KindInfo] = &[
     KindInfo {
         kind: HostKind::TypeToken,
         tag: "ttok",
-        class: ClassRule::Fixed(crate::host_type_token::SIMPLE_TYPE_TOKEN),
+        class: ClassRule::FromKey(crate::host_type_token::token_class),
         // A serial per allocation: one key, one object.
         canonical: always_canonical,
         methods: &crate::host_type_token::TOKEN_METHODS,
