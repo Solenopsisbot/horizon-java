@@ -152,6 +152,18 @@ pub(crate) fn client_value(marker: String) -> Value {
     Value::Ref(Some(marker))
 }
 
+/// A server-side value of the game (#156 P16b): the handle of a `game/…`
+/// marker. Text of any other family stays the text it was: its producers
+/// move with P16c (values and registry objects) and P16d (the client).
+pub(crate) fn server_value(marker: String) -> Value {
+    if marker.starts_with("game/")
+        && let Some(value) = value(&marker)
+    {
+        return value;
+    }
+    Value::Ref(Some(marker))
+}
+
 /// Whether every object of `class` the runtime hands out is a game handle
 /// (#156 P16d: the client's classes), so a `String` is never one: a cast of
 /// one throws Java's CCE.
@@ -178,6 +190,139 @@ pub(crate) fn world_canonical(key: &str) -> bool {
     !key.starts_with("client/")
 }
 
+/// A player's key: `game/player/<uuid>/<session>.<life>[/<id>]`.
+///
+/// One `ServerPlayer` is one object from login to respawn: `PlayerList.respawn`
+/// builds a new one and gives it the old id (`setId(serverPlayer.getId())`),
+/// a relog builds a new one with a new id, and a dimension change keeps the
+/// same object (`ServerPlayer.teleport` returns `this`). The game's bridge
+/// counts the sessions (logins) and lives (respawns, the clone moment) of each
+/// player (`events::FacadePlayer`), so one key is one object. The entity id,
+/// when the façade knows it, ends the key: `Entity.equals`/`hashCode` go by it.
+/// It is the same for every life of one session, so it splits no object.
+///
+/// A player the façade does not list is `game/player/<uuid>`: which session's
+/// object it is is unknown, so the key is not canonical and its `equals` and
+/// `hashCode` are counted (#228's review: a made-up session `0` was silently
+/// one object for every unlisted session).
+fn player_key(uuid: u128, player: Option<&crate::runtime::events::FacadePlayer>, life: u32) -> String {
+    let Some(player) = player else {
+        return format!("game/player/{uuid:032x}");
+    };
+    let session = player.session;
+    match player.entity_id {
+        Some(id) => format!("game/player/{uuid:032x}/{session}.{life}/{id}"),
+        None => format!("game/player/{uuid:032x}/{session}.{life}"),
+    }
+}
+
+/// The façade's player `uuid`, if it lists them: online, or leaving in this
+/// firing (`EventFacade::departed`).
+pub(crate) fn facade_player(
+    facade: &crate::runtime::events::EventFacade,
+    uuid: u128,
+) -> Option<&crate::runtime::events::FacadePlayer> {
+    facade
+        .players
+        .iter()
+        .chain(&facade.departed)
+        .find(|player| player.uuid == uuid)
+}
+
+/// Whether two equal entity keys are one object: every server key but an
+/// unlisted player's (no session) names one (P16b); the client's `LocalPlayer`
+/// is made again on each join and respawn and its key does not say which
+/// (P16d, [`world_canonical`]).
+pub(crate) fn entity_canonical(key: &str) -> bool {
+    world_canonical(key) && player_parts(key).is_none_or(|(_, session)| session.is_some())
+}
+
+/// The player `uuid` as the firing's façade knows them (session, life and id;
+/// a non-canonical key for a player the façade does not list).
+pub(crate) fn player_value(facade: &crate::runtime::events::EventFacade, uuid: u128) -> Value {
+    let player = facade_player(facade, uuid);
+    server_value(player_key(
+        uuid,
+        player,
+        player.map_or(0, |player| player.life),
+    ))
+}
+
+/// The player `uuid` before their last respawn (`AFTER_RESPAWN`'s `oldPlayer`):
+/// their previous life's object, `None` when the façade counts no respawn.
+pub(crate) fn previous_player_value(
+    facade: &crate::runtime::events::EventFacade,
+    uuid: u128,
+) -> Option<Value> {
+    let player = facade_player(facade, uuid)?;
+    let life = player.life.checked_sub(1)?;
+    Some(server_value(player_key(uuid, Some(player), life)))
+}
+
+/// The entity with id `id`: the player of that id when the façade lists one
+/// (an attacked player is that player, not a second object), else
+/// `game/entity/<id>`.
+pub(crate) fn entity_value(facade: &crate::runtime::events::EventFacade, id: i32) -> Value {
+    match facade
+        .players
+        .iter()
+        .chain(&facade.departed)
+        .find(|player| player.entity_id == Some(id))
+    {
+        Some(player) => player_value(facade, player.uuid),
+        None => server_value(format!("game/entity/{id}")),
+    }
+}
+
+/// The UUID of a player marker (`game/player/<uuid>[/<session>.<life>[/<id>]]`).
+pub(crate) fn player_uuid(marker: &str) -> Option<u128> {
+    player_parts(marker).map(|(uuid, _)| uuid)
+}
+
+/// A player marker's UUID and session (`None` for the session of the old
+/// key without one).
+fn player_parts(marker: &str) -> Option<(u128, Option<u32>)> {
+    let mut parts = marker.strip_prefix("game/player/")?.split('/');
+    let hex = parts.next()?;
+    let uuid = (hex.len() == 32).then(|| u128::from_str_radix(hex, 16).ok())??;
+    let session = match parts.next() {
+        Some(life) => Some(life.split_once('.')?.0.parse().ok()?),
+        None => None,
+    };
+    Some((uuid, session))
+}
+
+/// The entity id an entity key carries: `game/entity/<id>`, or a player's
+/// trailing `/<id>`.
+fn entity_id(marker: &str) -> Option<i32> {
+    if let Some(id) = marker.strip_prefix("game/entity/") {
+        return id.parse().ok();
+    }
+    let rest = marker.strip_prefix("game/player/")?;
+    let mut parts = rest.split('/');
+    parts.nth(2)?.parse().ok()
+}
+
+/// `Entity.equals` (vanilla 26.3: `obj instanceof Entity e && e.getId() ==
+/// getId()`) between two entity keys: one key is one object; two keys with
+/// ids by id; two players without one equal when their UUID and session
+/// match (a respawn keeps the id, a relog takes a new one). A player without
+/// an id against an entity, or a clone's original against a player, is not
+/// known here: `None`, counted by the caller.
+fn entity_equals(a: &str, b: &str) -> Option<bool> {
+    if a == b {
+        return Some(true);
+    }
+    if let (Some(x), Some(y)) = (entity_id(a), entity_id(b)) {
+        return Some(x == y);
+    }
+    match (player_parts(a), player_parts(b)) {
+        (Some((u1, _)), Some((u2, _))) if u1 != u2 => Some(false),
+        (Some((_, Some(s1))), Some((_, Some(s2)))) => Some(s1 == s2),
+        _ => None,
+    }
+}
+
 /// The types each family surely is (its `ClassRule::Unknown` declared
 /// types): what a reader of the marker has always taken it for. The exact
 /// class (a `ServerPlayer` or a mod's subclass, `ServerLevel`, a dedicated or
@@ -191,8 +336,18 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         })
         .unwrap_or(key);
     match (key.starts_with("client/"), family) {
-        (false, "player") => &["net/minecraft/server/level/ServerPlayer"],
-        (false, "original-player") => &["net/minecraft/world/entity/player/Player"],
+        // Vanilla's fixed supertypes are sure too (#228's review).
+        (false, "player") => &[
+            "net/minecraft/server/level/ServerPlayer",
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
+        (false, "original-player") => &[
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
         (false, "entity") => &["net/minecraft/world/entity/Entity"],
         (false, "level") => &["net/minecraft/server/level/ServerLevel"],
         (false, "server") => &["net/minecraft/server/MinecraftServer"],
@@ -253,6 +408,23 @@ pub(crate) const IDENTITY_METHODS: Methods = Methods {
     instance_of: instance_of_class,
     crosses_jars: |_, _| true,
     compare_to: None,
+};
+
+/// An entity (`Entity.equals`/`hashCode` are by `getId()`, vanilla 26.3):
+/// `equals` by [`entity_equals`]; `hashCode` is the id where the key carries
+/// it, counted where it does not (a player the façade gives no id).
+/// `toString` needs the position: counted.
+pub(crate) const ENTITY_METHODS: Methods = Methods {
+    hash_code: |handle, _| Ok(entity_id(handle.key())),
+    equals: |handle, other, _| {
+        Ok(match other {
+            Value::Host(other) if other.kind() == HostKind::GameEntity => {
+                entity_equals(handle.key(), other.key())
+            }
+            _ => Some(false),
+        })
+    },
+    ..IDENTITY_METHODS
 };
 
 /// A value (`BlockPos`, `LevelResource`, `Style`...): `equals` by its fields,
@@ -372,9 +544,13 @@ mod tests {
         assert_ne!(same(&pos(), &pos()), Some(true));
         let damage = || value("game/damage/minecraft:generic").unwrap();
         assert_ne!(same(&damage(), &damage()), Some(true));
+        // A server player is surely a `ServerPlayer` and every vanilla supertype.
         assert_eq!(
-            declared_types("game/player/2a"),
-            &["net/minecraft/server/level/ServerPlayer"]
+            declared_types("game/player/2a")[..2],
+            [
+                "net/minecraft/server/level/ServerPlayer",
+                "net/minecraft/world/entity/player/Player"
+            ]
         );
         assert_eq!(
             declared_types("block-pos/1,2,3"),
