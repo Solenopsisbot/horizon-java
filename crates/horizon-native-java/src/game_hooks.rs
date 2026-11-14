@@ -1011,7 +1011,7 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.empty_enumeration()
     }
 
-    fn new_enumeration(&mut self, over: crate::host_iterator::EnumerationOver) -> Value {
+    fn new_enumeration(&mut self, over: crate::host_iterator::EnumerationOver) -> Option<Value> {
         self.inner.new_enumeration(over)
     }
 

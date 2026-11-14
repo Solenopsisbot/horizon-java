@@ -2507,10 +2507,11 @@ pub trait Host {
         host_iterator::enumeration(host_iterator::EMPTY_ENUMERATION.to_owned())
     }
 
-    /// A new enumeration over `over` (`Collections.enumeration`, `Vector.elements()`). A host
-    /// that keeps none answers one whose members are counted.
-    fn new_enumeration(&mut self, _over: host_iterator::EnumerationOver) -> Value {
-        host_iterator::enumeration("enumeration/0".to_owned())
+    /// A new enumeration over `over` (`Collections.enumeration`, `Vector.elements()`); `None`
+    /// for a host that keeps none, whose caller counts the call (a shared placeholder key
+    /// would make two of them one object, #225).
+    fn new_enumeration(&mut self, _over: host_iterator::EnumerationOver) -> Option<Value> {
+        None
     }
 
     /// What the enumeration `marker` reads, when this host made it with [`Self::new_enumeration`].
@@ -4863,11 +4864,11 @@ impl Host for StdHost {
         host_iterator::enumeration(host_iterator::EMPTY_ENUMERATION.to_owned())
     }
 
-    fn new_enumeration(&mut self, over: host_iterator::EnumerationOver) -> Value {
+    fn new_enumeration(&mut self, over: host_iterator::EnumerationOver) -> Option<Value> {
         let marker = format!("enumeration/{}", self.next_iterator);
         self.next_iterator = self.next_iterator.saturating_add(1);
         self.enumerations.insert(marker.clone(), over);
-        host_iterator::enumeration(marker)
+        Some(host_iterator::enumeration(marker))
     }
 
     fn enumeration_over(&self, marker: &str) -> Option<host_iterator::EnumerationOver> {
@@ -26014,6 +26015,14 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         // A host handle's `toString`/`hashCode`/`equals`: its
                         // kind's row, held jar objects run here (`host_ref.rs`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_joiner_iterator(&r, op, receiver.as_ref(), &args)
+                    ) {
+                        // `Joiner.join(Iterator)` walks the iterator, a jar's own too, through
+                        // its own `hasNext`/`next` (`host_iterator.rs`), before a jar operand
+                        // would be counted.
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
