@@ -66,10 +66,22 @@ fn expected(method: &str) -> &'static str {
 ///   and equal (`HashMap`); two views of one source are two objects; each
 ///   shared empty is one object, and `List.of()` is not `emptyList()` nor a
 ///   `Stream.toList()`;
+/// - `equalsContracts`: `equals` by the receiver's real class (#208 review
+///   B1): `AbstractList`/`AbstractSet`/`AbstractMap`'s contracts, a list
+///   never equal to a set, and `==` for `ArrayDeque`, `PriorityQueue`,
+///   `HashMap.values()` and `unmodifiableCollection`, typed `Object` or not;
+/// - `sharedEmpties`: an empty `Stream.toList()` is one shared object (not
+///   `List.of()`'s), an empty `toUnmodifiableList()`/`toUnmodifiableSet()` is
+///   `List.of()`/`Set.of()`, as are the empty copies (B2);
+/// - `copies`: the copies Java hands back unchanged (`List.copyOf` of a
+///   `List.of`, `Set.copyOf`, `Map.copyOf`, a re-wrapped unmodifiable view,
+///   Guava's `copyOf` of its own) are the same object; the others new (S1);
+/// - `names`: `getSimpleName`/`getCanonicalName` of the nested classes (S2);
 /// - `writes`: two `Lists.newArrayList(..)` never share a write;
 /// - `strings`: a `String` spelling a host-made collection's key, the live
 ///   collections' keys among them, is a `String` (`getClass`, `instanceof`,
-///   `equals` both ways, `hashCode`, a `HashMap` key, `valueOf`).
+///   `equals` both ways, `hashCode`, a `HashMap` key, `valueOf`, a `(List)`
+///   cast throws), and so are their `hcoll:` handle-text spellings.
 #[test]
 fn host_made_collections_are_objects_of_java_25s_classes() {
     let fixture = javac_fixture::Fixture::build(
@@ -93,6 +105,10 @@ fn host_made_collections_are_objects_of_java_25s_classes() {
         "guavaClasses",
         "behaves",
         "identity",
+        "equalsContracts",
+        "sharedEmpties",
+        "copies",
+        "names",
         "writes",
         "strings",
     ] {
