@@ -8966,6 +8966,14 @@ impl Host for StdHost {
                     None => self.unknown_host_call(r),
                 }
             }
+            // A `String` is no `FabricLoader` (Java's cast throws; #156 P17's
+            // cast still passes text): its calls are counted, never answered
+            // as the loader's.
+            ("net/fabricmc/loader/api/FabricLoader", _, _)
+                if expect_ref(receiver).is_some_and(|text| value_class::is_plain_string(text)) =>
+            {
+                self.unknown_host_call(r)
+            }
             ("net/fabricmc/loader/api/FabricLoader", "isModLoaded", "(Ljava/lang/String;)Z") => {
                 let id = match Self::argument(r, args, 0)? {
                     Value::Ref(Some(id)) => id,
@@ -9133,7 +9141,8 @@ impl Host for StdHost {
                     .map(|(_, class, _)| class.replace('/', ".")),
             )),
             (
-                "net/fabricmc/loader/api/EntrypointContainer",
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getEntrypoint",
                 "()Ljava/lang/Object;",
             ) => Ok(host_fabric_runtime::entrypoint_container_parts(receiver)
@@ -9141,7 +9150,8 @@ impl Host for StdHost {
                     host_fabric_runtime::entrypoint_instance(&class, &provider)
                 })),
             (
-                "net/fabricmc/loader/api/EntrypointContainer",
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
                 "getProvider",
                 "()Lnet/fabricmc/loader/api/ModContainer;",
             ) => Ok(host_fabric_runtime::entrypoint_container_parts(receiver)

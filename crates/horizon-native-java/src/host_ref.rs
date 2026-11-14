@@ -1386,7 +1386,7 @@ const KINDS: &[KindInfo] = &[
         },
         // `FabricLoaderImpl.INSTANCE`.
         canonical: always_canonical,
-        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+        methods: &crate::host_fabric_runtime::EXACT_OBJECT_METHODS,
     },
     KindInfo {
         kind: HostKind::FabricMappingResolver,
@@ -1396,7 +1396,7 @@ const KINDS: &[KindInfo] = &[
         },
         // Made once and kept.
         canonical: always_canonical,
-        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+        methods: &crate::host_fabric_runtime::EXACT_OBJECT_METHODS,
     },
     KindInfo {
         kind: HostKind::FabricEnvType,

@@ -195,7 +195,10 @@ pub(crate) fn loader_types(_: &str) -> &'static [&'static str] {
     ]
 }
 pub(crate) fn mapping_resolver_types(_: &str) -> &'static [&'static str] {
-    &["net/fabricmc/loader/api/MappingResolver"]
+    &[
+        "net/fabricmc/loader/impl/LazyMappingResolver",
+        "net/fabricmc/loader/api/MappingResolver",
+    ]
 }
 pub(crate) fn env_type_types(_: &str) -> &'static [&'static str] {
     &[
@@ -217,8 +220,10 @@ pub(crate) fn resource_loader_types(_: &str) -> &'static [&'static str] {
 }
 
 /// [`crate::host_ref::ClassRule::Unknown`]'s declared types of an
-/// entrypoint instance: its own class (the jar's, from the key), interned
-/// once per class (a bounded set: the entrypoints the run declared).
+/// entrypoint instance: its own class (the jar's, from the key, as
+/// `fabric.mod.json` names it: a binary name), interned once per class (a
+/// bounded set: the entrypoints the run declared). A `Class::member`
+/// reference's instance is a generated proxy: no declared class.
 pub(crate) fn entrypoint_instance_types(key: &str) -> &'static [&'static str] {
     static CLASSES: OnceLock<Mutex<HashSet<&'static [&'static str]>>> = OnceLock::new();
     let handle = Value::Host(HostRef::new(HostKind::FabricEntrypointInstance, key));
@@ -227,6 +232,10 @@ pub(crate) fn entrypoint_instance_types(key: &str) -> &'static [&'static str] {
     else {
         return &[];
     };
+    if class.contains("::") {
+        return &[];
+    }
+    let class = class.replace('.', "/");
     let mut classes = CLASSES
         .get_or_init(Default::default)
         .lock()
@@ -260,6 +269,25 @@ pub(crate) const OBJECT_METHODS: Methods = Methods {
     instance_of: instance_of_class,
     crosses_jars: |_, _| false,
     compare_to: None,
+};
+
+/// `instanceof` of the loader or its mapping resolver: their whole type is
+/// known (`FabricLoaderImpl` is final; the loader makes its resolver with
+/// `new LazyMappingResolver`; neither interface extends another, and Fabric
+/// Loader's classes are no Mixin target), so the declared types are all.
+fn exact_instance_of(handle: &HostRef, wanted: &str, _: &dyn ClassHierarchy) -> Option<bool> {
+    let declared = match handle.kind() {
+        HostKind::FabricLoaderInstance => loader_types(""),
+        _ => mapping_resolver_types(""),
+    };
+    Some(wanted == "java/lang/Object" || declared.contains(&wanted))
+}
+
+/// The loader's and its resolver's rows: `Object`'s methods, exact
+/// `instanceof`.
+pub(crate) const EXACT_OBJECT_METHODS: Methods = Methods {
+    instance_of: exact_instance_of,
+    ..OBJECT_METHODS
 };
 
 /// `instanceof` of an `EnvType`: exactly `EnvType` (final, no constant
@@ -317,7 +345,13 @@ mod tests {
             let Value::Host(handle) = entrypoint_instance(class, provider) else {
                 unreachable!()
             };
-            assert_eq!(entrypoint_instance_types(handle.key()), [class.as_str()]);
+            let expected = class.replace('.', "/");
+            let types = entrypoint_instance_types(handle.key());
+            if class.contains("::") {
+                assert!(types.is_empty());
+            } else {
+                assert_eq!(types, [expected.as_str()]);
+            }
             let Value::Host(handle) = container else {
                 unreachable!()
             };
