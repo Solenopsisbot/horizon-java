@@ -437,6 +437,10 @@ impl HashTable {
 }
 
 #[cfg(test)]
+#[path = "hash_perf_tests.rs"]
+mod perf_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::hash_map_order::java_string_hash;
