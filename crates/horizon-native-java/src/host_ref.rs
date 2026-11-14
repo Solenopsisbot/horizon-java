@@ -1843,9 +1843,10 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::game_object::declared_types,
         },
-        // One key per entity object: a player's carries their session and
-        // life (`game_object::player_value`); an unlisted player's names no
-        // session, so no one object.
+        // One key per entity object: a server player's carries their session
+        // and life (`game_object::player_value`); an unlisted player's names no
+        // session, and the client's player is made again on each join and
+        // respawn (P16d), so neither is one object.
         canonical: crate::game_object::entity_canonical,
         methods: &crate::game_object::ENTITY_METHODS,
     },
@@ -1856,9 +1857,9 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::game_object::declared_types,
         },
-        // One level per dimension.
-        canonical: always_canonical,
-        methods: &crate::game_object::IDENTITY_METHODS,
+        // One level per dimension; the client's is made again on each join.
+        canonical: crate::game_object::world_canonical,
+        methods: &crate::game_object::LEVEL_METHODS,
     },
     KindInfo {
         kind: HostKind::GameSingleton,
@@ -1889,8 +1890,9 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::game_object::declared_types,
         },
-        // Each `new BlockPos(..)` is its own object; equal by fields.
-        canonical: never_canonical,
+        // Each `new BlockPos(..)` is its own object; equal by fields. The
+        // client's constants (`Style.EMPTY`, named colours) are one each.
+        canonical: crate::game_object::value_canonical,
         methods: &crate::game_object::VALUE_METHODS,
     },
     KindInfo {

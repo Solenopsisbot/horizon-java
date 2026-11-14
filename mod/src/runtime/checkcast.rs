@@ -245,7 +245,8 @@ impl<H: Host> Runtime<'_, H> {
             // A `Class` is a handle (#156 P13c): `"int"` or a held class's
             // name is that `String`.
             if let Value::Ref(Some(text)) = value
-                && crate::runtime::jdk_closure::in_jdk_package(target)
+                && (crate::runtime::jdk_closure::in_jdk_package(target)
+                    || crate::runtime::game_object::handle_only_class(target))
                 && crate::runtime::value_class::is_plain_string(text)
             {
                 if crate::runtime::value_class::string_instance_of(text, target) {

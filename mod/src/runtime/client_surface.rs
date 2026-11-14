@@ -104,7 +104,7 @@ const USER: &str = "client/user";
 /// `options.<name>()`: `client/option/<name>`.
 const OPTION: &str = "client/option/";
 /// A `Vec3` the façade handed out: `client/vec3/<x>,<y>,<z>`.
-const VEC3: &str = "client/vec3/";
+use crate::runtime::client_values::VEC3;
 /// A tooltip listener's `List<Component>`: the host collection the game
 /// seeds with the tooltip's lines and reads back after the firing.
 const TOOLTIP_LIST: &str = "java/util/ArrayList#client-tooltip";
@@ -125,7 +125,7 @@ pub(crate) fn tooltip_arguments() -> Vec<Value> {
 }
 
 /// A `java.awt.Color` constant: `client/awt-color/<aarrggbb>`.
-const AWT_COLOR: &str = "client/awt-color/";
+use crate::runtime::client_values::AWT_COLOR;
 /// `java.awt.Color`'s named constants (both spellings resolve).
 const AWT_COLORS: &[(&str, u32)] = &[
     ("WHITE", 0xffff_ffff),
@@ -147,7 +147,18 @@ const AWT_COLORS: &[(&str, u32)] = &[
 const MAX_TASKS: usize = 64;
 /// A vanilla mapping read through `options.keyJump`...: `client/vanilla-key/key.jump`.
 const VANILLA_KEY: &str = "client/vanilla-key/";
-const CATEGORY: &str = "key-category/";
+use crate::runtime::client_values::CATEGORY;
+/// The categories `KeyMapping.Category` registers itself (`minecraft:<name>`).
+const VANILLA_CATEGORIES: &[&str] = &[
+    "movement",
+    "misc",
+    "multiplayer",
+    "gameplay",
+    "inventory",
+    "creative",
+    "spectator",
+    "debug",
+];
 
 const KEY_MAPPING: &str = "net/minecraft/client/KeyMapping";
 const KEY_CATEGORY: &str = "net/minecraft/client/KeyMapping$Category";
@@ -530,6 +541,8 @@ pub(crate) struct ClientState {
     key_inits: BTreeMap<String, KeyInit>,
     /// `KeyMapping.Category` object marker → its identifier.
     categories: BTreeMap<String, String>,
+    /// The ids `KeyMapping.Category.register` made a category of.
+    registered_categories: std::collections::BTreeSet<String>,
     keys: Vec<ClientKeyMapping>,
     /// Registrations that could not become a mapping or layer, with why.
     refused: Vec<String>,
@@ -547,7 +560,15 @@ pub(crate) struct ClientState {
     tasks: Vec<Value>,
 }
 
+/// A client object or value: a game handle (#156 P16d) for a `client/…` or
+/// `key-category/…` marker, the text itself for any other (an enum constant,
+/// a callback, a `String` answer).
 fn marker(text: impl Into<String>) -> Value {
+    crate::runtime::game_object::client_value(text.into())
+}
+
+/// A `String` answer: the text itself, never a client object it might spell.
+fn text(text: impl Into<String>) -> Value {
     Value::Ref(Some(text.into()))
 }
 
@@ -1138,9 +1159,16 @@ impl StdHost {
                 state.register_layer(&args[1], &args[2], "HudElementRegistry.attachElement");
                 Some(Ok(Value::Void))
             }
+            // One category per id: vanilla's own and a second registration of
+            // one throw `IllegalArgumentException`, which is not modelled (counted).
             (KEY_CATEGORY, "register") => {
                 let (namespace, path) = identifier_parts(args.first()?);
-                Some(Ok(marker(format!("{CATEGORY}{namespace}:{path}"))))
+                let id = format!("{namespace}:{path}");
+                let vanilla = namespace == "minecraft" && VANILLA_CATEGORIES.contains(&path);
+                if vanilla || !state.registered_categories.insert(id.clone()) {
+                    return Some(Err(NativeError::UnknownHostCall(r.clone())));
+                }
+                Some(Ok(marker(format!("{CATEGORY}{id}"))))
             }
             _ => None,
         }
@@ -1173,6 +1201,7 @@ impl StdHost {
                         None => self.unknown_host_call(r),
                     }
                 }
+                text::ComponentCall::Unknown => self.unknown_host_call(r),
                 // `return this`, the receiver's style changed in place.
                 text::ComponentCall::Restyle { codes, replace } => crate::runtime::host_component::change(
                     &mut self.component_states,
@@ -1184,6 +1213,14 @@ impl StdHost {
             });
         }
         let text = crate::runtime::game_object::text(receiver)?.clone();
+        // Every `client/…` and `key-category/…` object is a handle now (#156 P16d), so a `String`
+        // spelling one is just that `String`: its own members answer, never the object's (#232's
+        // review: `new KeyMapping("client/minecraft", ..).getName().equals(..)` in a firing).
+        if !matches!(receiver, Value::Host(_))
+            && (text.starts_with("client/") || text.starts_with(CATEGORY))
+        {
+            return None;
+        }
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
         // `NonNullList` is a `List`: the inventory's lists answer as one.
         if r.owner == "net/minecraft/core/NonNullList" && text.starts_with("list") {
@@ -1261,7 +1298,7 @@ impl StdHost {
             || text.starts_with("client/text-color/")
             || text.starts_with("enum/net/minecraft/ChatFormatting/")
         {
-            if let Some(value) = text::text_call(&text, r, args) {
+            if let Some(value) = text::text_call(&text, receiver, r, args) {
                 return Some(Ok(value));
             }
             if text.starts_with("enum/") || self.client.frame.is_none() {
@@ -1272,29 +1309,20 @@ impl StdHost {
         if self.client.key_inits.contains_key(&text) {
             return self.key_mapping_call(&text, r, args);
         }
+        // `equals`, `hashCode` and `toString` of a client handle are its
+        // kind's (`game_object.rs`, `client_values.rs`), answered before here.
         if let Some(id) = text.strip_prefix(CATEGORY) {
-            return Some(match (r.name.as_str(), return_desc(&r.descriptor)) {
-                ("id", _) => Ok(crate::runtime::host_ids::identifier_of_text(id)),
-                ("label", _) => Ok(component_value(
+            return Some(match r.name.as_str() {
+                "id" => Ok(crate::runtime::host_ids::identifier_of_text(id)),
+                "label" => Ok(component_value(
                     "translatable",
                     &format!("key.category.{}", id.replacen(':', ".", 1)),
                 )),
-                ("hashCode", "I") => Ok(Value::Int(stable_hash(&text))),
-                ("equals", "Z") => Ok(flag(args.first() == Some(receiver))),
-                ("toString", _) => Ok(marker(text.clone())),
                 _ => refuse(),
             });
         }
         if !text.starts_with("client/") {
             return None;
-        }
-        match (r.name.as_str(), r.descriptor.as_str()) {
-            ("hashCode", "()I") => return Some(Ok(Value::Int(stable_hash(&text)))),
-            ("equals", "(Ljava/lang/Object;)Z") => {
-                return Some(Ok(flag(args.first() == Some(receiver))));
-            }
-            ("toString", "()Ljava/lang/String;") => return Some(Ok(marker(text))),
-            _ => {}
         }
         if let Some(hex) = text.strip_prefix(AWT_COLOR) {
             let argb = u32::from_str_radix(hex, 16).ok()?;
@@ -1411,7 +1439,9 @@ impl StdHost {
                 }
                 Value::Void
             }
-            ("getName", "()Ljava/lang/String;") => marker(init.name),
+            // The jar's own `String`, never parsed into an object whatever it spells
+            // (#232's review: `new KeyMapping("client/minecraft", ..)`).
+            ("getName", "()Ljava/lang/String;") => text(init.name),
             ("getCategory", _) => marker(format!(
                 "{CATEGORY}{}",
                 init.category.as_deref().unwrap_or("minecraft:misc")
@@ -1457,7 +1487,6 @@ impl StdHost {
                         + (z - o.get(2)?).powi(2);
                     double(if name == "distanceTo" { d2.sqrt() } else { d2 })
                 }
-                ("toString", _) => Some(marker(format!("({x}, {y}, {z})"))),
                 _ => None,
             };
         }
@@ -1477,7 +1506,7 @@ impl StdHost {
         if let Some(mapping) = object.strip_prefix(VANILLA_KEY) {
             return match (name, returns) {
                 ("isDown", "Z") => Some(flag(frame.vanilla_keys_down.iter().any(|k| k == mapping))),
-                ("getName", _) => Some(marker(mapping)),
+                ("getName", _) => Some(text(mapping)),
                 _ => None,
             };
         }
@@ -1607,9 +1636,9 @@ impl StdHost {
                     ("isAlive", "Z") => Some(flag(p.health > 0.0)),
                     ("getId", "I") => int(p.entity_id),
                     ("getName" | "getDisplayName", _) => Some(component_value("literal", &p.name)),
-                    ("getScoreboardName" | "getPlainTextName", _) => Some(marker(p.name.clone())),
+                    ("getScoreboardName" | "getPlainTextName", _) => Some(text(p.name.clone())),
                     ("getUUID", _) => uuid_value(&uuid_text(p.uuid)).ok(),
-                    ("getStringUUID", _) => Some(marker(uuid_text(p.uuid))),
+                    ("getStringUUID", _) => Some(text(uuid_text(p.uuid))),
                     ("level" | "clientLevel", _) if frame.level.is_some() => Some(marker(LEVEL)),
                     _ => None,
                 }

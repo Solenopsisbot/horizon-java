@@ -149,6 +149,7 @@ const GAME_STUBS: &[(&str, &str)] = &[
            public KeyMapping(String n, int k, Category c) {}\n\
            public KeyMapping(String n, com.mojang.blaze3d.platform.InputConstants.Type t, int k, Category c) {}\n\
            public boolean consumeClick() { return false; } public boolean isDown() { return false; }\n\
+           public String getName() { return null; }\n\
            public record Category(net.minecraft.resources.Identifier id) {\n\
              public static final Category MISC = null;\n\
              public static Category register(net.minecraft.resources.Identifier id) { return null; } } }",
@@ -252,6 +253,79 @@ public final class ClientMod {
   }
 }
 "#;
+
+/// A mapping's name is the jar's own `String`, whatever it spells: a name written like a client
+/// object's marker (`client/minecraft`) or a category's never comes back as that object (#232's
+/// review). 26.3's `getName()` is `getfield name` (javap of the client jar); Java 25 printed the
+/// expected line for the same listener over that shape: the argument equals the literal,
+/// has its length, is `==` to it (interned), and is no `Minecraft`.
+const NAMED_MOD: &str = r#"
+package demo;
+import com.mojang.blaze3d.platform.InputConstants;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Minecraft;
+public final class ClientMod {
+  public static KeyMapping SPELLED;
+  public static KeyMapping CATEGORY;
+  public static String seen = "";
+  public void onInitializeClient() {
+    SPELLED = KeyMappingHelper.registerKeyMapping(
+        new KeyMapping("client/minecraft", InputConstants.Type.KEYBOARD, InputConstants.KEY_C, KeyMapping.Category.MISC));
+    CATEGORY = KeyMappingHelper.registerKeyMapping(
+        new KeyMapping("key-category/minecraft:misc", InputConstants.Type.KEYBOARD, InputConstants.KEY_C, KeyMapping.Category.MISC));
+    ClientTickEvents.END_CLIENT_TICK.register(client -> {
+      String a = SPELLED.getName();
+      String b = CATEGORY.getName();
+      seen = a.equals("client/minecraft") + "," + a.length() + "," + (a == "client/minecraft") + ","
+          + ((Object) a == Minecraft.getInstance()) + "," + (a instanceof String) + "|"
+          + b.equals("key-category/minecraft:misc") + "," + b.length() + ","
+          + ((Object) b == KeyMapping.Category.MISC);
+    });
+  }
+}
+"#;
+
+#[test]
+fn a_mappings_name_is_its_own_text_whatever_it_spells() {
+    let root = scratch("named");
+    let mut sources = GAME_STUBS.to_vec();
+    sources.extend_from_slice(FABRIC_STUBS);
+    sources.push(("demo/ClientMod.java", NAMED_MOD));
+    let Some(jar_path) = build_jar(
+        &root,
+        &sources,
+        (
+            "fabric.mod.json",
+            r#"{"id":"demo","version":"1","environment":"client","entrypoints":{"client":["demo.ClientMod"]}}"#,
+        ),
+    ) else {
+        eprintln!("skipped: no javac");
+        return;
+    };
+    let jar = NativeJar::from_path(&jar_path).unwrap();
+    let entry = jar.discover_entrypoint("client").unwrap();
+    let mut host = StdHost::new();
+    jar.execute(&entry.class, entry.method.as_deref(), "client", &mut host)
+        .unwrap();
+    let client = host.game_listeners(&jar, false);
+    fire(
+        &jar,
+        &mut host,
+        &client.listeners,
+        GameEvent::ClientTickEnd,
+        frame(Some(0.0)),
+        &[KeyPress::default(), KeyPress::default()],
+    );
+    // What Java 25 prints for the same listener.
+    assert_eq!(
+        static_value(&host, "demo/ClientMod", "seenLjava/lang/String;"),
+        Some(Value::Ref(Some(
+            "true,16,true,false,true|true,27,false".into()
+        )))
+    );
+}
 
 #[test]
 fn a_fabric_client_mod_gets_its_key_tick_listener_and_hud_element() {

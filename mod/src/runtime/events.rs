@@ -2455,16 +2455,20 @@ fn fabric_arguments(shape: Shape, firing: &EventFiring) -> Result<Vec<Value>, Na
                 )),
             ]
         }
-        Shape::Minecraft => vec![marker(crate::runtime::client_surface::MINECRAFT.into())],
-        Shape::ClientLevel => vec![marker(crate::runtime::client_surface::LEVEL.into())],
+        Shape::Minecraft => vec![crate::runtime::game_object::client_value(
+            crate::runtime::client_surface::MINECRAFT.into(),
+        )],
+        Shape::ClientLevel => vec![crate::runtime::game_object::client_value(
+            crate::runtime::client_surface::LEVEL.into(),
+        )],
         Shape::ClientJoin => vec![
-            marker(crate::runtime::client_surface::CONNECTION.into()),
-            marker(crate::runtime::client_surface::PACKET_SENDER.into()),
-            marker(crate::runtime::client_surface::MINECRAFT.into()),
+            crate::runtime::game_object::client_value(crate::runtime::client_surface::CONNECTION.into()),
+            crate::runtime::game_object::client_value(crate::runtime::client_surface::PACKET_SENDER.into()),
+            crate::runtime::game_object::client_value(crate::runtime::client_surface::MINECRAFT.into()),
         ],
         Shape::ClientDisconnect => vec![
-            marker(crate::runtime::client_surface::CONNECTION.into()),
-            marker(crate::runtime::client_surface::MINECRAFT.into()),
+            crate::runtime::game_object::client_value(crate::runtime::client_surface::CONNECTION.into()),
+            crate::runtime::game_object::client_value(crate::runtime::client_surface::MINECRAFT.into()),
         ],
         Shape::ClientTooltip => crate::runtime::client_surface::tooltip_arguments(),
     })
