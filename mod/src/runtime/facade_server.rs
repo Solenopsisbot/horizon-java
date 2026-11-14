@@ -131,8 +131,10 @@ const LEVEL_RESOURCES: &[(&str, &str)] = &[
     ("ROOT", "."),
 ];
 
+/// A façade value: a `game/…` marker's handle (`game_object.rs`, #156
+/// P16b); `level-resource/` and `game-rule/` text until P16c.
 fn marker(text: impl Into<String>) -> Value {
-    Value::Ref(Some(text.into()))
+    crate::runtime::game_object::server_value(text.into())
 }
 
 fn refuse(r: &MethodRef) -> Result<Value, NativeError> {
@@ -476,17 +478,17 @@ impl crate::runtime::StdHost {
                 "connection",
                 "Lnet/minecraft/server/network/ServerGamePacketListenerImpl;",
             ) => Some(marker(format!(
-                "game/connection/{}",
-                text.strip_prefix("game/player/")?
+                "game/connection/{:032x}",
+                crate::runtime::game_object::player_uuid(text)?
             ))),
             (
                 "net/minecraft/server/network/ServerGamePacketListenerImpl",
                 "player",
                 "Lnet/minecraft/server/level/ServerPlayer;",
-            ) => Some(marker(format!(
-                "game/player/{}",
-                text.strip_prefix("game/connection/")?
-            ))),
+            ) => Some(crate::runtime::game_object::player_value(
+                &self.game_event.as_deref()?.facade,
+                u128::from_str_radix(text.strip_prefix("game/connection/")?, 16).ok()?,
+            )),
             _ => None,
         }
     }
@@ -504,8 +506,7 @@ impl crate::runtime::StdHost {
         if let Some(answer) = self.saved_data.call(r, receiver, args) {
             return Some(answer);
         }
-        let player = crate::runtime::game_object::text(receiver)?.strip_prefix("game/player/")?;
-        let player = u128::from_str_radix(player, 16).ok()?;
+        let player = crate::runtime::game_object::player_uuid(crate::runtime::game_object::text(receiver)?)?;
         let firing = self.game_event.as_deref()?;
         player_member(&firing.facade.server, player, r)
     }

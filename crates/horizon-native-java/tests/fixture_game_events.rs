@@ -99,6 +99,8 @@ fn facade(tick_count: i32) -> Arc<EventFacade> {
             name: "Alex".into(),
             level: Some("minecraft:overworld".into()),
             entity_id: Some(7),
+            session: 0,
+            life: 0,
         }],
         levels: vec![],
         server: Default::default(),

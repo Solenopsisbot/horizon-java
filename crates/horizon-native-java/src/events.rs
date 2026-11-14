@@ -997,6 +997,14 @@ pub struct FacadePlayer {
     pub level: Option<String>,
     /// `Entity.getId`; `None` when the host hook does not know it.
     pub entity_id: Option<i32>,
+    /// How many times the player logged in, and was rebuilt since (a respawn
+    /// or a return from the End: the clone moment), as the game's bridge
+    /// counts them. Vanilla makes a new `ServerPlayer` at each, so one
+    /// (`uuid`, `session`, `life`) is one object (`game_object::player_value`);
+    /// a respawn keeps the entity id (`PlayerList.respawn`: `setId`), a relog
+    /// takes a new one. A dimension change keeps the object.
+    pub session: u32,
+    pub life: u32,
 }
 
 /// A level as the façade shows it.
@@ -1175,8 +1183,10 @@ fn uuid_text(uuid: u128) -> String {
     )
 }
 
+/// A façade value: a game object's handle for a `game/…` marker
+/// (`game_object.rs`, #156 P16b), any other family's text as it was.
 fn marker(text: String) -> Value {
-    Value::Ref(Some(text))
+    crate::game_object::server_value(text)
 }
 
 fn level_marker(id: &str) -> Value {
@@ -1193,8 +1203,8 @@ fn block_marker(block: &str) -> Value {
     marker(format!("game/block/{block}"))
 }
 
-fn player_marker(uuid: u128) -> Value {
-    marker(format!("game/player/{uuid:032x}"))
+fn player_marker(facade: &EventFacade, uuid: u128) -> Value {
+    crate::game_object::player_value(facade, uuid)
 }
 
 /// A clone's old player: its own holder (`neoforge_original.rs`) and façade, never the new
@@ -1239,7 +1249,7 @@ fn facade(marker: &str) -> Option<Facade<'_>> {
     let hex = || u128::from_str_radix(id, 16).ok();
     Some(match kind {
         "level" => Facade::Level(id),
-        "player" => Facade::Player(hex()?),
+        "player" => Facade::Player(crate::game_object::player_uuid(marker)?),
         "original-player" => Facade::OriginalPlayer(hex()?),
         "connection" => Facade::Connection(hex()?),
         "entity" => Facade::Entity(id.parse().ok()?),
@@ -1344,11 +1354,12 @@ impl StdHost {
             // `handler.player`: an instance field of a host object reaches the
             // host as a static read without its receiver, and only the join
             // and disconnect firings hand a handler out.
-            ("net/minecraft/server/network/ServerGamePacketListenerImpl", "player") => self
-                .game_event
-                .as_ref()
-                .and_then(|firing| firing.context.player)
-                .map(player_marker),
+            ("net/minecraft/server/network/ServerGamePacketListenerImpl", "player") => {
+                self.game_event.as_ref().and_then(|firing| {
+                    let uuid = firing.context.player?;
+                    Some(player_marker(&firing.facade, uuid))
+                })
+            }
             _ => None,
         }
     }
@@ -1357,6 +1368,14 @@ impl StdHost {
     /// `ServerPlayNetworking.canSend(player, type)`, from the channels the
     /// game says that player's client takes. Outside a firing, or for a
     /// player argument that is not a façade player, it is not answered here.
+    /// The firing's façade (the players and levels it names), or an empty
+    /// one outside a firing.
+    pub(crate) fn firing_facade(&self) -> Arc<EventFacade> {
+        self.game_event
+            .as_ref()
+            .map_or_else(Arc::default, |firing| Arc::clone(&firing.facade))
+    }
+
     pub(crate) fn game_event_invoke(
         &mut self,
         r: &MethodRef,
@@ -1556,7 +1575,7 @@ impl StdHost {
                     let players = facade
                         .players
                         .iter()
-                        .map(|p| player_marker(p.uuid))
+                        .map(|p| player_marker(&facade, p.uuid))
                         .collect();
                     Some(self.facade_list("players", players))
                 }
@@ -1572,7 +1591,7 @@ impl StdHost {
                             .players
                             .iter()
                             .find(|p| uuid_text(p.uuid) == wanted)
-                            .map_or(Value::Ref(None), |p| player_marker(p.uuid)),
+                            .map_or(Value::Ref(None), |p| player_marker(&facade, p.uuid)),
                     )
                 }
                 ("getPlayerByName", _) => {
@@ -1582,7 +1601,7 @@ impl StdHost {
                             .players
                             .iter()
                             .find(|p| p.name.eq_ignore_ascii_case(wanted))
-                            .map_or(Value::Ref(None), |p| player_marker(p.uuid)),
+                            .map_or(Value::Ref(None), |p| player_marker(&facade, p.uuid)),
                     )
                 }
                 _ => None,
@@ -1607,7 +1626,7 @@ impl StdHost {
                             .players
                             .iter()
                             .filter(|p| p.level.as_deref() == Some(*id))
-                            .map(|p| player_marker(p.uuid))
+                            .map(|p| player_marker(&facade, p.uuid))
                             .collect();
                         Some(self.facade_list("level-players", players))
                     }
@@ -1671,7 +1690,7 @@ impl StdHost {
                 }
             }
             Facade::Connection(uuid) => match (name, returns) {
-                ("getPlayer", _) => Some(player_marker(*uuid)),
+                ("getPlayer", _) => Some(player_marker(&facade, *uuid)),
                 _ => None,
             },
             Facade::Entity(id) => {
@@ -1695,9 +1714,11 @@ impl StdHost {
                 ("getTarget", _) if event == GameEvent::UseEntity => context
                     .entity
                     .as_ref()
-                    .map(|entity| marker(format!("game/entity/{}", entity.id))),
+                    .map(|entity| crate::game_object::entity_value(&facade, entity.id)),
                 ("getState", _) => context.block.as_deref().map(block_state_marker),
-                ("getEntity" | "getPlayer" | "player" | "entity", _) => context_subject(&context),
+                ("getEntity" | "getPlayer" | "player" | "entity", _) => {
+                    context_subject(&facade, &context)
+                }
                 ("getSource" | "source", _) => context
                     .damage
                     .as_ref()
@@ -1860,14 +1881,14 @@ fn block_pos_long(x: i32, y: i32, z: i32) -> i64 {
 }
 
 /// The player or entity marker a firing is about.
-fn context_subject(context: &EventContext) -> Option<Value> {
+fn context_subject(facade: &EventFacade, context: &EventContext) -> Option<Value> {
     if let Some(uuid) = context.player {
-        return Some(player_marker(uuid));
+        return Some(player_marker(facade, uuid));
     }
     context
         .entity
         .as_ref()
-        .map(|entity| marker(format!("game/entity/{}", entity.id)))
+        .map(|entity| crate::game_object::entity_value(facade, entity.id))
 }
 
 /// The last `@indy:` argument of a registration call: its listener.
@@ -2258,18 +2279,19 @@ fn fabric_arguments(shape: Shape, firing: &EventFiring) -> Result<Vec<Value>, Na
             .unwrap_or_else(|| missing("level"))
     };
     let player = || {
-        context
-            .player
-            .map_or_else(|| missing("player"), player_marker)
+        context.player.map_or_else(
+            || missing("player"),
+            |uuid| player_marker(&firing.facade, uuid),
+        )
     };
-    let subject = || context_subject(context).unwrap_or_else(|| missing("entity"));
+    let subject = || context_subject(&firing.facade, context).unwrap_or_else(|| missing("entity"));
     // The entity a click or an attack is aimed at: `subject()` is the player when the firing
     // names one, which is the acting player, not the target.
     let target = || {
         context
             .entity
             .as_ref()
-            .map(|entity| marker(format!("game/entity/{}", entity.id)))
+            .map(|entity| crate::game_object::entity_value(&firing.facade, entity.id))
             .unwrap_or_else(|| missing("entity"))
     };
     let damage = || {
@@ -2585,6 +2607,8 @@ mod tests {
                 name: "Alex".into(),
                 level: Some("minecraft:overworld".into()),
                 entity_id: Some(7),
+                session: 0,
+                life: 0,
             }],
             server: Arc::new(ServerFacts {
                 world_dir: Some("/horizon/game/world".into()),

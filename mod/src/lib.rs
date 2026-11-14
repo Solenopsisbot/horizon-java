@@ -145,6 +145,11 @@ struct State {
     /// each level tick. A level whose clocks the host cannot read is left out rather than carried
     /// with a made-up time.
     levels: Vec<FacadeLevel>,
+    /// Each player's session (logins) and life (respawns and End returns, the clone moment) on
+    /// this server: vanilla builds a new `ServerPlayer` at each, so the runtime keys a player's
+    /// object by them (`FacadePlayer::session`/`life`, #156 P16b). A dimension change keeps the
+    /// object, and the counts.
+    lives: BTreeMap<u128, (u32, u32)>,
     /// `MinecraftServer.getTickCount()` as the last server tick reported it.
     tick_count: i32,
     /// Whether the open server is a dedicated one, from `server_about_to_start`.
@@ -828,6 +833,8 @@ impl Hooks for HorizonJava {
     /// A player joined (Fabric's `ServerPlayConnectionEvents.JOIN` and
     /// `ServerPlayerEvents.JOIN`, NeoForge's `PlayerLoggedInEvent`).
     fn player_logged_in(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent<'_>) {
+        // A login is a new `ServerPlayer`: its session.
+        self.next_life(event.player, true);
         // The hook names the joining player; the host knows every player's level and entity id.
         // A level it cannot name stays `None`, never a guessed overworld.
         self.refresh_players(host);
@@ -884,6 +891,8 @@ impl Hooks for HorizonJava {
     /// A player's data was copied to their new player (Fabric's `COPY_FROM`, NeoForge's
     /// `PlayerEvent.Clone`); `was_death` says a death caused it.
     fn player_clone(&self, host: &mut dyn ServerHost, event: &mut PlayerCloneEvent<'_>) {
+        // `PlayerList.respawn` built a new `ServerPlayer` with the old id: its life.
+        self.next_life(event.player, false);
         let original = event.original;
         // The old and the new `ServerPlayer` share one game profile, so one UUID and name.
         let lent = FacadeOriginal {
@@ -1409,6 +1418,7 @@ impl HorizonJava {
     /// name, level and entity id the host knows. A level the host cannot name is `None`, so the
     /// façade's `level()` refuses it (and counts the read) instead of answering a guess.
     fn refresh_players(&self, host: &dyn ServerHost) {
+        let lives = self.lock().lives.clone();
         let players: Vec<FacadePlayer> = host
             .players()
             .server_players()
@@ -1421,6 +1431,8 @@ impl HorizonJava {
                     .level(host)
                     .map(|level| level.dimension_id().to_owned()),
                 entity_id: Some(player.entity().id() as i32),
+                session: lives.get(&player.uuid()).map_or(0, |&(session, _)| session),
+                life: lives.get(&player.uuid()).map_or(0, |&(_, life)| life),
             })
             .collect();
         self.lock().players = players;
@@ -1451,6 +1463,19 @@ impl HorizonJava {
         match state.levels.iter_mut().find(|known| known.id == entry.id) {
             Some(known) => *known = entry,
             None => state.levels.push(entry),
+        }
+    }
+
+    /// Count a new `ServerPlayer` for `uuid`: a login starts a session (`session`), a respawn a
+    /// life in it. The façade's entries take the counts at once.
+    fn next_life(&self, uuid: u128, session: bool) {
+        let mut state = self.lock();
+        let entry = state.lives.entry(uuid).or_insert((0, 0));
+        *entry = if session { (entry.0 + 1, 0) } else { (entry.0, entry.1 + 1) };
+        let (session, life) = *entry;
+        for player in state.players.iter_mut().filter(|player| player.uuid == uuid) {
+            player.session = session;
+            player.life = life;
         }
     }
 
@@ -2477,6 +2502,8 @@ mod tests {
             name: "Alex".into(),
             level: Some("minecraft:the_nether".into()),
             entity_id: Some(3),
+            session: 0,
+            life: 0,
         });
         state.levels.push(FacadeLevel {
             id: "minecraft:the_nether".into(),

@@ -100,8 +100,6 @@ const HOLDER_OWNERS: [&str; 6] = [
     "net/neoforged/neoforge/attachment/AttachmentHolder",
     "net/neoforged/neoforge/attachment/IAttachmentHolder",
 ];
-/// A façade player's marker (`events::player_marker`).
-const PLAYER_PREFIX: &str = "game/player/";
 /// Types and builders one jar may make; past this the builder surface stays unmodelled.
 const MAX_TYPES: usize = 4096;
 const TYPE_ARG: &str = "Lnet/neoforged/neoforge/attachment/AttachmentType;";
@@ -514,10 +512,7 @@ fn holder_op(r: &MethodRef) -> Option<(HolderOp, bool)> {
 }
 
 fn player_uuid(receiver: Option<&Value>) -> Option<u128> {
-    let hex = receiver
-        .and_then(crate::game_object::text)?
-        .strip_prefix(PLAYER_PREFIX)?;
-    (hex.len() == 32).then(|| u128::from_str_radix(hex, 16).ok())?
+    crate::game_object::player_uuid(crate::game_object::text(receiver?)?)
 }
 
 fn npe(message: Option<String>) -> NativeError {
