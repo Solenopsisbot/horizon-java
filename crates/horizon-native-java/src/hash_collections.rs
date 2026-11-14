@@ -527,14 +527,6 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(answer) = self.map_view_copy(r, opcode, receiver, args)? {
             return Ok(answer);
         }
-        // A view copy of a map whose order is unknown: a member that shows
-        // the order is counted (its `size`/`contains`... are not).
-        if let Some(copy) = receiver.filter(|_| matches!(opcode, 0xb6 | 0xb9))
-            && !order_insensitive(&r.name)
-            && self.copy_order_unknown(copy)
-        {
-            return self.count_and_continue(r);
-        }
         let receiver_kind = receiver
             .filter(|_| matches!(opcode, 0xb6 | 0xb7 | 0xb9))
             .and_then(|value| {
@@ -552,7 +544,7 @@ impl<H: Host> Runtime<'_, H> {
         let mut tainted_argument = false;
         for arg in args.iter() {
             // A `Set.of`/`Map.of` of two or more iterates in a random order.
-            if self.random_order(arg) || self.copy_order_unknown(arg) {
+            if self.random_order(arg) {
                 tainted_argument = true;
                 continue;
             }
@@ -726,11 +718,9 @@ impl<H: Host> Runtime<'_, H> {
             let table = self.take_table(&marker, kind);
             let unknown = table.order_unknown();
             self.host.store_hash_table(&marker, table);
-            // A map whose order is unknown hands out a copy whose order is
-            // unknown: counted where the order shows (a member of the copy,
-            // or the copy passed where the order shows,
-            // [`Self::copy_order_unknown`]), not here.
-            let _ = unknown;
+            if unknown {
+                self.host.unknown_operand_call(r)?;
+            }
         }
         let copy = self.host.invoke_instance(r, receiver, args)?;
         if let Some(copy) = expect_ref(&copy) {
@@ -885,29 +875,6 @@ impl<H: Host> Runtime<'_, H> {
     /// that order: a host model that copies, prints or iterates it. Jar code
     /// (whose own calls on the collection are checked one by one) and the
     /// helpers that only pass the reference on or compare it cannot.
-    /// Whether `value` is a `keySet()`/`values()`/`entrySet()` copy of a
-    /// hash map whose iteration order is unknown (an identity-hashed key, a
-    /// tree bin): the copy's order is unknown too.
-    pub(crate) fn copy_order_unknown(&mut self, value: &Value) -> bool {
-        let Some(marker) = expect_ref(value) else {
-            return false;
-        };
-        if !self.host.is_view_copy(marker) {
-            return false;
-        }
-        let Some(source) = self.host.view_copy_source(marker) else {
-            return false;
-        };
-        let map = crate::jar_object::stored_value(&source);
-        let Some(kind) = self.hash_table_kind(&map) else {
-            return false;
-        };
-        let table = self.take_table(&source, kind);
-        let unknown = table.order_unknown();
-        self.host.store_hash_table(&source, table);
-        unknown
-    }
-
     pub(crate) fn shows_argument_order(&self, r: &MethodRef) -> bool {
         // An `IdentityHashMap` iterates by identity hash: the order its
         // entries came in never shows.
