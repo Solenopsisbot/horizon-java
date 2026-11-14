@@ -152,6 +152,24 @@ pub(crate) fn client_value(marker: String) -> Value {
     Value::Ref(Some(marker))
 }
 
+/// Whether every object of `class` the runtime hands out is a game handle
+/// (#156 P16d: the client's classes), so a `String` is never one: a cast of
+/// one throws Java's CCE.
+pub(crate) fn handle_only_class(class: &str) -> bool {
+    matches!(
+        class,
+        "net/minecraft/network/chat/Style"
+            | "net/minecraft/network/chat/TextColor"
+            | "net/minecraft/client/KeyMapping$Category"
+            | "net/minecraft/client/Minecraft"
+            | "net/minecraft/client/Options"
+            | "net/minecraft/client/gui/Gui"
+            | "net/minecraft/client/gui/Font"
+            | "net/minecraft/client/multiplayer/ClientLevel"
+            | "net/minecraft/client/player/LocalPlayer"
+    )
+}
+
 /// Whether two equal keys of a server or client object are one object: a
 /// server's player, entity and level keys name one object each (P16b), the
 /// client's `LocalPlayer` and `ClientLevel` are made again on each join and

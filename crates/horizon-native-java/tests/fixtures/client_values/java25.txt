@@ -52,3 +52,7 @@ forged_cat_set=2
 forged_hash=1097891719,7027292,-1434275735
 forged_concat=xclient/minecraft
 forged_map=1,null
+forged_style_instanceof=false,true
+forged_class=java.lang.String
+forged_cast=CCE
+idmap_sizes=1,1,2

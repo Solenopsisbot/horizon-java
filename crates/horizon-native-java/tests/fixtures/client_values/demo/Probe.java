@@ -67,6 +67,14 @@ public class Probe {
     p("forged_concat", "x" + fm);
     var map = new HashMap<Object, Integer>(); map.put(fm, 1); map.put(misc, 2);
     p("forged_map", map.get("client/minecraft") + "," + map.get(fc));
+    p("forged_style_instanceof", (fs instanceof Style) + "," + (fs instanceof String));
+    p("forged_class", fm.getClass().getName());
+    try { Object c = (KeyMapping.Category) fc; p("forged_cast", "ok"); } catch (ClassCastException x) { p("forged_cast", "CCE"); }
+    TextColor tg2 = TextColor.fromLegacyFormat(ChatFormatting.GOLD);
+    var ig = new IdentityHashMap<Object, Integer>(); ig.put(tg, 1); ig.put(tg2, 2);
+    var ib = new IdentityHashMap<Object, Integer>(); ib.put(bold, 1); ib.put(bold.withBold(true), 2);
+    var ie = new IdentityHashMap<Object, Integer>(); ie.put(e, 1); ie.put(bold.withBold(null), 2); ie.put(misc, 3); ie.put(KeyMapping.Category.MISC, 4);
+    p("idmap_sizes", ig.size() + "," + ib.size() + "," + ie.size());
     return out.toString();
   }
 
