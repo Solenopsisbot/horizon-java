@@ -2745,6 +2745,10 @@ pub struct StdHost {
     /// clock read.  Keeping the value seeded makes bootstrap replayable.
     current_time_millis: i32,
     mods: BTreeMap<String, String>,
+    /// Each mod of a linked NeoForge jar: its own version, its file's first
+    /// mod and that mod's version (`ModList`, `LoadingModList.getModFileById`,
+    /// `neoforge_loader.rs`).
+    neoforge_mod_files: BTreeMap<String, neoforge_loader::LinkedMod>,
     /// The loader this run is on and the running jar's own loader-namespace
     /// classes, for class precedence (`class_precedence.rs`).
     run_loader: class_precedence::RunLoader,
@@ -2965,6 +2969,7 @@ impl StdHost {
             service_providers: BTreeMap::new(),
             current_time_millis: 0,
             mods: BTreeMap::new(),
+            neoforge_mod_files: BTreeMap::new(),
             run_loader: class_precedence::RunLoader::default(),
             own_loader_classes: BTreeSet::new(),
             fabric_metadata: BTreeMap::new(),
@@ -3318,6 +3323,20 @@ impl StdHost {
     /// `ModList.isLoaded`, declared as a dependency or not.
     fn record_loaded_mod(&mut self, jar: &NativeJar) {
         self.record_fabric_metadata(jar);
+        if let Some(toml) = jar.resource_bytes.get("META-INF/neoforge.mods.toml") {
+            let entries = neoforge_loader::mod_file_entries(toml, jar.neoforge_version.as_deref());
+            if let Some((first, first_version)) = entries.first().cloned() {
+                for (id, version) in entries {
+                    self.neoforge_mod_files.entry(id).or_insert_with(|| {
+                        neoforge_loader::LinkedMod {
+                            version,
+                            file: first.clone(),
+                            file_version: first_version.clone(),
+                        }
+                    });
+                }
+            }
+        }
         if let Some(id) = jar.fabric_id.as_deref().or(jar.neoforge_id.as_deref()) {
             let version = jar
                 .fabric_version
@@ -8945,8 +8964,9 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Int(0)),
                 };
+                // `indexedMods.containsKey(id)`: what `getModContainerById` finds.
                 Ok(Value::Int(
-                    (self.mods.contains_key(id) || is_always_loaded_mod(id)) as i32,
+                    (self.neoforge_mod_version(id).is_some() || is_always_loaded_mod(id)) as i32,
                 ))
             }
             (
@@ -8973,12 +8993,7 @@ impl Host for StdHost {
                 "()Ljava/util/List;",
             ) => {
                 // `sortedList`: each mod's `IModInfo` (not its container).
-                let values = self
-                    .mods
-                    .keys()
-                    .map(|id| host_neoforge_loader::mod_info(id))
-                    .collect::<Vec<_>>();
-                Ok(collection_value("list", &values))
+                Ok(self.neoforge_mod_infos(r))
             }
             (
                 "net/fabricmc/loader/api/FabricLoader",
@@ -21643,6 +21658,12 @@ impl<H: Host> Runtime<'_, H> {
     fn invoke_game_enum_values(&mut self, r: &MethodRef) -> Option<Value> {
         if r.name != "values" {
             return None;
+        }
+        // A loader enum whose constants are host handles (`ModConfig.Type`).
+        if let Some(values) = crate::runtime::host_neoforge_loader::enum_values(&r.owner)
+            && r.descriptor == format!("()[L{};", r.owner)
+        {
+            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
         let constants = game_enum_constants(&r.owner)?;
         if r.descriptor != format!("()[L{};", r.owner) {

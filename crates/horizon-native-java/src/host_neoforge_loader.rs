@@ -332,6 +332,22 @@ pub(crate) const WORLD_VERSION_METHODS: Methods = Methods {
 mod tests {
     use super::*;
 
+    /// A `javafml` container is exactly an `FMLModContainer` among FML 12's
+    /// names, but a legacy Forge run's `ModContainer` is not FML 12's to rule
+    /// out: counted, never a proved `false` (a `checkcast` would throw).
+    #[test]
+    fn a_containers_class_is_exact_only_for_fml_12s_names() {
+        let Value::Host(handle) = container("demo", true) else {
+            unreachable!()
+        };
+        let hierarchy = crate::host_ref::JdkHierarchy;
+        let answer = |wanted| container_instance_of(&handle, wanted, &hierarchy);
+        assert_eq!(answer(FML_MOD_CONTAINER), Some(true));
+        assert_eq!(answer(MINECRAFT_MOD_CONTAINER), Some(false));
+        assert_eq!(answer(CONFIG_TYPE), Some(false));
+        assert_eq!(answer("net/minecraftforge/fml/ModContainer"), None);
+    }
+
     /// Ids and names (jar text) with every separator a layer uses read back
     /// as themselves, and two different ids never make one key: the old
     /// `neoforge-mod-container/<id>/<version>` text split at the first `/`

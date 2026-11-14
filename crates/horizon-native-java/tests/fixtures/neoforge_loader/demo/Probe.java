@@ -8,6 +8,23 @@ public final class Probe {
         return Loader.containers(ModList.get());
     }
 
+    public static String mods() {
+        return Loader.mods(ModList.get());
+    }
+
+    public static String files() {
+        return Loader.files(net.neoforged.fml.loading.FMLLoader.getCurrent().getLoadingModList());
+    }
+
+    /** A mod the host only assumes present (a declared dependency): its file is unknown. */
+    public static String dependencyFile() {
+        return "" + (net.neoforged.fml.loading.FMLLoader.getCurrent().getLoadingModList().getModFileById("dep") == null);
+    }
+
+    public static String switched() {
+        return Loader.switched();
+    }
+
     public static String configTypes() {
         return Loader.configTypes();
     }

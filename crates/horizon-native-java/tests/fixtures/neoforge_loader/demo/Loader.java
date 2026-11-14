@@ -12,6 +12,8 @@ import net.minecraft.WorldVersion;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.ModList;
 import net.neoforged.fml.config.ModConfig;
+import net.neoforged.fml.loading.LoadingModList;
+import net.neoforged.fml.loading.moddiscovery.ModFileInfo;
 import net.neoforged.neoforgespi.language.IModInfo;
 
 /**
@@ -43,9 +45,56 @@ public final class Loader {
             + "|" + (info == a2.getModInfo()) + info.equals(a2.getModInfo()) + info.equals(b.getModInfo())
             + info.getModId() + info.getVersion().toString() + b.getModInfo().getVersion().toString() + kind(info)
             + "|" + list.getModContainerById("missing").isPresent() + list.isLoaded("demo") + list.isLoaded("missing")
-            + list.getMods().contains(info)
+            + list.getModContainerById("second").isPresent() + list.isLoaded("second") + list.isLoaded("lib_core")
             + "|" + List.of(a, b).contains(a2) + List.of(a, b).indexOf(b) + ids.get(a2) + ids.get(b) + ids.get(a2.getModInfo())
             + new ArrayList<>(List.of(b, a)).indexOf(a2);
+    }
+
+    /**
+     * Every mod `ModList.getMods()` lists, ids sorted (FML's own order is `ModSorter`'s), and whether it holds the
+     * container's own info.
+     */
+    public static String mods(ModList list) {
+        List<String> ids = new ArrayList<>();
+        for (IModInfo m : list.getMods()) {
+            ids.add(m.getModId());
+        }
+        Collections.sort(ids);
+        return ids + "|" + list.getMods().contains(list.getModContainerById("demo").get().getModInfo());
+    }
+
+    /**
+     * `getModFileById` is the file of the mod: `demo`/`second` share one, `lib`/`lib_core` another; `versionString`
+     * is the file's first mod's version.
+     */
+    public static String files(LoadingModList lml) {
+        ModFileInfo f = lml.getModFileById("lib");
+        ModFileInfo g = lml.getModFileById("lib_core");
+        ModFileInfo d = lml.getModFileById("demo");
+        ModFileInfo d2 = lml.getModFileById("demo");
+        ModFileInfo s = lml.getModFileById("second");
+        IdentityHashMap<Object, String> ids = new IdentityHashMap<>();
+        ids.put(f, "f");
+        return "" + (f == g) + f.equals(g) + (d == d2) + d.equals(d2) + (d == s) + s.equals(d) + (d == f) + d.equals(f)
+            + ids.get(g) + ids.get(d) + List.of(d).contains(s) + List.of(d).contains(f)
+            + "|" + d.versionString() + "|" + g.versionString() + "|" + s.versionString()
+            + "|" + (lml.getModFileById("missing") == null);
+    }
+
+    /** An enum `switch`, `values()` and `valueOf` on `ModConfig.Type`. */
+    public static String switched() {
+        ModConfig.Type c = ModConfig.Type.CLIENT;
+        String picked = switch (c) {
+            case LOCAL -> "x";
+            case CLIENT -> "y";
+            default -> "z";
+        };
+        StringBuilder names = new StringBuilder();
+        for (ModConfig.Type t : ModConfig.Type.values()) {
+            names.append(t).append(t.ordinal());
+        }
+        return picked + ModConfig.Type.valueOf("STARTUP").ordinal() + (ModConfig.Type.valueOf("SYNCED") == ModConfig.Type.SYNCED)
+            + names + ModConfig.Type.values().length + (ModConfig.Type.values()[1] == ModConfig.Type.CLIENT);
     }
 
     public static String configTypes() {
