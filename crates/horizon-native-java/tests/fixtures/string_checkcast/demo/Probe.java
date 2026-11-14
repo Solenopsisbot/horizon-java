@@ -127,6 +127,13 @@ public final class Probe {
             s instanceof net.minecraft.world.item.Item);
     }
 
+    /** Text shaped like a class name: the host's stand-in for objects it does not model. */
+    public static String classNameText() {
+        StringBuilder name = new StringBuilder("net/minecraft/core/");
+        Object s = name.append("Registry").toString();
+        return cast(() -> { Iface c = (Iface) s; }, s instanceof Iface);
+    }
+
     public static void main(String[] args) {
         System.out.println("runnable=" + runnable());
         System.out.println("list=" + list());
@@ -148,5 +155,6 @@ public final class Probe {
         System.out.println("logging=" + logging());
         System.out.println("sql=" + sql());
         System.out.println("gameClass=" + gameClass());
+        System.out.println("classNameText=" + classNameText());
     }
 }

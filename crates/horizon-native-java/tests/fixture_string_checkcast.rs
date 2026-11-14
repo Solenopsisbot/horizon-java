@@ -20,7 +20,7 @@ const PROBE: &str = include_str!("fixtures/string_checkcast/demo/Probe.java");
 const ITEM_STUB: &str = "package net.minecraft.world.item; public class Item {}";
 
 /// Every probe answers as Java 25 did, the exception's message included,
-/// with nothing counted.
+/// with nothing counted, except a class-name-shaped text (counted).
 #[test]
 fn a_string_casts_only_to_its_own_types() {
     let fixture = javac_fixture::Fixture::build(
@@ -33,7 +33,19 @@ fn a_string_casts_only_to_its_own_types() {
     let mut failures = Vec::new();
     for line in ORACLE.lines() {
         let (method, java) = line.split_once('=').unwrap();
-        let (expected, counted) = (java, Vec::<(String, usize)>::new());
+        let (expected, counted) = match method {
+            // A text shaped like a class name is how the host answers an
+            // object it does not model (`RegisterEvent.getRegistry`), which a
+            // Mixin may give a jar interface: counted, the cast passing.
+            "classNameText" => (
+                "ok|false",
+                vec![(
+                    "demo/Probe$Iface#<checkcast>(Ljava/lang/Object;)Ldemo/Probe$Iface;".to_owned(),
+                    1,
+                )],
+            ),
+            _ => (java, Vec::new()),
+        };
         let mut host = fixture.jar.seed_host(horizon_native_java::StdHost::new());
         let answer = fixture.jar.invoke_method_with_args(
             "demo/Probe",

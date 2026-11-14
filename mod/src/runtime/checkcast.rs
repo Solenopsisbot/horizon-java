@@ -289,20 +289,24 @@ impl<H: Host> Runtime<'_, H> {
             // is that `String`.
             // The game's objects are handles or `game/`/`client/` markers,
             // never plain text, and so are Brigadier's (`host_brigadier.rs`):
-            // a cast of a `String` to one of their classes is as exact.
+            // a cast of a `String` to one of their classes is as exact, but
+            // for a text shaped like a class name, which the host answers for
+            // an object it does not model (`net/minecraft/core/Registry`).
             if let Value::Ref(Some(text)) = value
-                && (crate::runtime::jdk_closure::in_jdk_package(target)
-                    || target.starts_with("net/minecraft/")
-                    || target.starts_with("com/mojang/brigadier/"))
                 && crate::runtime::value_class::is_plain_string(text)
+                && (crate::runtime::jdk_closure::in_jdk_package(target)
+                    || ((target.starts_with("net/minecraft/")
+                        || target.starts_with("com/mojang/brigadier/"))
+                        && !crate::runtime::value_class::class_name_shaped(text)))
             {
                 if crate::runtime::value_class::string_instance_of(text, target) {
                     return Ok(());
                 }
                 return Err(class_cast_exception("java/lang/String", target));
             }
-            // A library class (no class file here): the host still answers
-            // some of their objects as plain-looking text (Fabric Loader's
+            // A library class (no class file here), or a game class and a
+            // class-name text: the host still answers some of their objects
+            // as plain-looking text (Fabric Loader's
             // `SemanticVersion`, a class name in jankson: ff926cd7), so a plain
             // `String` cast to one is counted, never a silent pass nor a throw
             // (#167).
@@ -668,8 +672,15 @@ impl<H: Host> Runtime<'_, H> {
         }
         // A plain `String` (#167): final, with exactly its JDK supertypes, so
         // no jar class or interface; a Mixin cannot add one to it. (A jar
-        // class's name, `ServiceLoader`'s provider, is read above.)
-        if matches!(value, Value::Ref(_)) && crate::runtime::value_class::is_plain_string(marker) {
+        // class's name, `ServiceLoader`'s provider, is read above.) A text
+        // shaped like a class name stays counted: the host answers some
+        // objects it does not model by their class's name
+        // (`RegisterEvent.getRegistry`, `registrar`), and a Mixin may give
+        // that class a jar interface.
+        if matches!(value, Value::Ref(_))
+            && crate::runtime::value_class::is_plain_string(marker)
+            && !crate::runtime::value_class::class_name_shaped(marker)
+        {
             let verdict = if crate::runtime::value_class::string_instance_of(marker, target) {
                 Verdict::Yes
             } else {

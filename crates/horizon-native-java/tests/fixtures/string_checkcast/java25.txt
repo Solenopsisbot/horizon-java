@@ -18,3 +18,4 @@ desktop=CCE class java.lang.String cannot be cast to class java.awt.event.Action
 logging=CCE class java.lang.String cannot be cast to class java.util.logging.Filter (java.lang.String is in module java.base of loader 'bootstrap'; java.util.logging.Filter is in module java.logging of loader 'bootstrap')|false
 sql=CCE class java.lang.String cannot be cast to class java.sql.Wrapper (java.lang.String is in module java.base of loader 'bootstrap'; java.sql.Wrapper is in module java.sql of loader 'platform')|false
 gameClass=CCE class java.lang.String cannot be cast to class net.minecraft.world.item.Item (java.lang.String is in module java.base of loader 'bootstrap'; net.minecraft.world.item.Item is in unnamed module of loader 'app')|false
+classNameText=CCE class java.lang.String cannot be cast to class demo.Probe$Iface (java.lang.String is in module java.base of loader 'bootstrap'; demo.Probe$Iface is in unnamed module of loader 'app')|false
