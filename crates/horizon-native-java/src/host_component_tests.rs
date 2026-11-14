@@ -127,12 +127,16 @@ fn components_answer_as_java_25_or_count() {
             Exact("literal{hi}|translation{key='demo.key', args=[]}|hi|demo.key|literal{hi}"),
         ),
         ("copy", Exact("falsetruetrue2literal{hi}")),
-        // Departure D1: `append`/`withStyle` answer a new component; their results' text and
-        // equality are Java's, the calls counted.
-        ("appended", CountedAs("hi!?,false")),
-        ("styled", CountedAs("hi,false")),
-        // ...and the receiver is not changed in place: Java `truehi!1`, counted.
-        ("appendInPlace", Counted),
+        // `append`/`withStyle`/`withColor` change the receiver in place and return it; a sibling
+        // changed after it was appended shows in its parent, and `copy` shares its siblings.
+        ("appended", Exact("truehi!?1")),
+        ("styled", Exact("truetruetruehi")),
+        ("appendInPlace", Exact("truehi!s?~x1|hi!s?~false|k")),
+        // Equality reads the state now: a changed component no longer equals what it was made
+        // as, and a copy equals its source.
+        ("changedEquals", Exact("truefalsetruefalse")),
+        // Styled components compare their `Style`s (Java `falsetrue`): counted.
+        ("styledEquals", Counted),
         // An interface a Mixin could add to a game class is counted; Java's case is `M`.
         ("typeSwitch", CountedAs("M")),
         // A hash set's answers follow from `equals` alone (equal objects hash alike).
@@ -195,8 +199,8 @@ fn a_component_key_is_its_sorted_json() {
     };
     assert_ne!(a.key(), b.key(), "two allocations");
     assert_eq!(
-        crate::host_component::json_of(&Value::Host(a.clone())),
-        crate::host_component::json_of(&Value::Host(b.clone()))
+        crate::facade_text::json_now(&Value::Host(a.clone()), None),
+        crate::facade_text::json_now(&Value::Host(b.clone()), None)
     );
     let (Some((_, a)), Some((_, b))) = (a.key().split_once(':'), b.key().split_once(':')) else {
         panic!("no serial")
@@ -204,7 +208,49 @@ fn a_component_key_is_its_sorted_json() {
     assert_eq!(a, b, "one content, one JSON text");
     let tricky = crate::host_component::literal("\"},{\"text\":\"x");
     assert_eq!(
-        crate::host_component::bare_literal(&tricky).as_deref(),
+        crate::facade_text::json_now(&tricky, None)
+            .as_ref()
+            .and_then(crate::host_component::bare_literal)
+            .as_deref(),
         Some("\"},{\"text\":\"x")
+    );
+}
+
+/// A changed component lives in its host's table while something reaches it: a static field, or
+/// a changed parent's siblings. The resident heap's collection drops one nothing reaches.
+#[test]
+fn changed_components_are_collected_with_the_heap() {
+    use crate::host_component::{change, literal, marker};
+    let argument = crate::facade_text::argument;
+    let mut host = StdHost::new();
+    let (kept, sibling, dropped) = (literal("kept"), literal("s"), literal("dropped"));
+    change(&mut host.component_states, &sibling, &argument, |state| {
+        state.siblings.push(literal("t"))
+    })
+    .unwrap();
+    let held = sibling.clone();
+    change(&mut host.component_states, &kept, &argument, |state| {
+        state.siblings.push(held)
+    })
+    .unwrap();
+    change(&mut host.component_states, &dropped, &argument, |state| {
+        state.siblings.push(literal("u"))
+    })
+    .unwrap();
+    host.persistent_static_fields
+        .insert("demo/Main.TITLE".into(), kept.clone());
+    let mut heap = crate::heap::JavaHeap::default();
+    crate::heap::collect(&mut heap, &mut host, &[]);
+    let row = |value: &Value| match value {
+        Value::Host(handle) => host.component_states.contains_key(marker(handle)),
+        _ => false,
+    };
+    assert!(row(&kept) && row(&sibling), "reached rows stay");
+    assert!(!row(&dropped), "an unreached row goes");
+    assert_eq!(
+        crate::facade_text::json_now(&kept, Some(&host.component_states)),
+        Some(
+            serde_json::json!({"text": "kept", "extra": [{"text": "s", "extra": [{"text": "t"}]}]})
+        )
     );
 }

@@ -37,6 +37,7 @@
 
 use serde_json::{Map, Value as Json, json};
 
+use crate::host_component::{ComponentState, MAX_JSON_BYTES, States};
 use crate::{Boxed, Host, MethodRef, NativeError, Runtime, Value, expect_ref, format_java_float};
 
 const COMPONENT: &str = "net/minecraft/network/chat/Component";
@@ -44,14 +45,11 @@ const MUTABLE: &str = "net/minecraft/network/chat/MutableComponent";
 const FORMATTING_PREFIX: &str = "enum/net/minecraft/ChatFormatting/";
 const RETURNS_MUTABLE: &str = ")Lnet/minecraft/network/chat/MutableComponent;";
 
-/// A component's JSON nests at most this deep and carries at most this many
-/// bytes: a callback appending in a loop cannot grow a marker without end.
-const MAX_JSON_BYTES: usize = 64 * 1024;
-
-/// The vanilla JSON a component value stands for, or `None` when `value` is
-/// not a component.
-pub(crate) fn to_json(value: &Value) -> Option<Json> {
-    crate::host_component::json_of(value)
+/// The vanilla JSON a component holds now, its changed siblings and
+/// arguments resolved through `states` (`host_component.rs`), or `None` when
+/// `value` is not a component.
+pub(crate) fn json_now(value: &Value, states: Option<&States>) -> Option<Json> {
+    crate::host_component::json_in(value, states, &argument)
 }
 
 /// A new component of `json`.
@@ -83,13 +81,10 @@ pub(crate) fn plain(json: &Json) -> String {
     out
 }
 
-/// One translation argument as vanilla's `TranslatableContents` keeps it:
-/// a component as itself, a primitive as a JSON primitive, anything else
-/// as its text.
-fn argument(value: &Value) -> Json {
-    if let Some(component) = to_json(value) {
-        return component;
-    }
+/// One translation argument that is not a component, as vanilla's
+/// `TranslatableContents` serialises it: a primitive as a JSON primitive,
+/// anything else as its text (a component resolves through its host).
+pub(crate) fn argument(value: &Value) -> Json {
     match value {
         Value::Int(v) => json!(v),
         Value::Long(v) => json!(v),
@@ -168,26 +163,35 @@ fn formatting(value: &Value) -> Option<&str> {
 }
 
 fn bounded(json: Json) -> Result<Value, NativeError> {
-    let value = from_json(&json);
-    if matches!(&value, Value::Host(handle) if handle.key().len() > MAX_JSON_BYTES) {
+    if json.to_string().len() > MAX_JSON_BYTES {
         return Err(NativeError::Metadata(format!(
             "a chat component grew past {MAX_JSON_BYTES} bytes"
         )));
     }
-    Ok(value)
-}
-
-/// A component as an object whose style keys can be set: a bare string
-/// (a sibling `append(String)` added) becomes `{"text": ...}`.
-fn object_of(json: Json) -> Map<String, Json> {
-    match json {
-        Json::Object(object) => object,
-        Json::String(text) => Map::from_iter([("text".to_owned(), Json::String(text))]),
-        other => Map::from_iter([("text".to_owned(), Json::String(other.to_string()))]),
-    }
+    Ok(from_json(&json))
 }
 
 impl<H: Host> Runtime<'_, H> {
+    /// The JSON `value` holds now, if it is a component.
+    fn component_now(&self, value: &Value) -> Option<Json> {
+        json_now(value, self.host.component_states())
+    }
+
+    /// Change the component `receiver` in place and answer it (`return
+    /// this`); a host that keeps no component table counts the call.
+    fn change_component(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        change: impl FnOnce(&mut ComponentState),
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(states) = self.host.component_states_mut() else {
+            return self.host.unknown_operand_call(r).map(Some);
+        };
+        crate::host_component::change(states, receiver, &argument, change)?;
+        Ok(Some(receiver.clone()))
+    }
+
     /// The component calls this module answers; `None` for every other call
     /// (the host's text-only surface answers those).
     pub(crate) fn invoke_text(
@@ -223,7 +227,11 @@ impl<H: Host> Runtime<'_, H> {
             let Some(key) = expect_ref(key) else {
                 return Ok(None);
             };
-            let with: Vec<Json> = self.array(array)?.iter().map(argument).collect();
+            let values = self.array(array)?.clone();
+            let with: Vec<Json> = values
+                .iter()
+                .map(|value| self.component_now(value).unwrap_or_else(|| argument(value)))
+                .collect();
             let mut object = Map::from_iter([("translate".to_owned(), json!(key))]);
             if let Some(fallback) = fallback.and_then(expect_ref) {
                 object.insert("fallback".into(), json!(fallback));
@@ -231,33 +239,52 @@ impl<H: Host> Runtime<'_, H> {
             if !with.is_empty() {
                 object.insert("with".into(), Json::Array(with));
             }
-            return bounded(Json::Object(object)).map(Some);
-        };
-        let Some(own) = to_json(receiver) else {
-            return Ok(None);
-        };
-        let value = match (name, descriptor) {
-            ("getString", "()Ljava/lang/String;") => Value::Ref(Some(plain(&own))),
-            // A new object with the same contents (`MutableComponent.copy`).
-            ("copy", "()Lnet/minecraft/network/chat/MutableComponent;") => from_json(&own),
-            // The contents alone: no style, no siblings.
-            ("plainCopy", "()Lnet/minecraft/network/chat/MutableComponent;") => {
-                let mut object = object_of(own);
-                object.retain(|key, _| {
-                    matches!(key.as_str(), "text" | "translate" | "with" | "fallback")
-                });
-                bounded(Json::Object(object))?
+            let made = bounded(Json::Object(object.clone()))?;
+            // `TranslatableContents` keeps its arguments: a component one
+            // changed later shows in this one.
+            if values.iter().any(crate::host_component::is_component)
+                && let (Some(states), Value::Host(handle)) =
+                    (self.host.component_states_mut(), &made)
+            {
+                states.insert(
+                    crate::host_component::marker(handle).to_owned(),
+                    ComponentState {
+                        base: object,
+                        siblings: Vec::new(),
+                        args: Some(values),
+                    },
+                );
             }
+            return Ok(Some(made));
+        };
+        if !crate::host_component::is_component(receiver) {
+            return Ok(None);
+        }
+        match (name, descriptor) {
+            ("getString", "()Ljava/lang/String;") => match self.component_now(receiver) {
+                Some(json) => Ok(Some(Value::Ref(Some(plain(&json))))),
+                // Nested past what resolves (Java: a cycle overflows).
+                None => self.host.unknown_operand_call(r).map(Some),
+            },
+            // A new object: the same contents, style, siblings and arguments.
+            ("copy", "()Lnet/minecraft/network/chat/MutableComponent;") => Ok(
+                crate::host_component::copy(self.host.component_states_mut(), receiver, false),
+            ),
+            // The contents alone: no style, no siblings.
+            ("plainCopy", "()Lnet/minecraft/network/chat/MutableComponent;") => Ok(
+                crate::host_component::copy(self.host.component_states_mut(), receiver, true),
+            ),
             (
                 "withStyle",
                 "(Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/MutableComponent;",
             ) => {
-                let Some(format) = args.first().and_then(formatting) else {
+                let Some(format) = args.first().and_then(formatting).map(str::to_owned) else {
                     return Ok(None);
                 };
-                let mut object = object_of(own);
-                apply_format(&mut object, format).map_err(NativeError::Metadata)?;
-                bounded(Json::Object(object))?
+                apply_format(&mut Map::new(), &format).map_err(NativeError::Metadata)?;
+                self.change_component(r, receiver, |state| {
+                    let _ = apply_format(&mut state.base, &format);
+                })
             }
             (
                 "withStyle",
@@ -266,23 +293,28 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(array) = args.first() else {
                     return Ok(None);
                 };
-                let formats = self.array(array)?.clone();
-                let mut object = object_of(own);
-                for format in &formats {
-                    let Some(format) = formatting(format) else {
+                let mut formats = Vec::new();
+                for format in self.array(array)?.clone() {
+                    let Some(format) = formatting(&format) else {
                         return Ok(None);
                     };
-                    apply_format(&mut object, format).map_err(NativeError::Metadata)?;
+                    apply_format(&mut Map::new(), format).map_err(NativeError::Metadata)?;
+                    formats.push(format.to_owned());
                 }
-                bounded(Json::Object(object))?
+                self.change_component(r, receiver, |state| {
+                    for format in &formats {
+                        let _ = apply_format(&mut state.base, format);
+                    }
+                })
             }
             ("withColor", "(I)Lnet/minecraft/network/chat/MutableComponent;") => {
                 let Some(Value::Int(rgb)) = args.first() else {
                     return Ok(None);
                 };
-                let mut object = object_of(own);
-                object.insert("color".into(), json!(format!("#{:06X}", rgb & 0xFF_FFFF)));
-                bounded(Json::Object(object))?
+                let colour = json!(format!("#{:06X}", rgb & 0xFF_FFFF));
+                self.change_component(r, receiver, |state| {
+                    state.base.insert("color".into(), colour);
+                })
             }
             (
                 "append",
@@ -292,34 +324,18 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(sibling) = args.first() else {
                     return Ok(None);
                 };
+                // `append(String)` is `append(Component.literal(text))`.
                 let sibling = if descriptor.contains("Ljava/lang/String;") {
-                    json!({ "text": expect_ref(sibling).cloned().unwrap_or_default() })
+                    crate::host_component::literal(expect_ref(sibling).map_or("", String::as_str))
+                } else if crate::host_component::is_component(sibling) {
+                    sibling.clone()
                 } else {
-                    match to_json(sibling) {
-                        Some(sibling) => sibling,
-                        None => return Ok(None),
-                    }
+                    return Ok(None);
                 };
-                let mut object = object_of(own);
-                match object.get_mut("extra") {
-                    Some(Json::Array(extra)) => extra.push(sibling),
-                    _ => {
-                        object.insert("extra".into(), Json::Array(vec![sibling]));
-                    }
-                }
-                bounded(Json::Object(object))?
+                self.change_component(r, receiver, |state| state.siblings.push(sibling))
             }
-            _ => return Ok(None),
-        };
-        if matches!(name, "withStyle" | "withColor" | "append") {
-            // Departure D1 (`host_component.rs`): Java changes the receiver
-            // and returns it; the model answers a new component and leaves the
-            // receiver's handle as it was. A later read of the receiver, or
-            // `==` between it and the answer, would differ from Java, so the
-            // call is counted while its answer stands (`Host::count_departure`).
-            self.host.count_departure(r);
+            _ => Ok(None),
         }
-        Ok(Some(value))
     }
 }
 
@@ -329,12 +345,12 @@ mod tests {
 
     #[test]
     fn a_component_is_its_json_and_no_string_is_one() {
-        let literal = from_json(&json!({"text": "hi"}));
+        let literal = json_now(&from_json(&json!({"text": "hi"})), None).unwrap();
         assert_eq!(
             crate::host_component::bare_literal(&literal).as_deref(),
             Some("hi")
         );
-        let key = from_json(&json!({"translate": "demo.key"}));
+        let key = json_now(&from_json(&json!({"translate": "demo.key"})), None).unwrap();
         assert_eq!(
             crate::host_component::bare_key(&key).as_deref(),
             Some("demo.key")
@@ -345,11 +361,15 @@ mod tests {
             "component/translatable/demo.key",
             "component/json/{\"text\":\"hi\"}",
         ] {
-            assert_eq!(to_json(&Value::Ref(Some(text.into()))), None, "{text}");
+            assert_eq!(
+                json_now(&Value::Ref(Some(text.into())), None),
+                None,
+                "{text}"
+            );
         }
         let styled = from_json(&json!({"text": "hi", "color": "red"}));
         assert_eq!(
-            to_json(&styled),
+            json_now(&styled, None),
             Some(json!({"text": "hi", "color": "red"}))
         );
     }
@@ -379,10 +399,6 @@ mod tests {
             json!("integer:3")
         );
         assert_eq!(argument(&Value::Ref(Some("Alex".into()))), json!("Alex"));
-        assert_eq!(
-            argument(&crate::host_component::literal("Alex")),
-            json!({"text": "Alex"})
-        );
         // A String spelled like the old component marker is a String argument.
         assert_eq!(
             argument(&Value::Ref(Some("component/literal/Alex".into()))),

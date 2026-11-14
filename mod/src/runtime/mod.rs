@@ -2256,15 +2256,15 @@ pub trait Host {
         Ok(Value::default_for(return_desc(&r.descriptor)))
     }
 
-    /// Count `r` with the unknown host calls while the model's answer
-    /// stands, even on a strict host: a known departure from Java whose
-    /// answer is right for its usual use (a chat component's `append` or
-    /// `withStyle` answers a new component where Java changes the receiver,
-    /// `host_component.rs` D1). A run that made one is never exact, and a
-    /// running command that styles its text still runs. A host that keeps
-    /// no count ignores it.
-    fn count_departure(&mut self, r: &MethodRef) {
-        let _ = r;
+    /// The chat components this host changed in place (`host_component.rs`
+    /// `States`), `None` for a host that keeps none: its components are as
+    /// they were made, and a change to one is counted.
+    fn component_states(&self) -> Option<&host_component::States> {
+        None
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        None
     }
 
     /// Invoke an instance method with its receiver preserved. Existing hosts
@@ -2847,6 +2847,8 @@ pub struct StdHost {
     /// Whether NeoForge's `RegisterEvent`s have bound the holders yet.
     holder_binding: host_registry::Binding,
     mutable_collections: BTreeMap<String, Vec<Value>>,
+    /// Chat components changed in place, by marker (`host_component.rs`).
+    pub(crate) component_states: host_component::States,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
     /// for one that owns its elements, `Some(source)` for a view.
     unmodifiable_collections: BTreeMap<String, Option<String>>,
@@ -3023,6 +3025,7 @@ impl StdHost {
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
             mutable_collections: BTreeMap::new(),
+            component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
             jdk_list_of: std::collections::BTreeSet::new(),
@@ -3099,18 +3102,13 @@ impl StdHost {
         std::mem::take(&mut self.console_out)
     }
 
-    /// Add one to `r`'s row of the unknown host calls.
-    fn count_unknown_host_call(&mut self, r: &MethodRef) {
-        let key = format!("{}#{}{}", r.owner, r.name, r.descriptor);
-        *self.unknown_host_calls.entry(key).or_default() += 1;
-    }
-
     pub(crate) fn unknown_host_call(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         // Every call is counted. The table is bounded by the distinct method
         // references in the jars' constant pools, so it needs no cap; a cap
         // (it was 64 keys) silently dropped every later new method from
         // `unknown_host_call_count()` and the per-phase deltas taken from it.
-        self.count_unknown_host_call(r);
+        let key = format!("{}#{}{}", r.owner, r.name, r.descriptor);
+        *self.unknown_host_calls.entry(key).or_default() += 1;
         if self.strict_unknown_host_calls {
             Err(NativeError::UnknownHostCall(r.clone()))
         } else if let Some(value) = game_builder_value(r) {
@@ -4365,8 +4363,12 @@ impl Host for StdHost {
         self.unknown_host_call(r)
     }
 
-    fn count_departure(&mut self, r: &MethodRef) {
-        self.count_unknown_host_call(r);
+    fn component_states(&self) -> Option<&host_component::States> {
+        Some(&self.component_states)
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut host_component::States> {
+        Some(&mut self.component_states)
     }
 
     fn counted_unknown_calls(&self) -> usize {
@@ -8587,29 +8589,52 @@ impl Host for StdHost {
                 "()Ljava/lang/String;",
             )
             | ("net/minecraft/network/chat/Component", "getString", "()Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(component_text(receiver))))
+                if !host_component::is_component(receiver) {
+                    return Ok(Value::Ref(Some(
+                        expect_ref(receiver).cloned().unwrap_or_default(),
+                    )));
+                }
+                match facade_text::json_now(receiver, Some(&self.component_states)) {
+                    Some(json) => Ok(Value::Ref(Some(facade_text::plain(&json)))),
+                    // Nested past what resolves (Java: a cycle overflows).
+                    None => self.unknown_host_call(r),
+                }
             }
+            // `siblings.add(c); return this` (`append(String)` adds
+            // `Component.literal(text)`), as `facade_text.rs` answers it in
+            // the interpreter; a receiver or sibling the model did not make
+            // (a jar's own `Component`) is counted.
             ("net/minecraft/network/chat/MutableComponent", "append", descriptor)
             | ("net/minecraft/network/chat/Component", "append", descriptor)
                 if descriptor.ends_with(")Lnet/minecraft/network/chat/MutableComponent;") =>
             {
-                let current = component_text(receiver);
-                let suffix = Self::argument(r, args, 0)?;
-                let suffix = if descriptor.contains("Ljava/lang/String;") {
-                    expect_string(suffix).to_owned()
+                let sibling = Self::argument(r, args, 0)?;
+                let sibling = if descriptor.contains("Ljava/lang/String;") {
+                    host_component::literal(expect_string(sibling))
                 } else {
-                    component_text(suffix)
+                    sibling.clone()
                 };
-                // Flattened to its text, and a new component rather than the
-                // receiver changed (D1, `host_component.rs`): counted.
-                self.count_departure(r);
-                Ok(component_value("literal", &format!("{current}{suffix}")))
+                if !host_component::is_component(receiver)
+                    || !host_component::is_component(&sibling)
+                {
+                    return self.unknown_host_call(r);
+                }
+                host_component::change(
+                    &mut self.component_states,
+                    receiver,
+                    &facade_text::argument,
+                    |state| state.siblings.push(sibling),
+                )?;
+                Ok(receiver.clone())
             }
             ("net/minecraft/network/chat/MutableComponent", "copy", descriptor)
             | ("net/minecraft/network/chat/Component", "copy", descriptor)
                 if descriptor == "()Lnet/minecraft/network/chat/MutableComponent;" =>
             {
-                Ok(component_value("literal", &component_text(receiver)))
+                match host_component::copy(Some(&mut self.component_states), receiver, false) {
+                    Some(copy) => Ok(copy),
+                    None => self.unknown_host_call(r),
+                }
             }
             ("java/util/UUID", "toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
                 uuid_text(receiver)
@@ -9793,14 +9818,6 @@ fn component_value(kind: &str, text: &str) -> Value {
     }
 }
 
-/// A component's text (`getString()`), or a string argument's own text.
-fn component_text(value: &Value) -> String {
-    match facade_text::to_json(value) {
-        Some(json) => facade_text::plain(&json),
-        None => expect_ref(value).cloned().unwrap_or_default(),
-    }
-}
-
 fn identifier_parse(value: &str) -> Value {
     let (namespace, path) = value.split_once(':').unwrap_or(("minecraft", value));
     if namespace.is_empty() || path.is_empty() {
@@ -10660,6 +10677,10 @@ impl host_ref::Nested for HostNested<'_> {
             (Value::Ref(Some(_)), None) => None,
             (other, _) => Some(value_text(other)),
         })
+    }
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let host = self.0.as_deref()?;
+        facade_text::json_now(value, Some(&host.component_states))
     }
 }
 
@@ -33469,12 +33490,13 @@ mandatory = true
                 &[Value::Ref(Some(" world".into()))],
             )
             .unwrap();
+        // `return this`, the receiver changed in place.
+        assert_eq!(appended, literal);
         assert_eq!(
-            host_component::bare_literal(&appended).as_deref(),
-            Some("Hello world")
+            facade_text::json_now(&literal, Some(&host.component_states)),
+            Some(serde_json::json!({"text": "Hello", "extra": [{"text": " world"}]}))
         );
-        // Flattened and not the receiver changed in place (D1): counted.
-        assert_eq!(host.unknown_host_call_count(), 1);
+        assert_eq!(host.unknown_host_call_count(), 0);
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {

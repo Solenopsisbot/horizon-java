@@ -10,6 +10,10 @@ public interface Component extends com.mojang.brigadier.Message, FormattedText {
         return null;
     }
 
+    static MutableComponent translatable(String key, Object... args) {
+        return null;
+    }
+
     MutableComponent copy();
 
     String getString();

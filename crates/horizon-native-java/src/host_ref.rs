@@ -411,6 +411,13 @@ pub(crate) trait Nested {
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError>;
     /// `String.valueOf(value)`.
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError>;
+    /// The vanilla JSON a chat component holds now (its host's state,
+    /// `host_component.rs`); `None` where this context cannot read the
+    /// host's table (the caller counts).
+    fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
 }
 
 /// `toString()` of a handle.

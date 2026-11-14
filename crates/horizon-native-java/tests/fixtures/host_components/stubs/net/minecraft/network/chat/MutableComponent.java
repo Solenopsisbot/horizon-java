@@ -16,6 +16,14 @@ public final class MutableComponent implements Component {
         return this;
     }
 
+    public MutableComponent withStyle(net.minecraft.ChatFormatting... formats) {
+        return this;
+    }
+
+    public MutableComponent withColor(int rgb) {
+        return this;
+    }
+
     public MutableComponent copy() {
         return this;
     }

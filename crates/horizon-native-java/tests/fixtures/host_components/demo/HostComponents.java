@@ -91,22 +91,48 @@ public final class HostComponents {
     return "" + (c == a) + c.equals(a) + a.equals(c) + identities(a, c) + c;
   }
 
-  /** What `append`/`withStyle` answer: their result's text and equality, counted (departure D1). */
+  /** `append` adds a sibling to the receiver and returns it: one object, its text the whole. */
   public static String appended() {
-    MutableComponent a = Component.literal("hi").append("!").append(Component.literal("?"));
-    return a.getString() + "," + a.equals(Component.literal("hi!?"));
+    MutableComponent a = Component.literal("hi");
+    MutableComponent b = a.append("!").append(Component.literal("?"));
+    return "" + (a == b) + a.getString() + identities(a, b);
   }
 
+  /** `withStyle`/`withColor` change the receiver's style and return it. */
   public static String styled() {
-    MutableComponent a = Component.literal("hi").withStyle(ChatFormatting.RED);
-    return a.getString() + "," + a.equals(Component.literal("hi"));
+    MutableComponent a = Component.literal("hi");
+    return "" + (a.withStyle(ChatFormatting.RED) == a) + (a.withStyle(ChatFormatting.BOLD, ChatFormatting.ITALIC) == a)
+        + (a.withColor(0x123456) == a) + a.getString();
   }
 
-  /** `append` changes the receiver and returns it (departure D1: counted). */
+  /** A sibling changed after it was appended shows in its parent; `copy` shares its siblings. */
   public static String appendInPlace() {
     MutableComponent a = Component.literal("hi");
     MutableComponent b = a.append("!");
-    return "" + (a == b) + a.getString() + identities(a, b);
+    MutableComponent s = Component.literal("s");
+    a.append(s);
+    s.append("?");
+    MutableComponent c = a.copy();
+    a.append("x");
+    s.append("~");
+    return "" + (a == b) + a.getString() + identities(a, b) + "|" + c.getString() + (c == a) + "|"
+        + Component.translatable("k", s).getString();
+  }
+
+  /** A changed component no longer equals what it was made as; a copy equals its source. */
+  public static String changedEquals() {
+    MutableComponent a = Component.literal("hi");
+    MutableComponent before = Component.literal("hi");
+    boolean was = a.equals(before);
+    a.append("!");
+    MutableComponent c = a.copy();
+    return "" + was + a.equals(before) + c.equals(a) + List.of(before).contains(a);
+  }
+
+  /** Two styled components: equal contents and style. */
+  public static String styledEquals() {
+    MutableComponent a = Component.literal("hi").withStyle(ChatFormatting.RED);
+    return "" + a.equals(Component.literal("hi")) + a.equals(Component.literal("hi").withStyle(ChatFormatting.RED));
   }
 
   /** A type switch over the class and its interfaces: a Mixin could add an interface. */

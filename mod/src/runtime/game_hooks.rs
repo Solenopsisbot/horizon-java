@@ -779,7 +779,16 @@ impl<H: Host> GameHookHost<'_, H> {
             }
             ("sendSystemMessage", "(Lnet/minecraft/network/chat/Component;)V") if player => {
                 let uuid = object.uuid.ok_or_else(|| unmodelled(marker, r))?;
-                let text = args.first().map(component_text).unwrap_or_default();
+                // The component as it is when sent (`host_component.rs`).
+                let text = args
+                    .first()
+                    .map(|value| {
+                        match crate::runtime::facade_text::json_now(value, self.inner.component_states()) {
+                            Some(json) => crate::runtime::facade_text::plain(&json),
+                            None => expect_ref(value).cloned().unwrap_or_default(),
+                        }
+                    })
+                    .unwrap_or_default();
                 self.context
                     .effects
                     .push(GameHookEffect::SystemMessage { player: uuid, text });
@@ -993,8 +1002,12 @@ fn is_fabric_event_invoker(value: &Value) -> bool {
 }
 
 impl<H: Host> Host for GameHookHost<'_, H> {
-    fn count_departure(&mut self, r: &MethodRef) {
-        self.inner.count_departure(r);
+    fn component_states(&self) -> Option<&crate::runtime::host_component::States> {
+        self.inner.component_states()
+    }
+
+    fn component_states_mut(&mut self) -> Option<&mut crate::runtime::host_component::States> {
+        self.inner.component_states_mut()
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {

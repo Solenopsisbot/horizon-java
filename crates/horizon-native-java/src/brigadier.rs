@@ -396,19 +396,22 @@ impl CommandText {
         }
     }
 
-    /// The text of a component (`host_component.rs`), or a string's own text.
-    fn of(value: &Value) -> Self {
-        if let Some(key) = crate::host_component::bare_key(value) {
+    /// The text of a component as it is now (`host_component.rs`: its
+    /// state in `states`, read when the message is sent), or a string's own
+    /// text.
+    fn of(value: &Value, states: &crate::host_component::States) -> Self {
+        let json = crate::facade_text::json_now(value, Some(states));
+        if let Some(key) = json.as_ref().and_then(crate::host_component::bare_key) {
             return Self::key(&key);
         }
-        if let Some(text) = crate::host_component::bare_literal(value) {
+        if let Some(text) = json.as_ref().and_then(crate::host_component::bare_literal) {
             return Self {
                 text,
                 translate: false,
                 component: None,
             };
         }
-        if let Some(json) = crate::facade_text::to_json(value) {
+        if let Some(json) = json {
             return Self {
                 text: crate::facade_text::plain(&json),
                 translate: false,
@@ -1432,20 +1435,19 @@ impl StdHost {
                 _ => None,
             };
         }
-        // Styling a command's message with a style object: the text stays, the
-        // style is dropped (`withStyle(ChatFormatting)`/`withColor(int)` are
-        // `facade_text.rs`'s).
+        // Styling a command's message with a style object (`withStyle(ChatFormatting)`/
+        // `withColor(int)` are `facade_text.rs`'s).
         if matches!(
             r.owner.as_str(),
             "net/minecraft/network/chat/MutableComponent" | "net/minecraft/network/chat/Component"
         ) && crate::host_component::is_component(receiver)
             && matches!(name, "withStyle" | "withColor" | "setStyle")
         {
-            // The command surface keeps text, not style: the style is dropped
-            // and the receiver answered (its `getString` is Java's). Its
-            // `equals`/`toString` would not be, so the call is counted.
-            crate::Host::count_departure(self, r);
-            return Some(Ok(receiver.clone()));
+            // A `Style` or a `UnaryOperator<Style>` is not modelled on the
+            // command surface: answering the receiver unstyled would send
+            // the wrong text, so the call is counted (a running command
+            // refuses it).
+            return Some(self.unknown_host_call(r));
         }
         if let Value::Host(_) = receiver {
             // What a model does not answer is an unmodelled call: counted
@@ -1492,7 +1494,7 @@ impl StdHost {
             && r.descriptor == "(Lnet/minecraft/network/chat/Component;)V"
             && let Ok(uuid) = u128::from_str_radix(player, 16)
         {
-            let text = CommandText::of(args.first()?);
+            let text = CommandText::of(args.first()?, &self.component_states);
             return Some(
                 self.brigadier
                     .queue(Pending::Text(CommandMessage {
@@ -1583,7 +1585,7 @@ impl StdHost {
                 Some(Ok(Value::Void))
             }
             "com/mojang/brigadier/exceptions/SimpleCommandExceptionType" => {
-                let text = CommandText::of(args.first()?);
+                let text = CommandText::of(args.first()?, &self.component_states);
                 if self.brigadier.exception_types.len() < MAX_EXCEPTION_TYPES {
                     self.brigadier
                         .exception_types
@@ -1938,7 +1940,7 @@ impl StdHost {
                 } else {
                     MessageKind::System
                 };
-                let text = CommandText::of(first.ok_or_else(unknown)?);
+                let text = CommandText::of(first.ok_or_else(unknown)?, &self.component_states);
                 self.brigadier
                     .queue(Pending::Text(CommandMessage { kind, text }))?;
                 Ok(Value::Void)
@@ -2321,7 +2323,7 @@ impl NativeJar {
                     match component {
                         Ok(component) => messages.push(CommandMessage {
                             kind: MessageKind::Success { broadcast },
-                            text: CommandText::of(&component),
+                            text: CommandText::of(&component, &host.component_states),
                         }),
                         Err(error) => {
                             refused.get_or_insert_with(|| format!("sendSuccess supplier: {error}"));

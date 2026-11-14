@@ -574,16 +574,18 @@ fn cut(text: &str) -> String {
     text.chars().take(MAX_TEXT).collect()
 }
 
-/// A drawn or sent text argument: a `String` or a component marker (a
-/// `FormattedCharSequence` is the component it came from). `None` for null.
-fn text_arg(value: &Value) -> Option<ClientText> {
-    if let Some(literal) = crate::runtime::host_component::bare_literal(value) {
+/// A drawn or sent text argument: a `String` or a component as it is when
+/// drawn or sent (its state in `states`; a `FormattedCharSequence` is the
+/// component it came from). `None` for null.
+fn text_arg(value: &Value, states: &crate::runtime::host_component::States) -> Option<ClientText> {
+    let json = crate::runtime::facade_text::json_now(value, Some(states));
+    if let Some(literal) = json.as_ref().and_then(crate::runtime::host_component::bare_literal) {
         return Some(ClientText::Literal(cut(&literal)));
     }
-    if let Some(key) = crate::runtime::host_component::bare_key(value) {
+    if let Some(key) = json.as_ref().and_then(crate::runtime::host_component::bare_key) {
         return Some(ClientText::Translatable(cut(&key)));
     }
-    if let Some(json) = crate::runtime::facade_text::to_json(value) {
+    if let Some(json) = json {
         // Bounded by the component model itself (64 KiB).
         return Some(ClientText::Json(json.to_string()));
     }
@@ -968,7 +970,7 @@ impl StdHost {
             tooltip: self.mutable_collections.remove(TOOLTIP_LIST).map(|lines| {
                 lines
                     .iter()
-                    .filter_map(text_arg)
+                    .filter_map(|line| text_arg(line, &self.component_states))
                     .take(MAX_TOOLTIP_LINES)
                     .collect()
             }),
@@ -1141,13 +1143,17 @@ impl StdHost {
         // A component's style calls (`client_text.rs`); an unlisted member keeps
         // the host's own component model.
         if crate::runtime::host_component::is_component(receiver) {
-            let answer = text::component_call(receiver, r, args)?;
-            if matches!(r.name.as_str(), "withStyle" | "setStyle") {
-                // Departure D1 (`host_component.rs`): a new component, not the
-                // receiver changed in place; counted while its answer stands.
-                crate::runtime::Host::count_departure(self, r);
-            }
-            return Some(Ok(answer));
+            return Some(match text::component_call(r, args)? {
+                text::ComponentCall::Answer(value) => Ok(value),
+                // `return this`, the receiver's style changed in place.
+                text::ComponentCall::Restyle { codes, replace } => crate::runtime::host_component::change(
+                    &mut self.component_states,
+                    receiver,
+                    &crate::runtime::facade_text::argument,
+                    |state| text::apply_style(&mut state.base, &codes, replace),
+                )
+                .map(|()| receiver.clone()),
+            });
         }
         let text = expect_ref(receiver)?.clone();
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
@@ -1512,7 +1518,7 @@ impl StdHost {
                 // 26.3 reads the open screen through the GUI.
                 ("screen", _) if !frame.screen_open => Some(Value::Ref(None)),
                 ("setOverlayMessage", "V") => {
-                    let text = text_arg(args.first()?)?;
+                    let text = text_arg(args.first()?, &self.component_states)?;
                     self.client.message(ClientMessage::Overlay(text));
                     Some(Value::Void)
                 }
@@ -1525,7 +1531,7 @@ impl StdHost {
             },
             CHAT => match (name, r.descriptor.as_str()) {
                 ("addMessage", "(Lnet/minecraft/network/chat/Component;)V") => {
-                    let text = text_arg(args.first()?)?;
+                    let text = text_arg(args.first()?, &self.component_states)?;
                     self.client.message(ClientMessage::Chat(text));
                     Some(Value::Void)
                 }
@@ -1538,7 +1544,7 @@ impl StdHost {
                 }
                 match (name, returns) {
                     ("displayClientMessage", "V") => {
-                        let text = text_arg(args.first()?)?;
+                        let text = text_arg(args.first()?, &self.component_states)?;
                         let overlay = int_arg(args, 1).is_some_and(|v| v != 0);
                         self.client.message(if overlay {
                             ClientMessage::Overlay(text)
@@ -1548,7 +1554,7 @@ impl StdHost {
                         Some(Value::Void)
                     }
                     ("sendSystemMessage", "V") => {
-                        let text = text_arg(args.first()?)?;
+                        let text = text_arg(args.first()?, &self.component_states)?;
                         self.client.message(ClientMessage::Chat(text));
                         Some(Value::Void)
                     }
@@ -1662,7 +1668,7 @@ impl StdHost {
             },
             FONT => match (name, returns) {
                 ("width", "I") => {
-                    let text = text_arg(args.first()?)?;
+                    let text = text_arg(args.first()?, &self.component_states)?;
                     int(frame.metrics.width(&frame.metrics.resolve(&text)))
                 }
                 _ => None,
@@ -1719,7 +1725,7 @@ impl StdHost {
             }
             ("text", descriptor) if descriptor.starts_with("(Lnet/minecraft/client/gui/Font;") => {
                 // A null string draws nothing (`text` returns early).
-                let Some(text) = text_arg(args.get(1)?) else {
+                let Some(text) = text_arg(args.get(1)?, &self.component_states) else {
                     return Some(Value::Void);
                 };
                 let v = ints(2, 3)?;
@@ -1765,7 +1771,7 @@ impl StdHost {
                 let slot = self.client_stack_slot(args.get(1)?)?;
                 let v = ints(2, 2)?;
                 let count = args.get(4).map(|text| {
-                    text_arg(text).map(|t| match t {
+                    text_arg(text, &self.component_states).map(|t| match t {
                         ClientText::Literal(s) | ClientText::Translatable(s) => s,
                         ClientText::Json(json) => serde_json::from_str(&json)
                             .map(|json| crate::runtime::facade_text::plain(&json))
@@ -1805,7 +1811,7 @@ impl StdHost {
             ("centeredText", descriptor)
                 if descriptor.starts_with("(Lnet/minecraft/client/gui/Font;") =>
             {
-                let Some(text) = text_arg(args.get(1)?) else {
+                let Some(text) = text_arg(args.get(1)?, &self.component_states) else {
                     return Some(Value::Void);
                 };
                 let v = ints(2, 3)?;

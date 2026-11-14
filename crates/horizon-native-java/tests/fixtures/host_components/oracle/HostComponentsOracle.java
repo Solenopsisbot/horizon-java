@@ -5,7 +5,7 @@ import java.lang.reflect.Method;
 public final class HostComponentsOracle {
   public static void main(String[] args) throws Exception {
     String[] probes = {"spelled", "encoded", "spelledTypes", "real", "text", "copy", "appended", "styled",
-      "appendInPlace", "typeSwitch", "hashed", "listed", "mapped", "duplicate", "duplicateN", "hash",
+      "appendInPlace", "changedEquals", "styledEquals", "typeSwitch", "hashed", "listed", "mapped", "duplicate", "duplicateN", "hash",
       "sorted"};
     for (String probe : probes) {
       Method m = HostComponents.class.getMethod(probe);
