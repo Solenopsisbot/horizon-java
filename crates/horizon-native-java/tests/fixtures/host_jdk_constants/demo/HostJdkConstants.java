@@ -58,9 +58,26 @@ public final class HostJdkConstants {
         + "|" + new HashSet<>(List.of(p)).contains(q);
   }
 
-  /** Identity of two reads of a Locale constant (counted: a Locale key may be two objects). */
+  /** Java 25's locale cache: `Locale.of`/`forLanguageTag` answer the constants' objects. */
   public static String localeIdentity() {
-    return "" + (Locale.US == Locale.US);
+    return "" + (Locale.US == Locale.US) + (Locale.ROOT == Locale.ROOT) + (Locale.of("en", "US") == Locale.US)
+        + (Locale.of("EN", "us") == Locale.US) + (Locale.of("en") == Locale.ENGLISH) + (Locale.of("") == Locale.ROOT)
+        + (Locale.forLanguageTag("en-US") == Locale.US) + (Locale.forLanguageTag("und") == Locale.ROOT)
+        + (Locale.forLanguageTag("") == Locale.ROOT) + (Locale.forLanguageTag("zh-cn") == Locale.CHINA)
+        + (Locale.CHINA == Locale.PRC) + (Locale.UK == Locale.US) + (Locale.of("fr", "CA") == Locale.CANADA_FRENCH)
+        + "|" + Locale.of("iw") + Locale.of("ji") + Locale.of("in") + "|" + Locale.forLanguageTag("fr-ca") + "|"
+        + Locale.TAIWAN + Locale.GERMANY.hashCode() + "|" + "TITLE".toLowerCase(Locale.FRANCE)
+        + "|" + Locale.of("en", "001").toLanguageTag();
+  }
+
+  /** Two `Locale.of` of a key no constant holds (counted: the cache holds it softly). */
+  public static String cachedIdentity() {
+    return "" + (Locale.of("fr", "BE") == Locale.of("fr", "BE"));
+  }
+
+  /** Java tailors Turkish case mapping (counted). */
+  public static String turkish() {
+    return "TITLE".toLowerCase(Locale.of("tr", "TR"));
   }
 
   /** An identity hash (counted). */

@@ -114,9 +114,19 @@ fn jdk_constants_answer_as_java_25_or_count() {
             "patterns",
             Exact("a+|a+|truefalsefalsetrue|java.util.regex.Pattern|false"),
         ),
-        // Two reads of `Locale.US` (Java `true`; a `Locale` key may be two objects) and an
-        // identity hash: counted.
-        ("localeIdentity", Counted),
+        // Java 25's locale cache: the constants are the objects `Locale.of`/`forLanguageTag`
+        // answer; old ISO codes answer their new spelling.
+        (
+            "localeIdentity",
+            Exact(
+                "truetruetruetruetruetruetruetruetruetruetruefalsetrue|heyiid|fr_CA|zh_TW3079362|title|en-001",
+            ),
+        ),
+        // A key no constant holds: the cache keeps it softly, so `==` is counted.
+        ("cachedIdentity", Counted),
+        // Turkish case tailoring (`"TITLE"` is `"tıtle"`): counted.
+        ("turkish", Counted),
+        // An identity hash.
         ("unitHash", Counted),
     ];
     let mut failures = Vec::new();

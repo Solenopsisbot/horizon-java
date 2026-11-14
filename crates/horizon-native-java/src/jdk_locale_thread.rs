@@ -73,6 +73,18 @@ pub(crate) fn locale_text(language: &str, country: &str) -> String {
 }
 
 impl StdHost {
+    /// Whether `locale` (a `Locale` handle or a jar's `new Locale`) is one whose case
+    /// mapping Java tailors (`ConditionalSpecialCasing`: `tr`, `az`, `lt`).
+    pub(crate) fn tailored_case_locale(&self, locale: &Value) -> bool {
+        let language = crate::host_jdk_constant::locale_parts(locale)
+            .map(|(language, _)| language)
+            .or_else(|| {
+                let marker = expect_ref(locale)?;
+                self.locales.get(marker).map(|(language, _)| language.as_str())
+            });
+        matches!(language, Some("tr" | "az" | "lt"))
+    }
+
     /// `java.util.Locale` construction and its identity/format queries.
     pub(crate) fn locale_member(
         &mut self,

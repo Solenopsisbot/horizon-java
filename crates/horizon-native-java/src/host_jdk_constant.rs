@@ -12,8 +12,13 @@
 //!   hash (counted); `TimeUnit.compareTo` is the ordinals' difference (`Enum.compareTo`).
 //! * **`Locale`** (`final`): key `<language>_<country>` (`Locale.US` is `en_US`, `ROOT` `_`).
 //!   `equals` compares language and country, `hashCode` is `BaseLocale`'s
-//!   (`jdk_locale_thread::locale_hash`), `toString` `en_US`. A `Locale` may be one object or
-//!   two for one key (`new Locale("en", "US")` is not `Locale.US`): never canonical.
+//!   (`jdk_locale_thread::locale_hash`), `toString` `en_US`. Java 25 caches locales:
+//!   `Locale.of("en", "US")` and `forLanguageTag("en-US")` answer the `Locale.US` object.
+//!   Every handle is a cached locale (the deprecated `new Locale(..)`, the only fresh one,
+//!   is a jar object in `jdk_locale_thread.rs`), but the cache holds its entries softly, so
+//!   one key is provably one object only for the `Locale` constants, which the class holds
+//!   strongly: those keys are canonical, the rest are not. A future handle for `new Locale`
+//!   needs a per-allocation key.
 //! * **`Pattern`** (`final`): key `[serial, text]`, a serial per `compile`: one key one object.
 //!   `toString`/`pattern()` is the text, `equals` identity, `hashCode` identity (counted).
 //! * **`ArtifactVersion`** (NeoForge's `DefaultArtifactVersion`, Maven's `ComparableVersion`
@@ -69,6 +74,90 @@ pub(crate) fn unicode_block(name: &str) -> Value {
 
 pub(crate) fn unicode_block_name(value: &Value) -> Option<&str> {
     key_of(value, HostKind::UnicodeBlock)
+}
+
+/// `Locale`'s constant fields and their language and country (Java 25).
+const LOCALE_CONSTANTS: [(&str, &str, &str); 22] = [
+    ("ENGLISH", "en", ""),
+    ("FRENCH", "fr", ""),
+    ("GERMAN", "de", ""),
+    ("ITALIAN", "it", ""),
+    ("JAPANESE", "ja", ""),
+    ("KOREAN", "ko", ""),
+    ("CHINESE", "zh", ""),
+    ("SIMPLIFIED_CHINESE", "zh", "CN"),
+    ("TRADITIONAL_CHINESE", "zh", "TW"),
+    ("FRANCE", "fr", "FR"),
+    ("GERMANY", "de", "DE"),
+    ("ITALY", "it", "IT"),
+    ("JAPAN", "ja", "JP"),
+    ("KOREA", "ko", "KR"),
+    ("UK", "en", "GB"),
+    ("US", "en", "US"),
+    ("CANADA", "en", "CA"),
+    ("CANADA_FRENCH", "fr", "CA"),
+    ("ROOT", "", ""),
+    ("CHINA", "zh", "CN"),
+    ("PRC", "zh", "CN"),
+    ("TAIWAN", "zh", "TW"),
+];
+
+/// The `Locale` constant field `name` (`Locale.US`...).
+pub(crate) fn locale_constant(name: &str) -> Option<Value> {
+    LOCALE_CONSTANTS
+        .iter()
+        .find(|(field, _, _)| *field == name)
+        .map(|(_, language, country)| locale(language, country))
+}
+
+/// Whether a `Locale` key is one of the constants' (one object: the class holds it strongly,
+/// so the cache always answers it).
+pub(crate) fn locale_canonical(key: &str) -> bool {
+    LOCALE_CONSTANTS
+        .iter()
+        .any(|(_, language, country)| key.split_once('_') == Some((language, country)))
+}
+
+/// `BaseLocale.getInstance`'s language: ASCII lower case, and the three codes ISO 639
+/// renamed answer their new spelling (`Locale.of("iw")` is `he`).
+fn cached_language(language: &str) -> String {
+    let language = language.to_ascii_lowercase();
+    match language.as_str() {
+        "iw" => "he".to_owned(),
+        "ji" => "yi".to_owned(),
+        "in" => "id".to_owned(),
+        _ => language,
+    }
+}
+
+/// `Locale.of(language, country)`: the cached locale, `None` (counted) for text the key
+/// cannot carry (anything but ASCII letters in the language, letters and digits in the
+/// country).
+pub(crate) fn locale_of(language: &str, country: &str) -> Option<Value> {
+    if !language.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || !country.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(locale(
+        &cached_language(language),
+        &country.to_ascii_uppercase(),
+    ))
+}
+
+/// `Locale.forLanguageTag(tag)` for the tags this model parses exactly: empty or `und` (the
+/// root locale), or a two-letter language with an optional two-letter region. Anything else
+/// (scripts, variants, extensions, numeric regions, ill-formed tags) is `None`: counted.
+pub(crate) fn locale_for_tag(tag: &str) -> Option<Value> {
+    if tag.is_empty() || tag.eq_ignore_ascii_case("und") {
+        return Some(locale("", ""));
+    }
+    let (language, region) = tag.split_once('-').unwrap_or((tag, ""));
+    let letters = |text: &str| text.len() == 2 && text.bytes().all(|b| b.is_ascii_alphabetic());
+    if !letters(language) || !(region.is_empty() || letters(region)) {
+        return None;
+    }
+    locale_of(language, region)
 }
 
 /// The `Locale` of `language` and `country`.

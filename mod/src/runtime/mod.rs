@@ -5078,16 +5078,13 @@ impl Host for StdHost {
             ("java/lang/Double", "NaN", "D") => Ok(Value::Float(f64::NAN)),
             ("java/lang/Double", "POSITIVE_INFINITY", "D") => Ok(Value::Float(f64::INFINITY)),
             ("java/lang/Double", "NEGATIVE_INFINITY", "D") => Ok(Value::Float(f64::NEG_INFINITY)),
-            ("java/util/Locale", "US", "Ljava/util/Locale;") => {
-                Ok(host_jdk_constant::locale("en", "US"))
-            }
-            // `toLowerCase(Locale.ROOT)` is the locale-neutral case mapping a
-            // plugin or config reader uses on mod and class names.
-            ("java/util/Locale", "ROOT", "Ljava/util/Locale;") => {
-                Ok(host_jdk_constant::locale("", ""))
-            }
-            ("java/util/Locale", "ENGLISH", "Ljava/util/Locale;") => {
-                Ok(host_jdk_constant::locale("en", ""))
+            // `Locale.US`, `ROOT` (`toLowerCase(Locale.ROOT)` is the
+            // locale-neutral case mapping a plugin uses on ids)...
+            ("java/util/Locale", name, "Ljava/util/Locale;")
+                if host_jdk_constant::locale_constant(name).is_some() =>
+            {
+                host_jdk_constant::locale_constant(name)
+                    .ok_or_else(|| NativeError::Metadata(format!("no Locale.{name}")))
             }
 
             (
@@ -5530,6 +5527,39 @@ impl Host for StdHost {
             }
             ("java/util/UUID", "fromString", "(Ljava/lang/String;)Ljava/util/UUID;") => {
                 Ok(uuid_value(expect_string(Self::argument(r, args, 0)?))?)
+            }
+            // Java 25's locale cache (`host_jdk_constant.rs`): `Locale.of("en", "US")` and
+            // `forLanguageTag("en-US")` are the `Locale.US` object. A form the model does not
+            // normalise exactly (null, a script, a variant) is counted.
+            (
+                "java/util/Locale",
+                "of",
+                "(Ljava/lang/String;)Ljava/util/Locale;"
+                | "(Ljava/lang/String;Ljava/lang/String;)Ljava/util/Locale;",
+            ) => {
+                let text = |index: usize| match args.get(index) {
+                    None => Some(""),
+                    Some(Value::Ref(Some(text))) => Some(text.as_str()),
+                    Some(_) => None,
+                };
+                match (text(0), text(1)) {
+                    (Some(language), Some(country)) => {
+                        match host_jdk_constant::locale_of(language, country) {
+                            Some(locale) => Ok(locale),
+                            None => self.unknown_host_call(r),
+                        }
+                    }
+                    _ => self.unknown_host_call(r),
+                }
+            }
+            ("java/util/Locale", "forLanguageTag", "(Ljava/lang/String;)Ljava/util/Locale;") => {
+                match args.first() {
+                    Some(Value::Ref(Some(tag))) => match host_jdk_constant::locale_for_tag(tag) {
+                        Some(locale) => Ok(locale),
+                        None => self.unknown_host_call(r),
+                    },
+                    _ => self.unknown_host_call(r),
+                }
             }
             // Class.forName is intentionally not exposed: loading arbitrary
             // classes from disk would escape the bounded native sandbox. The
@@ -8741,6 +8771,15 @@ impl Host for StdHost {
             ))),
             // The `Locale` overloads (`Locale.ROOT` in ids and file names): the
             // root locale is Unicode's default case mapping, no locale tailoring.
+            // Java tailors Turkish, Azerbaijani and Lithuanian (`"I"` is `"ı"` in
+            // `tr`): those are counted.
+            (
+                "java/lang/String",
+                "toLowerCase" | "toUpperCase",
+                "(Ljava/util/Locale;)Ljava/lang/String;",
+            ) if args.first().is_some_and(|locale| self.tailored_case_locale(locale)) => {
+                self.unknown_host_call(r)
+            }
             ("java/lang/String", "toLowerCase", "(Ljava/util/Locale;)Ljava/lang/String;") => {
                 Ok(Value::Ref(Some(expect_string(receiver).to_lowercase())))
             }

@@ -1648,8 +1648,10 @@ const KINDS: &[KindInfo] = &[
         kind: HostKind::Locale,
         tag: "loc",
         class: ClassRule::Fixed("java/util/Locale"),
-        // `new Locale(..)` is a new object of an equal key.
-        canonical: never_canonical,
+        // Java 25 caches locales: `Locale.US`, `Locale.of("en", "US")` and
+        // `forLanguageTag("en-US")` are one object. The cache is soft, so
+        // only the constants' keys are provably one object.
+        canonical: crate::runtime::host_jdk_constant::locale_canonical,
         methods: &crate::runtime::host_jdk_constant::LOCALE_METHODS,
     },
     KindInfo {
