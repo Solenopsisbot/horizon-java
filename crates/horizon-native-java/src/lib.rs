@@ -3503,6 +3503,10 @@ impl StdHost {
     }
 
     fn mutable_values(&self, receiver: &Value) -> Option<Vec<String>> {
+        // A `String` is no collection, whatever it spells (`jar_object.rs`).
+        if jar_object::spells_key(receiver) {
+            return None;
+        }
         let marker = self.synchronized_target(expect_ref(receiver)?);
         if let Some(values) = self.view_values(marker) {
             return Some(values);
@@ -4445,6 +4449,9 @@ impl Host for StdHost {
     }
 
     fn mutable_collection_entries(&self, value: &Value) -> Option<Vec<Value>> {
+        if jar_object::spells_key(value) {
+            return None;
+        }
         let marker = self.synchronized_target(expect_ref(value)?);
         self.mutable_collections.get(marker).cloned()
     }
@@ -9727,6 +9734,10 @@ fn class_of_value(value: &Value) -> Option<String> {
 /// [`class_of_value`] of a reference's text, without building a `Value` (it
 /// runs inside `is_plain_string`, on every array store of a string).
 fn class_of_text(marker: &str) -> Option<String> {
+    // A text spelling an object's key is a `String` (`jar_object.rs`).
+    if jar_object::parse_key(marker).is_some() {
+        return Some("java/lang/String".into());
+    }
     if let Some((class, _)) = marker.split_once('#') {
         // A text `#` in a string (`#ff0000`, `[I#0`) names no class.
         if value_class::is_plain_string(marker) {
@@ -11240,7 +11251,7 @@ fn thrown_from_supplied(value: Value) -> NativeError {
             frame: None,
         },
         // A throwable object the supplier built (`jar_object.rs`), or a
-        // host marker.
+        // host marker; a `String` spelling an object's key is neither.
         value if jar_object::instance_key(value).is_some() => {
             let class = jar_object::value_marker_class(value)
                 .or_else(|| jar_object::instance_key(value))
@@ -21710,6 +21721,18 @@ impl<H: Host> Runtime<'_, H> {
             } else {
                 Some(StdHost::argument(r, args, 0)?.clone())
             };
+            // `Method.invoke` on an object that is surely not a `owner` (a
+            // `String`, `jar_object.rs`): Java's `IllegalArgumentException`.
+            if let Some(receiver) = &target_receiver
+                && *receiver != Value::Ref(None)
+                && self.known_instance_of(receiver, owner) == Some(false)
+            {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/IllegalArgumentException".into(),
+                    message: Some("object is not an instance of declaring class".into()),
+                    frame: None,
+                });
+            }
             // `Method.invoke` dispatches as `invokevirtual`/`invokeinterface`
             // would: a static or private target runs its own body, any other
             // the receiver class's override (its superclass chain, then the
@@ -24869,8 +24892,11 @@ impl<H: Host> Runtime<'_, H> {
                     // answers a `Float` value) is still a reference here.
                     let unboxed = self.library_instance_of(&value, &wanted);
                     // Only a handle is an array (`host_array.rs`).
+                    // A `String` spelling an object's key is only a `String`
+                    // (`library_instance_of` answered for it).
                     let matches = unboxed
                         || !wanted.starts_with('[')
+                            && !jar_object::spells_key(&value)
                             && expect_ref(&value).is_some_and(|marker| {
                                 self.forged_stream_instance_of(marker, &wanted)
                                     || self.live_stream_instance_of(marker, &wanted) == Some(true)

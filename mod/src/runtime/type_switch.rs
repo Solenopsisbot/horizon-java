@@ -137,7 +137,8 @@ impl<H: Host> Runtime<'_, H> {
                     .any(|prefix| marker.starts_with(prefix));
             return !claimed;
         }
-        self.object_is_instance_of(marker, class)
+        // A `String` spelling an object's key is no object.
+        !crate::runtime::jar_object::spells_key(value) && self.object_is_instance_of(marker, class)
     }
 }
 

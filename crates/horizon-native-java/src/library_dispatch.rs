@@ -491,6 +491,12 @@ impl<H: Host> Runtime<'_, H> {
         if wanted.starts_with('[') {
             return false;
         }
+        // A `String` spelling an object's key is a `String`, nothing else.
+        if let Value::Ref(Some(text)) = value
+            && crate::jar_object::spells_key(value)
+        {
+            return crate::value_class::string_instance_of(text, wanted);
+        }
         unboxed_instance_of(value, wanted)
             || expect_ref(value).is_some_and(|marker| {
                 self.proxy_instance_of(marker, wanted)
@@ -504,15 +510,16 @@ impl<H: Host> Runtime<'_, H> {
     /// applies.
     pub(super) fn value_instance_of(&self, value: &Value, wanted: &str) -> bool {
         self.library_instance_of(value, wanted)
-            || expect_ref(value).is_some_and(|marker| {
-                self.live_stream_instance_of(marker, wanted) == Some(true)
-                    || self.object_is_instance_of(marker, wanted)
-                    || self.host.host_instance_of(marker, wanted)
-                    || crate::jdk_model::platform_instance_of(marker, wanted)
-                    || generic_type_instance_of(marker, wanted)
-                    || (wanted == "java/lang/Class"
-                        && class_marker_like(marker, self.classes, &self.linked))
-            })
+            || !crate::jar_object::spells_key(value)
+                && expect_ref(value).is_some_and(|marker| {
+                    self.live_stream_instance_of(marker, wanted) == Some(true)
+                        || self.object_is_instance_of(marker, wanted)
+                        || self.host.host_instance_of(marker, wanted)
+                        || crate::jdk_model::platform_instance_of(marker, wanted)
+                        || generic_type_instance_of(marker, wanted)
+                        || (wanted == "java/lang/Class"
+                            && class_marker_like(marker, self.classes, &self.linked))
+                })
     }
 
     /// `Class.isInstance(value)` and `Class.cast(value)` with the

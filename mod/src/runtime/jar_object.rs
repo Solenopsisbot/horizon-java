@@ -4,10 +4,9 @@
 //! An object is a handle, `Value::Host` of [`HostKind::JarObject`], whose key
 //! is `<internal class name>#<n>`: its class and the runtime's allocation
 //! number. Every allocation is one (a jar class's, a JDK class's a jar `new`s,
-//! a model's own), so no object is text a `String` can spell (#156 P12b): the
-//! accessors below answer for handles only. (A `Value::Ref` spelling a key
-//! still reads as it did where a reader reads text; #156 P12b2 makes it a
-//! `String` to every reader.) The key is the text the object used to be, so every
+//! a model's own), so no object is text a `String` can spell (#156 P12b): a
+//! `Value::Ref` spelling a key is a `String` to every reader (`is_plain_string`,
+//! the accessors below). The key is the text the object used to be, so every
 //! table keyed by an object (instance fields, the host's throwable messages and
 //! collections, the resident heap) keeps its rows, and `expect_ref` answers a
 //! handle's key to the readers that look one up.
@@ -66,6 +65,12 @@ pub(crate) fn stored_value(text: &str) -> Value {
 /// Whether `value` is an allocated object (a [`HostKind::JarObject`]).
 pub(crate) fn is_object(value: &Value) -> bool {
     object_key(value).is_some()
+}
+
+/// Whether `value` is a `String` whose text spells an object's key (no
+/// object is text, so it is just that string).
+pub(crate) fn spells_key(value: &Value) -> bool {
+    matches!(value, Value::Ref(Some(text)) if parse_key(text).is_some())
 }
 
 /// Whether `handle` is an allocated object.
@@ -162,18 +167,20 @@ pub(crate) fn object_key(value: &Value) -> Option<&str> {
 
 /// The text an instance field of `value` is filed under
 /// (`<receiver>|<owner>#<name><descriptor>`): an object's key, or the text of
-/// any other reference with fields (a jar enum constant's `enum/…`).
+/// any other reference with fields (a jar enum constant's `enum/…`). A
+/// `String` spelling a key has none.
 pub(crate) fn instance_key(value: &Value) -> Option<&str> {
-    object_key(value).or(match value {
-        Value::Ref(Some(text)) => Some(text.as_str()),
+    object_key(value).or_else(|| match value {
+        Value::Ref(Some(text)) if parse_key(text).is_none() => Some(text.as_str()),
         _ => None,
     })
 }
 
-/// [`marker_class`] of a `Ref`'s text.
+/// [`marker_class`] of a `Ref`'s text, `None` for a `String` that spells an
+/// object's key (it is no marker).
 fn ref_marker_class(value: &Value) -> Option<&str> {
     match value {
-        Value::Ref(Some(text)) => marker_class(text),
+        Value::Ref(Some(text)) if parse_key(text).is_none() => marker_class(text),
         _ => None,
     }
 }
@@ -247,8 +254,10 @@ mod tests {
             stored_value("list/r#3"),
             Value::Ref(Some("list/r#3".into()))
         );
-        // Text is no object.
+        // A `String` spelling a key is no object.
         assert_eq!(object_class(&Value::Ref(Some("demo/Foo#4".into()))), None);
+        assert_eq!(instance_key(&Value::Ref(Some("demo/Foo#4".into()))), None);
+        assert!(spells_key(&Value::Ref(Some("demo/Foo#4".into()))));
         assert_eq!(object_class(&Value::Int(4)), None);
     }
 }

@@ -800,6 +800,10 @@ impl<H: Host> Runtime<'_, H> {
             // A host model's object (`Optional`): Gson reflects its private
             // fields, which JDK 25's module system refuses; not answered.
             Value::Host(handle) if !crate::runtime::jar_object::is_object_handle(handle) => None,
+            // A `String` spelling an object's key is a JSON string.
+            Value::Ref(Some(text)) if crate::runtime::jar_object::spells_key(value) => {
+                Some(format!("\"{}\"", style.escape(text)))
+            }
             // A boxed number or boolean is a JSON number or literal; a
             // `Character` is a one-character string.
             Value::Boxed(boxed @ Boxed::Character(_)) => {
