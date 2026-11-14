@@ -302,12 +302,8 @@ impl StdHost {
                 "org/apache/maven/artifact/versioning/ArtifactVersion",
                 "toString",
                 "()Ljava/lang/String;",
-            ) => Some(Value::Ref(Some(
-                marker
-                    .strip_prefix("artifact-version/")
-                    .unwrap_or(marker)
-                    .to_owned(),
-            ))),
+            ) => crate::host_jdk_constant::artifact_version_text(receiver)
+                .map(|text| Value::Ref(Some(text.to_owned()))),
             (
                 "net/neoforged/fml/loading/FMLLoader",
                 "getLoadingModList",
@@ -382,7 +378,7 @@ impl StdHost {
                     let version = self
                         .neoforge_mod_version(&id)
                         .unwrap_or_else(|| "unknown".into());
-                    Some(Value::Ref(Some(format!("artifact-version/{version}"))))
+                    Some(crate::host_jdk_constant::artifact_version(&version))
                 }
                 _ => None,
             };

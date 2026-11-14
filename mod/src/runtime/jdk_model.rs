@@ -289,7 +289,7 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         // the JVM: the caller stores the pattern and only a matcher needs it.
         ("java/util/regex/Pattern", "compile", "(Ljava/lang/String;)Ljava/util/regex/Pattern;") => {
             let pattern = expect_string(args.first()?);
-            Some(Ok(Value::Ref(Some(format!("regex-pattern/{pattern}")))))
+            Some(Ok(crate::runtime::host_jdk_constant::pattern(pattern)))
         }
         // The default filesystem. Its watch services are `watch_service.rs`'s;
         // no call here touches the host's disk.
@@ -394,17 +394,16 @@ pub(crate) fn instance_call(
             _ => None,
         };
     }
+    // A compiled `Pattern` (`host_jdk_constant.rs`): its text.
+    if let Some(pattern) = crate::runtime::host_jdk_constant::pattern_text(receiver) {
+        return match (r.name.as_str(), r.descriptor.as_str()) {
+            ("pattern" | "toString", "()Ljava/lang/String;") => Some(Ok(Value::Ref(Some(pattern)))),
+            _ => None,
+        };
+    }
     let marker = expect_ref(receiver)?;
     if let Some(canonical) = marker.strip_prefix(CHARSET_PREFIX) {
         return charset_call(r, canonical, args);
-    }
-    if let Some(pattern) = marker.strip_prefix("regex-pattern/") {
-        return match (r.name.as_str(), r.descriptor.as_str()) {
-            ("pattern" | "toString", "()Ljava/lang/String;") => {
-                Some(Ok(Value::Ref(Some(pattern.to_owned()))))
-            }
-            _ => None,
-        };
     }
     if marker == "file-system/default" {
         // `newWatchService` is `watch_service.rs`'s.
