@@ -822,6 +822,101 @@ mod tests {
         );
     }
 
+    fn logged(
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        args: Vec<Value>,
+    ) -> crate::HostInvocation {
+        crate::HostInvocation {
+            method: crate::MethodRef {
+                owner: owner.into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            },
+            receiver: Some(text("java/util/ArrayList#9")),
+            args,
+        }
+    }
+
+    /// The call log roots only the calls it is read back for (#197): an
+    /// object a jar passed to `List.add` (or whose constructor the host ran)
+    /// is collected, a listener object registered on an event bus is kept,
+    /// with what its fields reach.
+    #[test]
+    fn only_a_registration_in_the_call_log_keeps_its_objects() {
+        let (mut host, mut heap) = graph("demo/Elsewhere");
+        host.invocations.push(logged(
+            "java/util/ArrayList",
+            "add",
+            "(Ljava/lang/Object;)Z",
+            vec![text("demo/Node#1")],
+        ));
+        host.invocations
+            .push(logged("java/lang/Object", "<init>", "()V", vec![]));
+        host.invocations.push(logged(
+            "net/neoforged/bus/api/IEventBus",
+            "register",
+            "(Ljava/lang/Object;)V",
+            vec![text("demo/Node#3")],
+        ));
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), ["demo/Node#3", "demo/Node#4"]);
+    }
+
+    /// An unmodifiable view keeps its source (and the source its elements)
+    /// while the view is reachable; once nothing reaches the view, the view,
+    /// its source and the view's row in the per-object tables all go.
+    #[test]
+    fn a_view_keeps_its_source_only_while_it_is_reachable() {
+        let view = "java/util/Collections$UnmodifiableRandomAccessList#immutable0";
+        let (mut host, mut heap) = graph(view);
+        host.unmodifiable_collections
+            .insert(view.into(), Some("java/util/ArrayList#5".into()));
+        host.mutable_collections
+            .insert("java/util/ArrayList#5".into(), vec![text("demo/Node#3")]);
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), ["demo/Node#3", "demo/Node#4"]);
+        assert!(
+            host.mutable_collections
+                .contains_key("java/util/ArrayList#5")
+        );
+
+        host.persistent_static_fields.clear();
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), Vec::<&str>::new());
+        assert!(
+            !host
+                .mutable_collections
+                .contains_key("java/util/ArrayList#5")
+        );
+        assert!(host.unmodifiable_collections.is_empty());
+    }
+
+    /// A throwable is kept while something reaches it, with its cause, and
+    /// collected (message and all) once nothing does: it used to be a root
+    /// for the host's life.
+    #[test]
+    fn a_throwable_and_its_cause_live_as_long_as_it_is_reached() {
+        let (mut host, mut heap) = graph("java/lang/RuntimeException#20");
+        host.throwable_messages
+            .insert("java/lang/RuntimeException#20".into(), Some("outer".into()));
+        host.throwable_causes.insert(
+            "java/lang/RuntimeException#20".into(),
+            Some(text("demo/Node#3")),
+        );
+        host.throwable_messages.insert(
+            "java/lang/RuntimeException#21".into(),
+            Some("dropped".into()),
+        );
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(objects(&heap), ["demo/Node#3", "demo/Node#4"]);
+        assert_eq!(
+            host.throwable_messages.keys().collect::<Vec<_>>(),
+            ["java/lang/RuntimeException#20"]
+        );
+    }
+
     #[test]
     fn a_rewound_call_log_drops_only_what_came_after_the_mark() {
         let mut host = StdHost::new();
