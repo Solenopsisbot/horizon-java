@@ -211,7 +211,7 @@ pub(crate) fn server_member(
         ) => {
             let resource = args
                 .first()
-                .and_then(expect_ref)
+                .and_then(crate::game_object::text)
                 .and_then(|text| text.strip_prefix(LEVEL_RESOURCE));
             match (&facts.world_dir, resource) {
                 (Some(dir), Some(id)) => Ok(path_value(&path_join(dir, id))),
@@ -310,7 +310,10 @@ pub(crate) fn answer(
     match (r.name.as_str(), descriptor) {
         ("hashCode", "()I") => return Ok(Value::Int(stable_hash(text))),
         ("equals", "(Ljava/lang/Object;)Z") => {
-            let same = args.first().and_then(expect_ref).is_some_and(|o| o == text);
+            let same = args
+                .first()
+                .and_then(crate::game_object::text)
+                .is_some_and(|o| o == text);
             return Ok(Value::Int(i32::from(same)));
         }
         _ => {}
@@ -327,7 +330,7 @@ pub(crate) fn answer(
     if text == RULES {
         let id = args
             .first()
-            .and_then(expect_ref)
+            .and_then(crate::game_object::text)
             .and_then(|t| t.strip_prefix(GAME_RULE));
         let read: fn(GameRuleValue) -> Value = match (r.name.as_str(), descriptor) {
             ("get", "(Lnet/minecraft/world/level/gamerules/GameRule;)Ljava/lang/Object;") => {
@@ -455,7 +458,8 @@ pub(crate) fn channel_of(
     value: &Value,
     type_id: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    identifier_text(value).or_else(|| expect_ref(value).and_then(|marker| type_id(marker)))
+    identifier_text(value)
+        .or_else(|| crate::game_object::text(value).and_then(|marker| type_id(marker)))
 }
 
 impl crate::StdHost {
@@ -465,7 +469,7 @@ impl crate::StdHost {
     /// takes either). `None` for any other read.
     pub(crate) fn facade_field(&self, receiver: &Value, r: &MethodRef) -> Option<Value> {
         self.game_event.as_deref()?;
-        let text = expect_ref(receiver)?;
+        let text = crate::game_object::text(receiver)?;
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
             (
                 "net/minecraft/server/level/ServerPlayer",
@@ -500,7 +504,7 @@ impl crate::StdHost {
         if let Some(answer) = self.saved_data.call(r, receiver, args) {
             return Some(answer);
         }
-        let player = expect_ref(receiver)?.strip_prefix("game/player/")?;
+        let player = crate::game_object::text(receiver)?.strip_prefix("game/player/")?;
         let player = u128::from_str_radix(player, 16).ok()?;
         let firing = self.game_event.as_deref()?;
         player_member(&firing.facade.server, player, r)
@@ -594,7 +598,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         // so the task runs now rather than being queued. Only a façade
         // server (a `game/` marker) is the running one.
         let on_server = receiver
-            .and_then(expect_ref)
+            .and_then(crate::game_object::text)
             .is_some_and(|text| text.starts_with("game/"));
         if on_server
             && EVENT_LOOPS.contains(&r.owner.as_str())

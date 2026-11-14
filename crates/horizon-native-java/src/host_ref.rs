@@ -440,6 +440,34 @@ pub enum HostKind {
     Duration,
     /// `java.net.URI`: key its text (`host_jdk_value.rs`).
     Uri,
+    /// A game entity (`ServerPlayer`, a mob, the client's `LocalPlayer`): key
+    /// its marker (`game/player/<uuid>`, `game/entity/<id>`), one object per
+    /// entity (`game_object.rs`, #156 P16).
+    GameEntity,
+    /// A level (`ServerLevel`, `ClientLevel`): key its marker, one per dimension.
+    GameLevel,
+    /// A game service with one object per name (the server, its player list,
+    /// game rules and registries, a level's world border, the client's
+    /// `Minecraft`, `Gui`...): key its marker.
+    GameSingleton,
+    /// A registry entry (an `Item`, a `Block`, a `BlockState`, a `GameRule`,
+    /// a registry): key its marker, one per entry.
+    GameRegistryObject,
+    /// A game value (`BlockPos`, `LevelResource`, `Style`...): key its marker,
+    /// which spells its fields; `equals` by them, `==` per producer.
+    GameValue,
+    /// A game object that is its own object each time (a `DamageSource`, an
+    /// `ItemStack`, a hit result, a placeholder for an object the hook did not
+    /// give): key its marker, never canonical.
+    GameTransient,
+    /// A collection's `iterator()`: key `iterator/<n>`, the host's table key, or
+    /// `iterator/empty` for `Collections.emptyIterator()` (`host_iterator.rs`).
+    Iterator,
+    /// An `Enumeration` (`ClassLoader.getResources`, `Collections.enumeration`,
+    /// `Vector.elements()`): key `enumeration/<n>` or `enumeration/empty`.
+    Enumeration,
+    /// A list's `listIterator()`: key `list-iterator/<n>`.
+    ListIterator,
     /// A `Map.Entry` whose class the host knows (`HashMap$Node`, `TreeMap$Entry`,
     /// `KeyValueHolder`...): key `<class>#entry<n>` (one object per key) or
     /// `<class>#node<n>` (a map's node, identity by origin) (`host_map_entry.rs`).
@@ -1535,7 +1563,8 @@ const KINDS: &[KindInfo] = &[
         kind: HostKind::Collector,
         tag: "coll",
         class: ClassRule::Fixed("java/util/stream/Collectors$CollectorImpl"),
-        canonical: never_canonical,
+        // Guava's two shared collectors; every other one is its own object.
+        canonical: crate::host_collector::canonical,
         methods: &crate::stream_pipeline::COLLECTOR_IMPL,
     },
     KindInfo {
@@ -1806,6 +1835,101 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("java/net/URI"),
         canonical: never_canonical,
         methods: &crate::host_jdk_value::URI_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GameEntity,
+        tag: "gent",
+        // The exact class comes with the family's producer (#156 P16b–e).
+        class: ClassRule::Unknown {
+            declared: crate::game_object::declared_types,
+        },
+        // One object per entity: P16b keys incarnations.
+        canonical: always_canonical,
+        methods: &crate::game_object::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GameLevel,
+        tag: "glvl",
+        // The exact class comes with the family's producer (#156 P16b–e).
+        class: ClassRule::Unknown {
+            declared: crate::game_object::declared_types,
+        },
+        // One level per dimension.
+        canonical: always_canonical,
+        methods: &crate::game_object::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GameSingleton,
+        tag: "gone",
+        // The exact class comes with the family's producer (#156 P16b–e).
+        class: ClassRule::Unknown {
+            declared: crate::game_object::declared_types,
+        },
+        // One object per name.
+        canonical: always_canonical,
+        methods: &crate::game_object::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GameRegistryObject,
+        tag: "greg",
+        // The exact class comes with the family's producer (#156 P16b–e).
+        class: ClassRule::Unknown {
+            declared: crate::game_object::declared_types,
+        },
+        // One object per registry entry.
+        canonical: always_canonical,
+        methods: &crate::game_object::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GameValue,
+        tag: "gval",
+        // The exact class comes with the family's producer (#156 P16b–e).
+        class: ClassRule::Unknown {
+            declared: crate::game_object::declared_types,
+        },
+        // Each `new BlockPos(..)` is its own object; equal by fields.
+        canonical: never_canonical,
+        methods: &crate::game_object::VALUE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GameTransient,
+        tag: "gtmp",
+        // The exact class comes with the family's producer (#156 P16b–e).
+        class: ClassRule::Unknown {
+            declared: crate::game_object::declared_types,
+        },
+        // Its own object each time the game makes one.
+        canonical: never_canonical,
+        methods: &crate::game_object::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Iterator,
+        tag: "itr",
+        // The collection's own iterator class (`ArrayList$Itr`...), not named here.
+        class: ClassRule::Unknown {
+            declared: crate::host_iterator::iterator_types,
+        },
+        // A per-allocation key, or the one empty iterator.
+        canonical: always_canonical,
+        methods: &crate::host_iterator::ITERATOR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Enumeration,
+        tag: "enm",
+        class: ClassRule::Unknown {
+            declared: crate::host_iterator::enumeration_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_iterator::ITERATOR_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ListIterator,
+        tag: "litr",
+        class: ClassRule::Unknown {
+            declared: crate::host_iterator::list_iterator_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_iterator::ITERATOR_METHODS,
     },
     KindInfo {
         kind: HostKind::MapEntry,

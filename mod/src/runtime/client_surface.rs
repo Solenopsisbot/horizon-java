@@ -722,7 +722,7 @@ const KEYBOARD_NAMES: &[(i32, &str)] = &[
 
 /// A category marker's identifier: `key-category/<namespace>:<path>`.
 fn category_id(value: &Value, categories: &BTreeMap<String, String>) -> Option<String> {
-    let text = expect_ref(value)?;
+    let text = crate::runtime::game_object::text(value)?;
     if let Some(id) = text.strip_prefix(CATEGORY) {
         return Some(id.to_owned());
     }
@@ -1183,7 +1183,7 @@ impl StdHost {
                 .map(|()| receiver.clone()),
             });
         }
-        let text = expect_ref(receiver)?.clone();
+        let text = crate::runtime::game_object::text(receiver)?.clone();
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
         // `NonNullList` is a `List`: the inventory's lists answer as one.
         if r.owner == "net/minecraft/core/NonNullList" && text.starts_with("list") {
@@ -1222,10 +1222,13 @@ impl StdHost {
         }
         // `BuiltInRegistries.ITEM.getKey(item)`: the item's identifier.
         if r.name == "getKey"
-            && let Some(id) = args.first().and_then(expect_ref).and_then(|a| {
-                a.strip_prefix(items::ITEM)
-                    .or_else(|| a.strip_prefix(items::BLOCK))
-            })
+            && let Some(id) = args
+                .first()
+                .and_then(crate::runtime::game_object::text)
+                .and_then(|a| {
+                    a.strip_prefix(items::ITEM)
+                        .or_else(|| a.strip_prefix(items::BLOCK))
+                })
         {
             return Some(Ok(crate::runtime::host_ids::identifier_of_text(id)));
         }
@@ -1416,7 +1419,7 @@ impl StdHost {
             ("hashCode", "()I") => Value::Int(stable_hash(object)),
             ("equals", "(Ljava/lang/Object;)Z") | ("same", _) => flag(
                 args.first()
-                    .and_then(expect_ref)
+                    .and_then(crate::runtime::game_object::text)
                     .is_some_and(|o| o == object),
             ),
             _ if in_frame => return Some(Err(NativeError::UnknownHostCall(r.clone()))),
@@ -1447,7 +1450,7 @@ impl StdHost {
                 ("y", "D") => double(y),
                 ("z", "D") => double(z),
                 ("distanceTo", "D") | ("distanceToSqr", "D") => {
-                    let o = expect_ref(args.first()?)?.strip_prefix(VEC3)?;
+                    let o = crate::runtime::game_object::text(args.first()?)?.strip_prefix(VEC3)?;
                     let o: Vec<f64> = o.split(',').filter_map(|c| c.parse().ok()).collect();
                     let d2 = (x - o.first()?).powi(2)
                         + (y - o.get(1)?).powi(2)

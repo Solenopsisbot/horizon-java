@@ -11,34 +11,22 @@
 //! Until #156 P13 a `Class` was text: the internal name, the same `Value::Ref`
 //! a `String` is. P13 moves it in steps (`hj-notes/p13-plan.md`):
 //!
-//! * **P13a (done):** every reader of a `Class` value goes through
-//!   [`class_name`] and [`is_class`], which accept a handle and, until P13c,
-//!   the class-marker text every producer still answers. No answer changes.
-//! * **P13b1 (done):** the producers config code compares with `X.class`
-//!   answer handles: `ldc` (`Foo.class`), `getClass`,
-//!   `Class.forName`/`ClassLoader.loadClass`, the wrappers' `TYPE`, the
-//!   `Class` members that answer a class (`getSuperclass`, `getInterfaces`,
-//!   `getComponentType`, `getEnclosingClass`), the reflective getters
-//!   (`Field.getType`/`getDeclaringClass`, `Method.getReturnType`/
-//!   `getParameterTypes`/`getDeclaringClass`), type nodes that are classes
-//!   (`getGenericType`, `getRawType`, arguments, bounds,
-//!   `getGenericDeclaration`), commons-lang's `ClassUtils` boxing,
-//!   `ServiceLoader.Provider.type` and Fabric's `getEntrypointClass`; and,
-//!   pulled forward from P13b2 by #215's review, annotation `Class` values
-//!   and `annotationType`, `MethodType` return and parameter types,
-//!   `StackWalker` caller and frame classes, a proxy's `getClass`, Guava's
-//!   and Gson's `TypeToken` classes. Every `Class` a jar can obtain is a
-//!   handle (#216 lists the members still counted). Until P13c `expect_ref`
-//!   answers a handle's key, as it does a jar object's, so a reader not yet
-//!   moved to [`class_name`] keeps the text it read.
-//! * **P13c:** text is never a `Class`: a `String` spelled like a class name
-//!   is that `String` everywhere, and [`class_name`] stops reading text.
+//! * **P13a:** every reader of a `Class` value went through [`class_name`]
+//!   and [`is_class`].
+//! * **P13b1 (#215):** every producer answers a handle: `ldc`, `getClass`,
+//!   `forName`/`loadClass`, the wrappers' `TYPE`, the `Class` members, the
+//!   reflective getters, type nodes, annotation values and `annotationType`,
+//!   `MethodType`, `StackWalker`, proxies, Guava's and Gson's `TypeToken`.
+//! * **P13c (this layer):** text is never a `Class`. [`class_name`] and
+//!   [`is_class`] read handles only, `expect_ref` no longer reads a handle's
+//!   key, and a `String` spelled like a class name (`java/lang/String`,
+//!   `[I`, `int`) is that `String` to every reader: `instanceof`, casts,
+//!   `equals`, collections, type switches, reflection. Only `Class.forName`
+//!   turns text (a binary name) into a class, as Java does.
 //!
 //! The row: `Class` is final and its supertypes are Java 25's
-//! (`jdk_closure.rs`). `equals` is identity, exact between handles (one name,
-//! one object) and against text of another name; against text of its own
-//! name it is counted until P13c, as `==` is (a class marker may be the same
-//! `Class`, a `String` spelled like it is not: [`handle_against_same_text`]). `hashCode` is an
+//! (`jdk_closure.rs`). `equals` is identity: exact between handles (one
+//! name, one object), `false` against anything else. `hashCode` is an
 //! identity hash (counted). `toString` (`class X`, `interface X`, `int`) needs
 //! to know whether X is an interface: the row hands the handle back to the
 //! caller's `Nested` (as `jar_object.rs` does), and the runtime answers from
@@ -46,8 +34,7 @@
 //! neither knows is counted.
 
 use crate::host_ref::{HostKind, HostRef, Methods, instance_of_class};
-use crate::{ClassFile, LinkedClassTable, Value};
-use std::collections::BTreeMap;
+use crate::{ClassFile, Value};
 
 pub(crate) const CLASS: &str = "java/lang/Class";
 
@@ -110,22 +97,9 @@ pub(crate) fn table_is_interface(name: &str) -> Option<bool> {
     crate::jdk_closure::class(name).map(|row| row.is_interface)
 }
 
-/// The `Class` handle `value` is: its name. Not class-marker text (that is
-/// [`class_name`]'s, until #156 P13c).
+/// The `Class` handle `value` is: its name ([`class_name`]).
 pub(crate) fn handle_name(value: &Value) -> Option<&str> {
-    match value {
-        Value::Host(handle) if handle.kind() == HostKind::Class => Some(handle.key()),
-        _ => None,
-    }
-}
-
-/// A `Class` handle against class-marker text of the same name: one class's
-/// object and a value a producer #156 P13b has not moved yet, or a `String`
-/// spelled like the name. Until P13c no reader can tell which, so `==` and
-/// `equals` between them are counted, never a silent `false`.
-pub(crate) fn handle_against_same_text(a: &Value, b: &Value) -> bool {
-    let same = |handle: &Value, text: &Value| matches!((handle_name(handle), text), (Some(name), Value::Ref(Some(text))) if name == text);
-    same(a, b) || same(b, a)
+    class_name(value)
 }
 
 /// The kind's `ClassRule::FromKey`: every key's class is `java.lang.Class`.
@@ -138,31 +112,19 @@ pub(crate) fn class_value(name: &str) -> Value {
     Value::Host(HostRef::new(HostKind::Class, name))
 }
 
-/// The name of the class `value` is: a `Class` handle's key, or (until
-/// #156 P13c) the class-marker text a producer answered. `None` for any other
-/// value. The text is taken as every reader took it before P13: whether it
-/// names a class is [`is_class`]'s question.
+/// The name of the class `value` is: a `Class` handle's key. `None` for any
+/// other value: a `String` spelled like a class name is that `String`
+/// (#156 P13c), and only `Class.forName` resolves text to a class.
 pub(crate) fn class_name(value: &Value) -> Option<&str> {
     match value {
         Value::Host(handle) if handle.kind() == HostKind::Class => Some(handle.key()),
-        Value::Ref(Some(text)) => Some(text),
         _ => None,
     }
 }
 
-/// Whether `value` is a `Class`: a handle, or (until #156 P13c) text shaped
-/// like a class marker (`class_marker_like`: a held or linked class, a
-/// primitive, an array descriptor, an internal name that is no host marker).
-pub(crate) fn is_class(
-    value: &Value,
-    classes: &BTreeMap<String, ClassFile>,
-    linked: &LinkedClassTable,
-) -> bool {
-    match value {
-        Value::Host(handle) => handle.kind() == HostKind::Class,
-        Value::Ref(Some(text)) => crate::class_marker_like(text, classes, linked),
-        _ => false,
-    }
+/// Whether `value` is a `Class`: a handle, never text (#156 P13c).
+pub(crate) fn is_class(value: &Value) -> bool {
+    class_name(value).is_some()
 }
 
 /// The row. See the module docs.
@@ -174,10 +136,7 @@ pub(crate) const CLASS_METHODS: Methods = Methods {
     equals: |handle, other, _| {
         Ok(match other {
             Value::Host(other) => handle.same_object(other),
-            // A class marker of the same name (text until P13c) may be this
-            // `Class`, or a `String` spelled like it: counted. Any other text
-            // is another class's marker or a `String`, never this object.
-            Value::Ref(Some(text)) if text == handle.key() => None,
+            // Text is a `String` however it is spelled (#156 P13c).
             _ => Some(false),
         })
     },
@@ -245,8 +204,7 @@ mod tests {
         assert_eq!(left.same_object(right), Some(true));
         assert_eq!(left.class(), Some(CLASS));
         assert_eq!(class_name(&a), Some("demo/Foo"));
-        let text = Value::Ref(Some("demo/Foo".into()));
-        assert_eq!(class_name(&text), Some("demo/Foo"));
+        assert_eq!(class_name(&Value::Ref(Some("demo/Foo".into()))), None);
         assert_eq!(class_name(&Value::Int(1)), None);
         assert_eq!(
             class_name(&class_value("[Ljava/lang/String;")),
@@ -271,22 +229,20 @@ mod tests {
         assert_eq!(class_text("demo/Unknown", None), None);
     }
 
-    /// A handle against the same name's text is the one undecidable pair.
+    /// Text is never a `Class`, however it is spelled (#156 P13c).
     #[test]
-    fn a_handle_against_its_names_text_is_undecided() {
-        let handle = class_value("demo/Foo");
-        assert!(handle_against_same_text(
-            &handle,
-            &Value::Ref(Some("demo/Foo".into()))
-        ));
-        assert!(handle_against_same_text(
-            &Value::Ref(Some("demo/Foo".into())),
-            &handle
-        ));
-        assert!(!handle_against_same_text(
-            &handle,
-            &Value::Ref(Some("demo/Bar".into()))
-        ));
-        assert!(!handle_against_same_text(&handle, &class_value("demo/Foo")));
+    fn text_is_never_a_class() {
+        for text in [
+            "demo/Foo",
+            "java/lang/String",
+            "int",
+            "[I",
+            "java.lang.String",
+        ] {
+            let text = Value::Ref(Some(text.into()));
+            assert_eq!(class_name(&text), None);
+            assert!(!is_class(&text));
+        }
+        assert!(is_class(&class_value("demo/Foo")));
     }
 }

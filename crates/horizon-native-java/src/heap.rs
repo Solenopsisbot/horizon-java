@@ -1,7 +1,7 @@
 //! The objects a jar's Java code built, kept with the jar's host between calls.
 //!
 //! The interpreter names every object by a marker (`demo/Listener#3`, an
-//! array handle's `[I#3` key, an `iterator/...` marker) and keeps its instance fields, array
+//! array handle's `[I#3` key, an iterator handle's `iterator/...` key) and keeps its instance fields, array
 //! elements, `StringBuilder` text and enum identity in per-invocation tables
 //! on [`Runtime`]. Before this module those tables died with the invocation:
 //! a later callback (a game hook, an event listener, a payload handler) saw
@@ -253,9 +253,11 @@ fn collectable(marker: &str) -> bool {
     if marker.starts_with(GAME_OBJECT_PREFIX) {
         return false;
     }
+    // An iterator's or enumeration's key (`host_iterator.rs`); the shared empty ones
+    // (`iterator/empty`) are never collected.
     if let Some(rest) = marker
         .strip_prefix("iterator/")
-        .or_else(|| marker.strip_prefix("resource-enumeration/"))
+        .or_else(|| marker.strip_prefix("enumeration/"))
     {
         return rest.ends_with(|c: char| c.is_ascii_digit());
     }
@@ -361,6 +363,7 @@ impl Collectable {
             .chain(heap.enum_constants.keys().map(String::as_str))
             .chain(host.mutable_collections.keys().map(String::as_str))
             .chain(host.iterators.keys().map(String::as_str))
+            .chain(host.enumerations.keys().map(String::as_str))
             .chain(host.component_states.keys().map(String::as_str))
             .chain(host.map_entries.keys().map(String::as_str))
             .filter(|marker| collectable(marker))
@@ -456,6 +459,11 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .get(&marker)
             .into_iter()
             .flat_map(|(elements, _)| elements);
+        // An enumeration's iterator or vector (`host_iterator.rs`).
+        let enumerations = host
+            .enumerations
+            .get(&marker)
+            .map(crate::host_iterator::EnumerationOver::held);
         // A changed chat component's appended siblings and component
         // arguments (`host_component.rs`).
         let components = host
@@ -472,6 +480,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .chain(arrays)
             .chain(collections)
             .chain(iterators)
+            .chain(enumerations)
             .chain(components)
             .chain(entries)
         {
@@ -488,6 +497,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     heap.enum_constants.retain(|key, _| keep(key));
     host.mutable_collections.retain(|key, _| keep(key));
     host.iterators.retain(|key, _| keep(key));
+    host.enumerations.retain(|key, _| keep(key));
     host.component_states.retain(|key, _| keep(key));
     host.map_entries.retain(keep);
 }

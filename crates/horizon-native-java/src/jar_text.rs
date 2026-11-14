@@ -200,14 +200,6 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(value) else {
             return Ok(None);
         };
-        // A class name a family kind owns may be a `Class` (an event's `getClass()`, text until
-        // #156 P13) or a String spelled like it: which text Java prints is not known. Counted.
-        if self.owned_class_side(marker).is_some() {
-            return self
-                .host
-                .unknown_operand_call(&object_to_string())
-                .map(Some);
-        }
         if let Some(text) = self.string_builders.get(marker) {
             return Ok(Some(Value::Ref(Some(text.clone()))));
         }
