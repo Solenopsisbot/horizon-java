@@ -71,6 +71,7 @@ mod hook_shapes;
 mod host_array;
 mod host_attachment;
 mod host_brigadier;
+mod host_component;
 mod host_config;
 mod host_entry;
 mod host_events;
@@ -8579,6 +8580,9 @@ impl Host for StdHost {
                 } else {
                     component_text(suffix)
                 };
+                // Flattened to its text, and a new component rather than the
+                // receiver changed (D1, `host_component.rs`): counted.
+                self.unknown_host_call(r)?;
                 Ok(component_value("literal", &format!("{current}{suffix}")))
             }
             ("net/minecraft/network/chat/MutableComponent", "copy", descriptor)
@@ -9761,21 +9765,20 @@ fn identifier_value(namespace: &str, path: &str) -> Value {
     host_ids::identifier(namespace, path)
 }
 
+/// A new `literal` or `translatable` component (`host_component.rs`).
 fn component_value(kind: &str, text: &str) -> Value {
-    Value::Ref(Some(format!("component/{kind}/{text}")))
+    match kind {
+        "translatable" => host_component::translatable(text),
+        _ => host_component::literal(text),
+    }
 }
 
+/// A component's text (`getString()`), or a string argument's own text.
 fn component_text(value: &Value) -> String {
-    let raw = expect_ref(value).map_or("", |value| value.as_str());
-    // A styled component or one with arguments (`facade_text.rs`).
-    if raw.starts_with(facade_text::JSON_PREFIX) {
-        return facade_text::to_json(value)
-            .map_or_else(String::new, |json| facade_text::plain(&json));
+    match facade_text::to_json(value) {
+        Some(json) => facade_text::plain(&json),
+        None => expect_ref(value).cloned().unwrap_or_default(),
     }
-    raw.strip_prefix("component/literal/")
-        .or_else(|| raw.strip_prefix("component/translatable/"))
-        .unwrap_or(raw)
-        .to_owned()
 }
 
 fn identifier_parse(value: &str) -> Value {
@@ -33434,8 +33437,8 @@ mandatory = true
                 &[Value::Ref(Some("Hello".into()))],
             )
             .unwrap();
-        assert_eq!(
-            host.invoke_instance(
+        let appended = host
+            .invoke_instance(
                 &MethodRef {
                     owner: "net/minecraft/network/chat/MutableComponent".into(),
                     name: "append".into(),
@@ -33445,9 +33448,13 @@ mandatory = true
                 &literal,
                 &[Value::Ref(Some(" world".into()))],
             )
-            .unwrap(),
-            component_value("literal", "Hello world")
+            .unwrap();
+        assert_eq!(
+            host_component::bare_literal(&appended).as_deref(),
+            Some("Hello world")
         );
+        // Flattened and not the receiver changed in place (D1): counted.
+        assert_eq!(host.unknown_host_call_count(), 1);
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {

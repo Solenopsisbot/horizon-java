@@ -305,8 +305,12 @@ mod tests {
             "withStyle",
             "(Lnet/minecraft/network/chat/Style;)Lnet/minecraft/network/chat/MutableComponent;",
         );
-        let styled =
-            component_call(&crate::host_component::literal("Day 3"), &with_style, &[bold]).unwrap();
+        let styled = component_call(
+            &crate::host_component::literal("Day 3"),
+            &with_style,
+            &[bold],
+        )
+        .unwrap();
         let json = crate::facade_text::to_json(&styled).unwrap();
         assert_eq!(
             json,

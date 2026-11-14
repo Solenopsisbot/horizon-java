@@ -245,21 +245,30 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return Ok(Lookup::Unknown);
             }
+            // A handle: its kind's `equals` may hold for a stored value with
+            // another key (a chat component's contents) and Java's bin is
+            // unknown, but equal objects hash alike, so the key is found
+            // exactly when some stored value equals it. Its row decides each:
+            // a match is found, an unknown answer makes the lookup unknown.
+            // An equal key is never a match by itself (`same_object`).
+            if let Value::Host(handle) = key {
+                let mut unknown = false;
+                for candidate in table.order() {
+                    let stored = parse_collection_value(&candidate)?;
+                    match handle.equals(&stored, &mut object_methods::RuntimeNested::new(self))? {
+                        Some(true) => return Ok(Lookup::Found(stored)),
+                        Some(false) => {}
+                        None => unknown = true,
+                    }
+                }
+                return Ok(if unknown {
+                    Lookup::Unknown
+                } else {
+                    Lookup::Absent
+                });
+            }
             if !table.contains(&marker) {
                 return Ok(Lookup::Absent);
-            }
-            // A handle with an equal key is stored: the same object only
-            // where `equals` says so (the row's, or identity proved by
-            // `same_object`); an equal key is never a match by itself.
-            if let Value::Host(handle) = key {
-                let stored = parse_collection_value(&marker)?;
-                return Ok(
-                    match handle.equals(&stored, &mut object_methods::RuntimeNested::new(self))? {
-                        Some(true) => Lookup::Found(stored),
-                        Some(false) => Lookup::Absent,
-                        None => Lookup::Unknown,
-                    },
-                );
             }
             return Ok(Lookup::Found(key.clone()));
         };

@@ -350,7 +350,8 @@ pub enum HostKind {
     /// `Stream.builder()`'s `Streams.StreamBuilderImpl`: key the runtime's
     /// builder number (`stream_pipeline.rs`).
     StreamBuilder,
-    /// A chat component (`MutableComponent`): key its vanilla JSON, keys sorted
+    /// A chat component (`MutableComponent`): key a serial per allocation, then its vanilla
+    /// JSON, keys sorted
     /// (`host_component.rs`).
     Component,
 }
@@ -1375,8 +1376,8 @@ const KINDS: &[KindInfo] = &[
         kind: HostKind::Component,
         tag: "comp",
         class: ClassRule::FromKey(crate::host_component::component_class),
-        // Every factory call makes a new object.
-        canonical: never_canonical,
+        // A serial per allocation: one key, one object.
+        canonical: always_canonical,
         methods: &crate::host_component::COMPONENT_METHODS,
     },
 ];

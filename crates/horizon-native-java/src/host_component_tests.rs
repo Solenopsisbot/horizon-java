@@ -110,7 +110,10 @@ fn components_answer_as_java_25_or_count() {
         ),
         // `word/rest` text is still not told from a marker before #156 P17: counted, with
         // Java's answer.
-        ("spelledTypes", CountedAs("falsefalse,falsefalse,falsefalse,")),
+        (
+            "spelledTypes",
+            CountedAs("falsefalse,falsefalse,falsefalse,"),
+        ),
         // Class and Class surface, identity, equality of bare texts and keys, `indexOf`/`contains`,
         // `isAssignableFrom`/`isInstance`.
         (
@@ -132,9 +135,10 @@ fn components_answer_as_java_25_or_count() {
         ("appendInPlace", Counted),
         // An interface a Mixin could add to a game class is counted; Java's case is `M`.
         ("typeSwitch", CountedAs("M")),
-        // `hashCode` combines contents, style and siblings (Java `true1`, `132311680`); no
+        // A hash set's answers follow from `equals` alone (equal objects hash alike).
+        ("hashed", Exact("true1")),
+        // `hashCode` combines contents, style and siblings (Java `132311680`) and there is no
         // natural order (Java `CCE`): counted.
-        ("hashed", Counted),
         ("hash", Counted),
         ("sorted", Counted),
     ];
@@ -170,7 +174,8 @@ fn components_answer_as_java_25_or_count() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// One content is one key whatever order its JSON was built in; jar text in it is escaped.
+/// One content prints one JSON text whatever order it was built in, each allocation its own key;
+/// jar text in it is escaped.
 #[test]
 fn a_component_key_is_its_sorted_json() {
     let a = crate::host_component::component(&serde_json::json!({"text": "a", "bold": true}));
@@ -178,7 +183,15 @@ fn a_component_key_is_its_sorted_json() {
     let (Value::Host(a), Value::Host(b)) = (&a, &b) else {
         panic!("not handles")
     };
-    assert_eq!(a.key(), b.key());
+    assert_ne!(a.key(), b.key(), "two allocations");
+    assert_eq!(
+        crate::host_component::json_of(&Value::Host(a.clone())),
+        crate::host_component::json_of(&Value::Host(b.clone()))
+    );
+    let (Some((_, a)), Some((_, b))) = (a.key().split_once(':'), b.key().split_once(':')) else {
+        panic!("no serial")
+    };
+    assert_eq!(a, b, "one content, one JSON text");
     let tricky = crate::host_component::literal("\"},{\"text\":\"x");
     assert_eq!(
         crate::host_component::bare_literal(&tricky).as_deref(),

@@ -1227,8 +1227,7 @@ impl StdHost {
             if let Some(value) = text::text_call(&text, r, args) {
                 return Some(Ok(value));
             }
-            if text.starts_with("enum/") || self.client.frame.is_none()
-            {
+            if text.starts_with("enum/") || self.client.frame.is_none() {
                 return None;
             }
             return Some(refuse());

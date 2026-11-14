@@ -3,7 +3,7 @@
 //!
 //! A component's own style lives in the interpreter's component model
 //! (`facade_text.rs`): `withStyle(ChatFormatting)`, `withColor(int)` and
-//! `append` build vanilla's component JSON there, `component/json/<json>`.
+//! `append` build vanilla's component JSON there (`host_component.rs`).
 //! What that model leaves to the host is the style *objects*, and those are
 //! answered here: `Style.EMPTY` and every derived style is
 //! `client/style/<codes>`, its formatting kept as legacy codes (an RGB
@@ -193,21 +193,23 @@ pub(super) fn text_invoke(r: &MethodRef, args: &[Value]) -> Option<Value> {
 /// Instance calls on components, styles, text colours and formatting
 /// constants; `None` when the receiver is none of them or the member is not
 /// listed.
+/// Instance calls on a component (`host_component.rs`): `withStyle`/`setStyle`
+/// with a style object and `getStyle`. `withStyle(ChatFormatting)` and
+/// `withColor(int)` are the interpreter's (`facade_text.rs`).
+pub(super) fn component_call(component: &Value, r: &MethodRef, args: &[Value]) -> Option<Value> {
+    match (r.name.as_str(), return_desc(&r.descriptor)) {
+        ("withStyle" | "setStyle", _) => {
+            let codes = expect_ref(args.first()?)?.strip_prefix(STYLE)?;
+            styled(component, codes)
+        }
+        ("getStyle", _) => Some(marker(STYLE)),
+        _ => None,
+    }
+}
+
 pub(super) fn text_call(object: &str, r: &MethodRef, args: &[Value]) -> Option<Value> {
     let name = r.name.as_str();
     let returns = return_desc(&r.descriptor);
-    if object.starts_with("component/") {
-        // `withStyle(ChatFormatting)` and `withColor(int)` are the
-        // interpreter's (`facade_text.rs`); a style object is ours.
-        return match (name, returns) {
-            ("withStyle" | "setStyle", _) => {
-                let codes = expect_ref(args.first()?)?.strip_prefix(STYLE)?;
-                styled(&marker(object), codes)
-            }
-            ("getStyle", _) => Some(marker(STYLE)),
-            _ => None,
-        };
-    }
     if let Some(codes) = object.strip_prefix(STYLE) {
         let add = |extra: Option<String>| Some(marker(format!("{STYLE}{codes}{}", extra?)));
         return match (name, returns) {
@@ -303,14 +305,13 @@ mod tests {
             "withStyle",
             "(Lnet/minecraft/network/chat/Style;)Lnet/minecraft/network/chat/MutableComponent;",
         );
-        let styled = text_call("component/literal/Day 3", &with_style, &[bold]).unwrap();
-        let json: serde_json::Value = serde_json::from_str(
-            expect_ref(&styled)
-                .unwrap()
-                .strip_prefix("component/json/")
-                .unwrap(),
+        let styled = component_call(
+            &crate::runtime::host_component::literal("Day 3"),
+            &with_style,
+            &[bold],
         )
         .unwrap();
+        let json = crate::runtime::facade_text::to_json(&styled).unwrap();
         assert_eq!(
             json,
             serde_json::json!({"text": "Day 3", "color": "#33EBFF", "bold": true})

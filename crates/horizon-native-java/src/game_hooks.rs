@@ -775,12 +775,7 @@ impl<H: Host> GameHookHost<'_, H> {
             ("getName" | "getDisplayName", "()Lnet/minecraft/network/chat/Component;")
                 if entity =>
             {
-                fact(
-                    object
-                        .name
-                        .as_deref()
-                        .map(crate::host_component::literal),
-                )
+                fact(object.name.as_deref().map(crate::host_component::literal))
             }
             ("sendSystemMessage", "(Lnet/minecraft/network/chat/Component;)V") if player => {
                 let uuid = object.uuid.ok_or_else(|| unmodelled(marker, r))?;

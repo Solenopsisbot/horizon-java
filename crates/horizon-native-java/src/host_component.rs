@@ -4,10 +4,11 @@
 //! `component/json/<json>`, which a String could spell: `"component/literal/hi"` printed, sent and
 //! compared as a component.
 //!
-//! **Key.** A component is its vanilla component JSON (`facade_text.rs`: `text`/`translate`+`with`,
-//! style flags, `extra`), keyed by that JSON written with every object's keys sorted, so one
-//! content is one key whatever order it was built in (and whatever `serde_json` features the game's
-//! build unifies). JSON is read back with a JSON parser: jar text in it is escaped, never split.
+//! **Key.** `<serial>:<json>`: a serial minted once per allocation, process-wide, then the
+//! component's vanilla JSON (`facade_text.rs`: `text`/`translate`+`with`, style flags, `extra`)
+//! written with every object's keys sorted, so one content prints one way whatever order it was
+//! built in. The serial is the runtime's digits, so the key splits at its first `:`; the JSON is
+//! read back with a JSON parser: jar text in it is escaped, never split.
 //!
 //! **Class.** NeoForge's and vanilla 26.3's `MutableComponent` (`javap -p`): `final`, a
 //! package-private constructor, `implements Component` (`extends Message, FormattedText`). Every
@@ -16,15 +17,16 @@
 //! counted, a class other than its own and `Object` is a proved `false`.
 //!
 //! **Object methods** (`MutableComponent`, 26.3 bytecode): `equals` compares contents, style and
-//! siblings, so two components with one key are equal. Different keys are a known "not equal" only
-//! between two bare texts or two bare keys (the JSON's other forms, colours and translation
-//! arguments, may print one value two ways); otherwise counted. `hashCode` combines the contents',
+//! siblings. A component equals itself; two bare texts or two bare keys (no style, siblings or
+//! arguments) are equal exactly when their text is. Anything else is counted: the JSON prints some
+//! different values one way (a translation argument `1` and `"1"`) and some equal ones two ways. `hashCode` combines the contents',
 //! style's and siblings' hashes: counted. `toString` is the contents' text, then
 //! `[style=…, siblings=…]` when there is either: exact for a bare text (`literal{hi}`) or a bare key
 //! (`translation{key='k', args=[]}`), counted otherwise.
 //!
-//! **Identity.** Every factory call makes a new object (`Component.literal("a")` twice is two), so
-//! the kind is never canonical: `==` on two handles is counted unless one handle flows to both sides.
+//! **Identity.** Every factory call makes a new object (`Component.literal("a")` twice is two, and
+//! `copy` another), and each gets its own serial: one key is one object (canonical), so `==` is
+//! exact.
 //!
 //! **Departure D1 (kept from the marker model, not new):** `append` and `withStyle` change the
 //! receiver in place and return it (`MutableComponent.append` @1–12: `siblings.add(c); return
@@ -35,6 +37,8 @@
 //! stands: a run that changes a component is never reported exact. Without one, two keys are two
 //! contents and so two objects. A per-allocation model with the component's state in the
 //! collected resident heap (`heap.rs`) would reach Java's answers; it is left for a follow-up.
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value as Json};
 
@@ -75,9 +79,21 @@ fn canonical(json: &Json) -> String {
     }
 }
 
+static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
+
 /// A new component of `json` (a fresh object, as every factory makes).
 pub(crate) fn component(json: &Json) -> Value {
-    Value::Host(HostRef::new(HostKind::Component, canonical(json)))
+    let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
+    Value::Host(HostRef::new(
+        HostKind::Component,
+        format!("{serial}:{}", canonical(json)),
+    ))
+}
+
+/// The JSON of a component key (after the serial the runtime wrote).
+fn key_json(key: &str) -> Option<Json> {
+    let (_, json) = key.split_once(':')?;
+    serde_json::from_str(json).ok()
 }
 
 /// `Component.literal(text)`.
@@ -99,9 +115,7 @@ pub(crate) fn translatable(key: &str) -> Value {
 /// The JSON of a component handle, `None` for any other value.
 pub(crate) fn json_of(value: &Value) -> Option<Json> {
     match value {
-        Value::Host(handle) if handle.kind() == HostKind::Component => {
-            serde_json::from_str(handle.key()).ok()
-        }
+        Value::Host(handle) if handle.kind() == HostKind::Component => key_json(handle.key()),
         _ => None,
     }
 }
@@ -138,12 +152,14 @@ fn component_to_string(
     handle: &HostRef,
     _: &mut dyn Nested,
 ) -> Result<Option<String>, NativeError> {
-    let Some(json) = serde_json::from_str::<Json>(handle.key()).ok() else {
+    let Some(json) = key_json(handle.key()) else {
         return Ok(None);
     };
     Ok(bare(&json, "text")
         .map(|text| format!("literal{{{text}}}"))
-        .or_else(|| bare(&json, "translate").map(|key| format!("translation{{key='{key}', args=[]}}"))))
+        .or_else(|| {
+            bare(&json, "translate").map(|key| format!("translation{{key='{key}', args=[]}}"))
+        }))
 }
 
 fn unknown_hash(_: &HostRef, _: &mut dyn Nested) -> Result<Option<i32>, NativeError> {
@@ -165,14 +181,11 @@ fn component_equals(
     if handle == other {
         return Ok(Some(true));
     }
-    let (Ok(a), Ok(b)) = (
-        serde_json::from_str::<Json>(handle.key()),
-        serde_json::from_str::<Json>(other.key()),
-    ) else {
+    let (Some(a), Some(b)) = (key_json(handle.key()), key_json(other.key())) else {
         return Ok(None);
     };
     let simple = |json: &Json| bare(json, "text").is_some() || bare(json, "translate").is_some();
-    Ok((simple(&a) && simple(&b)).then_some(false))
+    Ok((simple(&a) && simple(&b)).then_some(a == b))
 }
 
 /// `instanceof` for an object of exactly `MutableComponent`.

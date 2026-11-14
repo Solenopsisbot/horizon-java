@@ -67,8 +67,8 @@ mod heap;
 mod hook_shapes;
 mod host_array;
 mod host_attachment;
-mod host_component;
 mod host_brigadier;
+mod host_component;
 mod host_config;
 mod host_entry;
 mod host_events;
@@ -33434,8 +33434,8 @@ mandatory = true
                 &[Value::Ref(Some("Hello".into()))],
             )
             .unwrap();
-        assert_eq!(
-            host.invoke_instance(
+        let appended = host
+            .invoke_instance(
                 &MethodRef {
                     owner: "net/minecraft/network/chat/MutableComponent".into(),
                     name: "append".into(),
@@ -33445,9 +33445,13 @@ mandatory = true
                 &literal,
                 &[Value::Ref(Some(" world".into()))],
             )
-            .unwrap(),
-            component_value("literal", "Hello world")
+            .unwrap();
+        assert_eq!(
+            host_component::bare_literal(&appended).as_deref(),
+            Some("Hello world")
         );
+        // Flattened and not the receiver changed in place (D1): counted.
+        assert_eq!(host.unknown_host_call_count(), 1);
         assert_eq!(
             host.invoke_instance(
                 &MethodRef {
