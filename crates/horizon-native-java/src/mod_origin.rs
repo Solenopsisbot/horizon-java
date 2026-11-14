@@ -24,19 +24,17 @@
 
 use super::*;
 
-/// The marker prefix one `ModOrigin` value carries.
-pub(super) const ORIGIN_PREFIX: &str = "mod-origin/";
 const ORIGIN_OWNER: &str = "net/fabricmc/loader/api/metadata/ModOrigin";
 const ORIGIN_KIND: &str = "net/fabricmc/loader/api/metadata/ModOrigin$Kind";
 
-/// The `ModOrigin` marker for the container `id` names: a `PATH` origin whose
-/// one root path is the virtual mod directory.
+/// The `ModOrigin` for the container `id` names: a `PATH` origin whose one
+/// root path is the virtual mod directory (`host_fabric_loader.rs`).
 pub(super) fn origin_value(id: &str) -> Value {
-    Value::Ref(Some(format!("{ORIGIN_PREFIX}path/{id}")))
+    crate::host_fabric_loader::origin("path", id)
 }
 
 /// The root path text the virtual mod directory gives a mod id.
-fn root_path(id: &str) -> String {
+pub(crate) fn root_path(id: &str) -> String {
     format!("/horizon/mods/{id}")
 }
 
@@ -45,15 +43,15 @@ fn root_path(id: &str) -> String {
 pub(super) fn invoke(
     r: &MethodRef,
     receiver: Option<&Value>,
-    args: &[Value],
+    _args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
-    let Some(marker) = receiver.and_then(expect_ref) else {
+    let Some(receiver) = receiver else {
         return Ok(None);
     };
     // The kind constant (`enum/<Kind>/PATH`): its name, ordinal and text.
     if r.owner == ORIGIN_KIND {
-        let Some(named) = marker
-            .strip_prefix("enum/")
+        let Some(named) = expect_ref(receiver)
+            .and_then(|marker| marker.strip_prefix("enum/"))
             .and_then(|rest| rest.strip_prefix(ORIGIN_KIND))
             .and_then(|rest| rest.strip_prefix('/'))
         else {
@@ -71,10 +69,10 @@ pub(super) fn invoke(
             _ => return Ok(None),
         }));
     }
-    let Some(rest) = marker.strip_prefix(ORIGIN_PREFIX) else {
+    let Some((kind, argument)) = crate::host_fabric_loader::origin_parts(receiver) else {
         return Ok(None);
     };
-    let (kind, argument) = rest.split_once('/').unwrap_or((rest, ""));
+    let (kind, argument) = (kind.as_str(), argument.as_str());
     let named = kind.to_ascii_uppercase();
     if r.owner != ORIGIN_OWNER {
         return Ok(None);
@@ -114,18 +112,8 @@ pub(super) fn invoke(
                     .map_or_else(String::new, |(_, sub)| sub.to_owned()),
             ))
         }
-        // `ModOriginImpl.toString`: a PATH origin joins its paths with the
-        // platform path separator, a NESTED one is `parent:sublocation`, and an
-        // unknown one is the word `unknown`.
-        ("toString", "()Ljava/lang/String;") => Value::Ref(Some(match kind {
-            "path" => root_path(argument),
-            "nested" => argument.replace('|', ":"),
-            _ => "unknown".into(),
-        })),
-        ("hashCode", "()I") => Value::Int(stable_hash(marker)),
-        ("equals", "(Ljava/lang/Object;)Z") => {
-            Value::Int(i32::from(args.first().map(expect_string) == Some(marker)))
-        }
+        // `toString` (`ModOriginImpl`'s), `hashCode` and `equals` (`Object`'s:
+        // an identity hash, counted, and identity) are the handle's row.
         _ => return Ok(None),
     }))
 }

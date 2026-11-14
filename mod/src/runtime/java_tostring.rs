@@ -34,7 +34,6 @@ pub(crate) fn owner(marker: &str) -> Option<String> {
         ("charset/", "java/nio/charset/Charset"),
         ("coding-error-action/", "java/nio/charset/CodingErrorAction"),
         ("locale/", "java/util/Locale"),
-        ("mod-origin/", "net/fabricmc/loader/api/metadata/ModOrigin"),
         ("unicode-block/", "java/lang/Character$UnicodeBlock"),
         // `key + "=" + value` (`Map.entry`, an entry from `entrySet()`).
         ("map-entry/", "java/util/Map$Entry"),
