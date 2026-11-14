@@ -117,7 +117,7 @@ fn run(fixture: &javac_fixture::Fixture, method: &str) -> (String, Vec<(String, 
 /// untouched. Every answer is Java 25's, with nothing counted.
 #[test]
 fn a_string_spelling_a_key_in_any_package_is_a_string() {
-    let fixture = javac_fixture::Fixture::build("string-keys", SOURCES);
+    let fixture = javac_fixture::Fixture::build_every_package("string-keys", SOURCES);
     for package in PACKAGES {
         let method = format!("{package}Exact");
         let (text, unknown) = run(&fixture, &method);
@@ -133,7 +133,7 @@ fn a_string_spelling_a_key_in_any_package_is_a_string() {
 /// writes the live object's (its `value` stays 42).
 #[test]
 fn a_string_spelling_a_key_never_reaches_the_object() {
-    let fixture = javac_fixture::Fixture::build("string-keys", SOURCES);
+    let fixture = javac_fixture::Fixture::build_every_package("string-keys", SOURCES);
     for package in PACKAGES {
         let method = format!("{package}Calls");
         let (text, unknown) = run(&fixture, &method);
@@ -153,7 +153,7 @@ fn a_string_spelling_a_key_never_reaches_the_object() {
 /// a jar method on a `String` throws Java 25's `IllegalArgumentException`.
 #[test]
 fn class_cast_of_a_string_answers_as_java_25() {
-    let fixture = javac_fixture::Fixture::build("string-keys", SOURCES);
+    let fixture = javac_fixture::Fixture::build_every_package("string-keys", SOURCES);
     let (text, unknown) = run(&fixture, "casts");
     assert_eq!(text, expected("casts"), "{unknown:?}");
     assert_eq!(unknown, Vec::<(String, usize)>::new());
