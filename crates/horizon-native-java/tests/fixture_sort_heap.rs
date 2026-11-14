@@ -70,7 +70,7 @@ public final class Probe {
         return streamed + "|" + list.get(0).tag() + list.get(1).tag() + list.get(2).tag() + "|" + direct + "|" + modes;
     }
     /// A string compared with a record: the JDK throws `ClassCastException`
-    /// from a body the host does not hold; counted.
+    /// from the record's bridge.
     public static String mixedNaturalOrder() {
         List<Object> mixed = new ArrayList<>(List.of("s", new Ver(1, "a")));
         try { mixed.sort(null); } catch (ClassCastException e) { return "cce"; }
@@ -745,26 +745,12 @@ fn random_sort_programs_match_jdk_25() {
 }
 
 /// A string compared with a record: the JDK throws `ClassCastException`
-/// from the record's bridge; the runtime counts the cast it cannot make.
+/// from the record's bridge, and so does the runtime: a `String` is never a
+/// jar record (#167), nothing counted.
 #[test]
-fn a_platform_value_compared_with_a_jar_object_is_counted() {
+fn a_platform_value_compared_with_a_jar_object_throws() {
     let fixture = fixture("a-platform-value-compared-with-a-jar-obj");
-    let cases: &[(&str, &[(&str, usize)])] = &[(
-        "mixedNaturalOrder",
-        &[(
-            "demo/Probe$Ver#<checkcast>(Ljava/lang/Object;)Ldemo/Probe$Ver;",
-            1,
-        )],
-    )];
-    for (method, expected) in cases {
-        let mut host = fixture.jar.seed_host(StdHost::new());
-        fixture.text_on(&mut host, method);
-        let counted = host.unknown_host_calls();
-        for (call, count) in *expected {
-            assert!(
-                counted.iter().any(|(c, n)| c == call && n == count),
-                "{method}: {counted:?}"
-            );
-        }
-    }
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    assert_eq!(fixture.text_on(&mut host, "mixedNaturalOrder"), "cce");
+    assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());
 }

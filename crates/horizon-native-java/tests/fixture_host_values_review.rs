@@ -24,6 +24,9 @@ use javac_fixture::Fixture;
 enum Outcome {
     Exact(&'static str),
     Counted,
+    // No case departs since #167 gave a jar class's cast message the JVM's
+    // module/loader clause; kept for the next named departure.
+    #[allow(dead_code)]
     Departs {
         native: &'static str,
         #[allow(dead_code)]
@@ -100,10 +103,10 @@ const CASES: &[(&str, &str, Outcome)] = &[
     (
         "Rv",
         "b5Jar",
-        Departs {
-            native: "class java.util.Optional cannot be cast to class demo.Rv$Node|class demo.Rv$Node cannot be cast to class java.util.Optional|class java.util.OptionalInt cannot be cast to class demo.Rv$Rec",
-            why: "a jar class's ClassCastException leaves out the JVM's module/loader clause (the loader is not known outside a JVM), checkcast.rs",
-        },
+        // The JVM's module/loader clause for a jar class (#167).
+        Exact(
+            "class java.util.Optional cannot be cast to class demo.Rv$Node (java.util.Optional is in module java.base of loader 'bootstrap'; demo.Rv$Node is in unnamed module of loader 'app')|class demo.Rv$Node cannot be cast to class java.util.Optional (demo.Rv$Node is in unnamed module of loader 'app'; java.util.Optional is in module java.base of loader 'bootstrap')|class java.util.OptionalInt cannot be cast to class demo.Rv$Rec (java.util.OptionalInt is in module java.base of loader 'bootstrap'; demo.Rv$Rec is in unnamed module of loader 'app')",
+        ),
     ),
     ("Rv", "b5Others", Counted),
     (
@@ -180,10 +183,9 @@ const CASES: &[(&str, &str, Outcome)] = &[
     (
         "Rv2",
         "c2",
-        Departs {
-            native: "class demo.Rv2$Node cannot be cast to class java.util.Optional",
-            why: "a jar class's ClassCastException leaves out the JVM's module/loader clause (the loader is not known outside a JVM), checkcast.rs",
-        },
+        Exact(
+            "class demo.Rv2$Node cannot be cast to class java.util.Optional (demo.Rv2$Node is in unnamed module of loader 'app'; java.util.Optional is in module java.base of loader 'bootstrap')",
+        ),
     ),
     // `List.of(1)` is an object of Java's class, `List12` (#156 P14c): the
     // cast throws Java 25's exact message (it was counted while the class
