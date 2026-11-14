@@ -282,11 +282,16 @@ mod tests {
         // A handle's key is the runtime's: its class is the split, even in a
         // package named like a host collection.
         assert_eq!(object_class(&handle("map/Foo#3".into())), Some("map/Foo"));
-        // A host collection marker a model kept stays that marker.
+        // A host collection marker a model kept stays that marker: a
+        // literal is never key-shaped (`unspell_key`), so its text reads back
+        // as the `Ref` it was.
         assert_eq!(
-            stored_value("list/r#3"),
-            Value::Ref(Some("list/r#3".into()))
+            stored_value("list/r\\#3"),
+            Value::Ref(Some("list/r\\#3".into()))
         );
+        // The key of an object of a jar class in a package named like a host
+        // collection, kept by a model, is that object again.
+        assert_eq!(stored_value("map/Thing#0"), handle("map/Thing#0".into()));
         // A `String` spelling a key is no object.
         assert_eq!(object_class(&Value::Ref(Some("demo/Foo#4".into()))), None);
         assert_eq!(instance_key(&Value::Ref(Some("demo/Foo#4".into()))), None);
