@@ -20675,10 +20675,18 @@ impl<H: Host> Runtime<'_, H> {
         if self.class(&name).is_none() && HostKind::owning_class(&name).is_some() {
             return None;
         }
-        let interfaces = self
-            .class(&name)
-            .map(ClassFile::interface_names)
-            .unwrap_or_default();
+        // A JDK class: Java 25's table (`jdk_closure.rs`); one outside it is
+        // left to the host, which counts it.
+        let interfaces = match (self.class(&name), crate::runtime::jdk_closure::class(&name)) {
+            (Some(file), _) => file.interface_names(),
+            (None, Some(row)) => row
+                .interfaces
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            (None, None) if crate::runtime::jdk_closure::in_jdk_package(&name) => return None,
+            (None, None) => Vec::new(),
+        };
         let values = interfaces
             .into_iter()
             .map(|interface| Value::Ref(Some(interface)))
@@ -21105,6 +21113,10 @@ impl<H: Host> Runtime<'_, H> {
                     None => self.host.unknown_operand_call(r).map(Some),
                 };
             }
+            // A JDK class outside the table: its supertypes are not known here.
+            if crate::runtime::jdk_closure::in_jdk_package(&source) {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
         }
         if let Some(value) = self.invoke_reflect_enum(r, receiver)? {
             return Ok(Some(value));
@@ -21135,6 +21147,16 @@ impl<H: Host> Runtime<'_, H> {
             // one is the direct superclass. Counted.
             if self.class(&class).is_none() && HostKind::owning_class(&class).is_some() {
                 return self.host.unknown_operand_call(r).map(Some);
+            }
+            // A JDK class: Java 25's table (an interface's is null); one
+            // outside it is counted, never a made-up `Object`.
+            if self.class(&class).is_none() {
+                if let Some(row) = crate::runtime::jdk_closure::class(&class) {
+                    return Ok(Some(Value::Ref(row.superclass.map(str::to_owned))));
+                }
+                if crate::runtime::jdk_closure::in_jdk_package(&class) {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
             }
             let parent = self
                 .class(&class)

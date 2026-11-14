@@ -17,6 +17,16 @@
 //!   collection's `toString` cannot run a jar object's (counted, as before).
 //! * `classSurface`: `getClass()` of a jar object and of a JDK object a jar
 //!   `new`ed, from the class the key names.
+//! * `jdkClasses`: JDK objects a jar `new`ed (`StringBuilder`,
+//!   `ThreadPoolExecutor`, `ArrayList`) against JDK types: `instanceof`,
+//!   casts, `Class.isInstance`/`isAssignableFrom`/`getSuperclass`/
+//!   `getInterfaces` and a type switch, from Java 25's table
+//!   (`jdk_closure.rs`).
+//! * `jarLabel`: a jar object against type-switch labels its held chain rules
+//!   out: an exact "no", nothing counted.
+//! * `outsideTable`: the same questions about a JDK class outside that table
+//!   (`Phaser`): each is counted, never a made-up `false` or `Object` (Java
+//!   25 printed `falsetruefalsefalseclass java.lang.Object0other`).
 //!
 //! `Woven.java` is the one case a plain JVM cannot run: an interface a Mixin
 //! adds to a jar class. Mixin merges it into the class, so a woven object is an
@@ -131,5 +141,51 @@ fn a_mixin_added_interface_holds_for_a_jar_object() {
         )
         .unwrap();
     assert_eq!(answer, Value::Ref(Some("truetruetrue".into())));
+    assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());
+}
+
+#[test]
+fn jdk_objects_answer_from_java_25s_table() {
+    let fixture = fixture();
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    assert_eq!(
+        fixture.text_on(&mut host, "jdkClasses"),
+        "truetruefalse,truetruetruefalse,truefalse,falsetruefalsetrue,truefalse,truefalsetrue,\
+         java.util.concurrent.AbstractExecutorService,java.lang.AbstractStringBuilder,true,,\
+         java.lang.Appendable java.io.Serializable java.lang.Comparable java.lang.CharSequence ,\
+         servicetextother"
+    );
+    assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());
+}
+
+#[test]
+fn a_jdk_class_outside_the_table_is_counted() {
+    let fixture = fixture();
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    fixture.text_on(&mut host, "outsideTable");
+    let counted: Vec<String> = host
+        .unknown_host_calls()
+        .into_iter()
+        .map(|(call, _)| call)
+        .collect();
+    for call in [
+        "java/lang/Runnable#<instanceof>(Ljava/lang/Object;)Z",
+        "java/lang/Runnable#<checkcast>(Ljava/lang/Object;)Ljava/lang/Runnable;",
+        "java/lang/Class#isAssignableFrom(Ljava/lang/Class;)Z",
+        "java/lang/Class#getSuperclass()Ljava/lang/Class;",
+        "java/lang/Class#getInterfaces()[Ljava/lang/Class;",
+    ] {
+        assert!(
+            counted.iter().any(|c| c == call),
+            "{call} not counted: {counted:?}"
+        );
+    }
+}
+
+#[test]
+fn a_type_switch_on_a_jar_object_rules_labels_out_exactly() {
+    let fixture = fixture();
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    assert_eq!(fixture.text_on(&mut host, "jarLabel"), "otherother");
     assert_eq!(host.unknown_host_calls(), Vec::<(String, usize)>::new());
 }

@@ -193,6 +193,19 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Err(class_cast_exception("java/lang/String", target));
         }
+        // An object of a JDK class (`new ThreadPoolExecutor(..)`) cast to a
+        // JDK type: Java 25's table decides; a class outside it is counted,
+        // never a silent pass.
+        if let Some(verdict) = self.jdk_object_instance_of(value, target) {
+            return match verdict {
+                Some(true) => Ok(()),
+                Some(false) => Err(class_cast_exception(
+                    crate::jar_object::object_class(value).unwrap_or_default(),
+                    target,
+                )),
+                None => self.count_cast(value, target),
+            };
+        }
         let Some(target_file) = self.class(target) else {
             // A JDK or game target: the runtime models those values by marker
             // and keeps its previous behaviour.
@@ -232,6 +245,22 @@ impl<H: Host> Runtime<'_, H> {
         self.host
             .invoke(&cast, std::slice::from_ref(value))
             .map(|_| ())
+    }
+
+    /// `value instanceof target` for an object of a JDK class the run does not
+    /// hold (`new StringBuilder()`, `new ThreadPoolExecutor(..)`) against a JDK
+    /// type, from Java 25's table (`jdk_closure.rs`): `Some(None)` when the
+    /// class is outside it (the caller counts), `None` for any other value or
+    /// target.
+    pub(crate) fn jdk_object_instance_of(
+        &self,
+        value: &Value,
+        target: &str,
+    ) -> Option<Option<bool>> {
+        let class = crate::jar_object::object_class(value)?;
+        let jdk = crate::jdk_closure::in_jdk_package;
+        (self.class(class).is_none() && self.class(target).is_none() && jdk(class) && jdk(target))
+            .then(|| host_ref::ClassHierarchy::is_instance(&host_ref::JdkHierarchy, class, target))
     }
 
     /// `checkcast target` (and `Class.cast`) where a host handle decides it:
@@ -367,6 +396,11 @@ impl<H: Host> Runtime<'_, H> {
         // Every array is a handle (`host_array.rs`): no other value is one.
         if target.starts_with('[') {
             return false;
+        }
+        // An object of a JDK class against a JDK type: a guess exactly when
+        // Java 25's table cannot tell (a class outside it).
+        if let Some(verdict) = self.jdk_object_instance_of(value, target) {
+            return verdict.is_none();
         }
         if ["java/", "javax/", "jdk/"]
             .iter()

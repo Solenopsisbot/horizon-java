@@ -10,8 +10,10 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeSet;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Phaser;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -282,5 +284,67 @@ public class Probe {
         + "," + (foo instanceof Foo)
         + (pool instanceof ThreadPoolExecutor)
         + (list instanceof List);
+  }
+
+  static String names(Class<?>[] classes) {
+    StringBuilder out = new StringBuilder();
+    for (Class<?> c : classes) {
+      out.append(c.getName()).append(' ');
+    }
+    return out.toString();
+  }
+
+  static String label(Object value, int unused) {
+    return switch (value) {
+      case Runnable runnable -> "runnable";
+      case ExecutorService service -> "service";
+      case CharSequence text -> "text";
+      default -> "other";
+    };
+  }
+
+  /** JDK objects a jar `new`ed, answered from Java 25's table (`jdk_closure.rs`). */
+  public static String jdkClasses() {
+    Object sb = new StringBuilder("x");
+    Object pool =
+        new ThreadPoolExecutor(1, 1, 0L, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+    Object list = new ArrayList<String>();
+    String out = ""
+        + (sb instanceof CharSequence) + (sb instanceof Comparable) + (sb instanceof List)
+        + "," + (pool instanceof ExecutorService) + (pool instanceof Executor)
+        + (pool instanceof AutoCloseable) + (pool instanceof Runnable)
+        + "," + (list instanceof java.util.RandomAccess) + (list instanceof java.util.Set)
+        + "," + throwsCce(() -> (CharSequence) sb) + throwsCce(() -> (List<?>) sb)
+        + throwsCce(() -> (ExecutorService) pool) + throwsCce(() -> (Runnable) pool)
+        + "," + ExecutorService.class.isInstance(pool) + Runnable.class.isInstance(pool)
+        + "," + ExecutorService.class.isAssignableFrom(ThreadPoolExecutor.class)
+        + Runnable.class.isAssignableFrom(ThreadPoolExecutor.class)
+        + CharSequence.class.isAssignableFrom(StringBuilder.class)
+        + "," + pool.getClass().getSuperclass().getName()
+        + "," + StringBuilder.class.getSuperclass().getName()
+        + "," + (ExecutorService.class.getSuperclass() == null)
+        + "," + names(ThreadPoolExecutor.class.getInterfaces())
+        + "," + names(StringBuilder.class.getInterfaces())
+        + "," + label(pool, 0) + label(sb, 0) + label(list, 0);
+    ((ExecutorService) pool).shutdown();
+    return out;
+  }
+
+  /**
+   * A JDK class outside Java 25's table (`Phaser`): the runtime does not know its supertypes, so
+   * each answer below is counted (the test checks the counts, not this text).
+   */
+  public static String outsideTable() {
+    Object phaser = new Phaser();
+    String out = "" + (phaser instanceof Runnable) + throwsCce(() -> (Runnable) phaser)
+        + Runnable.class.isInstance(phaser) + Runnable.class.isAssignableFrom(Phaser.class);
+    Class<?> parent = Phaser.class.getSuperclass();
+    Class<?>[] interfaces = Phaser.class.getInterfaces();
+    return out + parent + (interfaces == null ? "" : "" + interfaces.length) + label(phaser, 0);
+  }
+
+  /** A jar object against labels its held chain rules out: an exact "no". */
+  public static String jarLabel() {
+    return label(new Foo(1), 0) + label(new Bar(1), 0);
   }
 }

@@ -544,6 +544,14 @@ impl<H: Host> Runtime<'_, H> {
             Value::Host(handle) if !crate::jar_object::is_object_handle(handle) => {
                 self.handle_instance_of(handle, &wanted)?
             }
+            // An object of a JDK class against a JDK type: Java 25's table, or
+            // counted when the class is outside it (`checkcast.rs`).
+            Value::Host(handle)
+                if !self.value_instance_of(&value, &wanted)
+                    && self.jdk_object_instance_of(&value, &wanted).is_some() =>
+            {
+                self.handle_instance_of(handle, &wanted)?
+            }
             _ => {
                 !is_null
                     && !PRIMITIVE_CLASSES.contains(&wanted.as_str())
