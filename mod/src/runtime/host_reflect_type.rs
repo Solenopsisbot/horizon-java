@@ -346,11 +346,15 @@ fn type_equals(
         return Ok(None);
     };
     Ok(match other {
-        Value::Host(_) => match handle_node(other) {
-            Some(other) => nodes_equal(&node, &other),
-            // No other handle kind is a `java.lang.reflect.Type` shape.
-            None => Some(false),
-        },
+        Value::Host(_) => {
+            match handle_node(other).or_else(|| crate::runtime::host_gson_type::gson_node(other)) {
+                // A JDK node or Gson's canonical copy (`ParameterizedTypeImpl.equals`
+                // asks only for the shape's interface and its parts).
+                Some(other) => nodes_equal(&node, &other),
+                // No other handle kind is a `java.lang.reflect.Type` shape.
+                None => Some(false),
+            }
+        }
         // A jar's own `ParameterizedType` (Gson's, Guava's) answers through
         // its own methods: counted.
         other if jar_object(other) => None,

@@ -66,6 +66,10 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_array_class(r, receiver)? {
             return Ok(Some(value));
         }
+        // Gson's `TypeToken` and its canonical types (`gson_type_token.rs`).
+        if let Some(value) = self.invoke_gson_types(r, receiver, args)? {
+            return Ok(Some(value));
+        }
         if let Some(value) = self.invoke_guava(r, receiver, args)? {
             return Ok(Some(value));
         }

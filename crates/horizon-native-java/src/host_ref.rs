@@ -405,6 +405,12 @@ pub enum HostKind {
     /// Guava `TypeToken.of(..)`'s `SimpleTypeToken`: key `[serial, type]`
     /// (`host_type_token.rs`).
     TypeToken,
+    /// Gson's canonical `ParameterizedType`/`GenericArrayType`/`WildcardType`
+    /// (`GsonTypes$…Impl`): key `[id, node]` (`host_gson_type.rs`).
+    GsonType,
+    /// Gson's `TypeToken` from a factory (`get`, `getArray`): key
+    /// `[serial, canonical type]` (`host_gson_type.rs`).
+    GsonTypeToken,
 }
 
 /// How a kind's Java class follows from its key.
@@ -466,6 +472,12 @@ pub(crate) trait Nested {
     /// `host_component.rs`); `None` where this context cannot read the
     /// host's table (the caller counts).
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
+    /// The canonical type a jar's `new com.google.gson.reflect.TypeToken<T>() {}` holds
+    /// (`gson_type_token.rs`); `None` where this context cannot read jar objects' fields.
+    fn gson_token_type(&mut self, value: &Value) -> Option<Value> {
         let _ = value;
         None
     }
@@ -580,6 +592,14 @@ pub(crate) type InstanceOfClassFn = fn(&str, &str, &dyn ClassHierarchy) -> Optio
 
 /// The kinds with a [`ClassSide`], in `KINDS` order.
 const CLASS_SIDES: &[(HostKind, &ClassSide)] = &[
+    (
+        HostKind::GsonType,
+        &crate::host_gson_type::GSON_TYPE_CLASS_SIDE,
+    ),
+    (
+        HostKind::GsonTypeToken,
+        &crate::host_gson_type::TOKEN_CLASS_SIDE,
+    ),
     (HostKind::DfuPair, &crate::host_codec::PAIR_CLASS_SIDE),
     (
         HostKind::GameEvent,
@@ -1618,6 +1638,22 @@ const KINDS: &[KindInfo] = &[
         // A serial per allocation: one key, one object.
         canonical: always_canonical,
         methods: &crate::host_type_token::TOKEN_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GsonType,
+        tag: "gtyp",
+        class: ClassRule::FromKey(crate::host_gson_type::gson_type_class),
+        // One id per Gson object: one key, one object.
+        canonical: always_canonical,
+        methods: &crate::host_gson_type::GSON_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GsonTypeToken,
+        tag: "gtok",
+        class: ClassRule::FromKey(crate::host_gson_type::token_class),
+        // A serial per allocation.
+        canonical: always_canonical,
+        methods: &crate::host_gson_type::TOKEN_METHODS,
     },
 ];
 

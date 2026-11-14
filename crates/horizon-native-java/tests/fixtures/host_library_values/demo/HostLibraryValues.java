@@ -3,6 +3,8 @@ package demo;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.FormattingStyle;
 import com.google.gson.GsonBuilder;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.util.*;
 
 /**
@@ -89,5 +91,73 @@ public final class HostLibraryValues {
       case FormattingStyle f -> "F";
       default -> "d";
     };
+  }
+
+  // Gson's TypeToken and its canonical types (#156 P5b).
+  static class Outer<T> {
+    class Inner<U> {}
+  }
+
+  static List<String> ls;
+  static Map<String, List<Integer>> nested;
+  static Outer<String>.Inner<Integer> member;
+
+  static Type field(String name) {
+    try {
+      return HostLibraryValues.class.getDeclaredField(name).getGenericType();
+    } catch (NoSuchFieldException x) {
+      throw new IllegalStateException(x);
+    }
+  }
+
+  /** A subclass token: Gson's own canonical copy of the JDK node, equal both ways, not `==`. */
+  public static String gsonSubclass() {
+    com.google.gson.reflect.TypeToken<List<String>> t = new com.google.gson.reflect.TypeToken<List<String>>() {};
+    Type ty = t.getType();
+    Type jdk = field("ls");
+    return ty + "|" + (ty == t.getType()) + ty.equals(jdk) + jdk.equals(ty) + (ty == jdk) + "|"
+        + ty.getClass().getName() + "|" + (ty instanceof ParameterizedType) + (((ParameterizedType) ty).getRawType() == List.class)
+        + "|" + t.getRawType().getName() + "|" + t + "|"
+        + t.equals(new com.google.gson.reflect.TypeToken<List<String>>() {})
+        + t.equals(com.google.gson.reflect.TypeToken.get(String.class)) + t.equals("x");
+  }
+
+  /** `get`: a class stays itself, an array class becomes Gson's GenericArrayTypeImpl. */
+  public static String gsonGet() {
+    com.google.gson.reflect.TypeToken<String> s = com.google.gson.reflect.TypeToken.get(String.class);
+    com.google.gson.reflect.TypeToken<String[]> a = com.google.gson.reflect.TypeToken.get(String[].class);
+    return "" + (s.getType() == String.class) + (s.getRawType() == String.class) + s + "|" + a.getType().getClass().getName()
+        + "|" + a + "|" + a.getRawType().getName() + "|" + com.google.gson.reflect.TypeToken.get(int[].class) + "|"
+        + com.google.gson.reflect.TypeToken.getArray(String.class).equals(a) + a.equals(com.google.gson.reflect.TypeToken.get(String[].class))
+        + com.google.gson.reflect.TypeToken.get(field("ls")).equals(new com.google.gson.reflect.TypeToken<List<String>>() {});
+  }
+
+  /** Nested arguments are Gson objects too, the same one on every read. */
+  public static String gsonNested() {
+    Type ty = new com.google.gson.reflect.TypeToken<Map<String, List<Integer>>>() {}.getType();
+    ParameterizedType p = (ParameterizedType) ty;
+    Type arg = p.getActualTypeArguments()[1];
+    Type jdkArg = ((ParameterizedType) field("nested")).getActualTypeArguments()[1];
+    return ty + "|" + arg.getClass().getName() + "|" + (arg == p.getActualTypeArguments()[1]) + arg.equals(jdkArg)
+        + jdkArg.equals(arg) + "|" + (p.getActualTypeArguments()[0] == String.class) + p.getOwnerType() + "|"
+        + ty.equals(field("nested"));
+  }
+
+  /** Wildcards print as Gson prints them. */
+  public static String gsonWildcards() {
+    return new com.google.gson.reflect.TypeToken<List<? extends Number>>() {}.getType() + "|"
+        + new com.google.gson.reflect.TypeToken<List<?>>() {}.getType() + "|"
+        + new com.google.gson.reflect.TypeToken<List<? super Integer>>() {}.getType();
+  }
+
+  /** A member type prints without its owner's arguments (the JDK prints them). */
+  public static String gsonMember() {
+    Type ty = new com.google.gson.reflect.TypeToken<Outer<String>.Inner<Integer>>() {}.getType();
+    return ty + "|" + field("member") + "|" + ty.equals(field("member")) + field("member").equals(ty);
+  }
+
+  /** Hashes are classes' identity hashes: counted. */
+  public static String gsonHash() {
+    return "" + new com.google.gson.reflect.TypeToken<List<String>>() {}.hashCode();
   }
 }

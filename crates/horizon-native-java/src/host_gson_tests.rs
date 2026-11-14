@@ -125,6 +125,40 @@ fn styles_and_tokens_answer_as_java_25_or_count() {
         // class's identity hash for a token): counted.
         ("styleText", Counted),
         ("tokenHash", Counted),
+        // Gson's `TypeToken` (#156 P5b): its type is Gson's own canonical copy of the JDK node,
+        // equal both ways, not `==`, Gson's class and text.
+        (
+            "gsonSubclass",
+            Exact(
+                "java.util.List<java.lang.String>|truetruetruefalse|com.google.gson.internal.GsonTypes$ParameterizedTypeImpl|truetrue|java.util.List|java.util.List<java.lang.String>|truefalsefalse",
+            ),
+        ),
+        (
+            "gsonGet",
+            Exact(
+                "truetruejava.lang.String|com.google.gson.internal.GsonTypes$GenericArrayTypeImpl|java.lang.String[]|[Ljava.lang.String;|int[]|truetruetrue",
+            ),
+        ),
+        (
+            "gsonNested",
+            Exact(
+                "java.util.Map<java.lang.String, java.util.List<java.lang.Integer>>|com.google.gson.internal.GsonTypes$ParameterizedTypeImpl|truetruetrue|truenull|true",
+            ),
+        ),
+        (
+            "gsonWildcards",
+            Exact(
+                "java.util.List<? extends java.lang.Number>|java.util.List<?>|java.util.List<? super java.lang.Integer>",
+            ),
+        ),
+        (
+            "gsonMember",
+            Exact(
+                "demo.HostLibraryValues$Outer$Inner<java.lang.Integer>|demo.HostLibraryValues$Outer<java.lang.String>$Inner<java.lang.Integer>|truetrue",
+            ),
+        ),
+        // Classes' identity hashes: counted.
+        ("gsonHash", Counted),
         // An interface a library class could gain is counted; Java's case is `F`.
         ("typeSwitch", CountedAs("F")),
     ];
