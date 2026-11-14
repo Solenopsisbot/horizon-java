@@ -383,6 +383,13 @@ fn collectable(marker: &str) -> bool {
     if marker.starts_with(GAME_OBJECT_PREFIX) {
         return false;
     }
+    // `new` names an object `<class>#<n>` (`Runtime::new_object`): the
+    // common case, checked first.
+    if marker.rsplit_once('#').is_some_and(|(class, number)| {
+        !class.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+    }) {
+        return true;
+    }
     if let Some(rest) = marker
         .strip_prefix("iterator/")
         .or_else(|| marker.strip_prefix("resource-enumeration/"))
@@ -391,13 +398,7 @@ fn collectable(marker: &str) -> bool {
     }
     // A collection the host made (`<class>#neutral<n>`, `#immutable<n>`,
     // `#reversed<n>`, `jar_object::collection_key`): an object like any other.
-    if crate::runtime::jar_object::collection_key(marker).is_some() {
-        return true;
-    }
-    // `new` names an object `<class>#<n>` (`Runtime::new_object`).
-    marker.rsplit_once('#').is_some_and(|(class, number)| {
-        !class.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
-    })
+    crate::runtime::jar_object::collection_key(marker).is_some()
 }
 
 /// The text a pin keeps: a handle's key, or a reference's text that may name
@@ -540,10 +541,14 @@ struct Collectable {
 
 impl Collectable {
     fn new(heap: &JavaHeap, host: &StdHost) -> Self {
+        // Field keys are sorted, so an object's fields are adjacent: each
+        // receiver is checked once.
+        let mut previous = "";
         let markers: HashSet<String> = heap
             .fields
             .keys()
             .map(|key| field_receiver(key))
+            .filter(move |receiver| std::mem::replace(&mut previous, receiver) != *receiver)
             .chain(heap.arrays.keys().map(String::as_str))
             .chain(heap.string_builders.keys().map(String::as_str))
             .chain(heap.enum_constants.keys().map(String::as_str))
