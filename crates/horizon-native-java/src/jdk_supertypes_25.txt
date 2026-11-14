@@ -263,6 +263,9 @@ class	java/util/concurrent/atomic/AtomicLong	class	java/io/Serializable java/lan
 class	java/util/concurrent/atomic/AtomicLongArray	class	java/io/Serializable java/lang/Object	java/lang/Object	java/io/Serializable	toString
 class	java/util/concurrent/atomic/AtomicReference	class	java/io/Serializable java/lang/Object	java/lang/Object	java/io/Serializable	toString
 class	java/util/concurrent/atomic/AtomicReferenceArray	class	java/io/Serializable java/lang/Object	java/lang/Object	java/io/Serializable	toString
+class	java/util/concurrent/atomic/DoubleAccumulator	class	java/io/Serializable java/lang/Number java/lang/Object java/util/concurrent/atomic/Striped64	java/util/concurrent/atomic/Striped64	java/io/Serializable	toString
+class	java/util/concurrent/atomic/DoubleAdder	class	java/io/Serializable java/lang/Number java/lang/Object java/util/concurrent/atomic/Striped64	java/util/concurrent/atomic/Striped64	java/io/Serializable	toString
+class	java/util/concurrent/atomic/LongAccumulator	class	java/io/Serializable java/lang/Number java/lang/Object java/util/concurrent/atomic/Striped64	java/util/concurrent/atomic/Striped64	java/io/Serializable	toString
 class	java/util/concurrent/atomic/LongAdder	class	java/io/Serializable java/lang/Number java/lang/Object java/util/concurrent/atomic/Striped64	java/util/concurrent/atomic/Striped64	java/io/Serializable	toString
 class	java/util/concurrent/locks/AbstractQueuedSynchronizer	class	java/io/Serializable java/lang/Object java/util/concurrent/locks/AbstractOwnableSynchronizer	java/util/concurrent/locks/AbstractOwnableSynchronizer	java/io/Serializable	toString
 class	java/util/concurrent/locks/ReentrantLock	class	java/io/Serializable java/lang/Object java/util/concurrent/locks/Lock	java/lang/Object	java/util/concurrent/locks/Lock java/io/Serializable	toString
@@ -272,7 +275,9 @@ class	java/util/jar/JarFile	class	java/io/Closeable java/lang/AutoCloseable java
 class	java/util/jar/JarOutputStream	class	java/io/Closeable java/io/FilterOutputStream java/io/Flushable java/io/OutputStream java/lang/AutoCloseable java/lang/Object java/util/zip/DeflaterOutputStream java/util/zip/ZipConstants java/util/zip/ZipOutputStream	java/util/zip/ZipOutputStream		-
 class	java/util/jar/Manifest	class	java/lang/Cloneable java/lang/Object	java/lang/Object	java/lang/Cloneable	equals,hashCode
 class	java/util/logging/Logger	class	java/lang/Object	java/lang/Object		-
+class	java/util/zip/Adler32	class	java/lang/Object java/util/zip/Checksum	java/lang/Object	java/util/zip/Checksum	-
 class	java/util/zip/CRC32	class	java/lang/Object java/util/zip/Checksum	java/lang/Object	java/util/zip/Checksum	-
+class	java/util/zip/CRC32C	final	java/lang/Object java/util/zip/Checksum	java/lang/Object	java/util/zip/Checksum	-
 class	java/util/zip/Deflater	class	java/lang/AutoCloseable java/lang/Object	java/lang/Object	java/lang/AutoCloseable	-
 class	java/util/zip/GZIPInputStream	class	java/io/Closeable java/io/FilterInputStream java/io/InputStream java/lang/AutoCloseable java/lang/Object java/util/zip/InflaterInputStream	java/util/zip/InflaterInputStream		-
 class	java/util/zip/GZIPOutputStream	class	java/io/Closeable java/io/FilterOutputStream java/io/Flushable java/io/OutputStream java/lang/AutoCloseable java/lang/Object java/util/zip/DeflaterOutputStream	java/util/zip/DeflaterOutputStream		-

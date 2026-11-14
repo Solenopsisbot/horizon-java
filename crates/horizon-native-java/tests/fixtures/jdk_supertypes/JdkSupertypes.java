@@ -149,6 +149,11 @@ public final class JdkSupertypes {
     "java.util.concurrent.Callable", "java.lang.Iterable", "java.util.Collection",
     "java.util.List", "java.util.Set", "java.util.Map", "java.util.Queue", "java.util.Deque",
     "java.lang.Comparable", "java.lang.Appendable",
+    // The siblings of the classes above whose Object members the #217 fixture reads: the other
+    // adders and accumulators, and the other checksums.
+    "java.util.concurrent.atomic.DoubleAdder", "java.util.concurrent.atomic.LongAccumulator",
+    "java.util.concurrent.atomic.DoubleAccumulator", "java.util.zip.Adler32",
+    "java.util.zip.CRC32C",
   };
 
   static void walk(Class<?> c, Set<String> out) {
