@@ -261,3 +261,12 @@ fn arrays_primitives_and_interfaces_answer_as_java_25() {
         )
     );
 }
+
+/// #215's re-check: a plain subclass (`Bar extends Foo implements Shape`, no
+/// Signature attribute) answers `getGenericSuperclass()` and
+/// `getGenericInterfaces()` with the literals' own `Class` objects, so a map
+/// keyed by `Foo.class`/`Shape.class` finds them. Java 25: `fs,truetrue`.
+#[test]
+fn a_plain_subclass_generic_supertypes_are_the_literals() {
+    assert_eq!(review("genericSuper"), ("fs,truetrue".to_owned(), Vec::new()));
+}

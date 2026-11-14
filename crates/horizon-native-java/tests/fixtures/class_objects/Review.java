@@ -104,6 +104,20 @@ public class Review {
         + (caller() == Review.class);
   }
 
+  /**
+   * #215's re-check: a plain subclass has no Signature attribute, so its
+   * generic superclass and interfaces are its raw classes, the literals'
+   * own objects (a map keyed by {@code Foo.class} finds them).
+   */
+  public static String genericSuper() {
+    Map<Object, String> keyed = new HashMap<>();
+    keyed.put(Foo.class, "f");
+    keyed.put(Shape.class, "s");
+    java.lang.reflect.Type sup = Bar.class.getGenericSuperclass();
+    java.lang.reflect.Type itf = Bar.class.getGenericInterfaces()[0];
+    return keyed.get(sup) + keyed.get(itf) + "," + (sup == Foo.class) + (itf == Shape.class);
+  }
+
   static String thrown(Runnable run) {
     try {
       run.run();
